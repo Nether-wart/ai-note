@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {checkQuestionImage} from './invariants.js';
+import {checkQuestionImage} from './invariants.mjs';
 
 // ---------------------------------------------------------------- 夹具
 
