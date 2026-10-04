@@ -367,7 +367,9 @@ def check_coverage(blocks, ink, *, covered_min: float = COVERED_MIN,
       其中大到 `min_uncovered_px` 的带 `alarm=True`（这一条才是警报）。
     - `excluded`：被判为「整页草稿式手写」而排除的区域，带 `reason`。排除必须显式——
       启发式排除了什么，是这条判据可信度的一部分。
-    - `invalid`：读不出边界的墨迹区域或块（这一条对它们没查）。
+    - `invalid` / `invalid_blocks` / `not_objects`：读不出来的墨迹区域、读不出边界的块、
+      根本不是对象的项。三种分开，因为报出来的码不同（`page_ink_invalid` /
+      `block_without_box` / `block_not_an_object`）——错了对象的消息比没有消息更坏。
     """
     if ink is None:
         return {"checked": False, "ok": None, "complete": False,
