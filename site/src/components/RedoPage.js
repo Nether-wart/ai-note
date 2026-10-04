@@ -27,8 +27,12 @@ import {
  *
  * 判定**由服务做**（验收 4）：这一页只提交 `{channel:"screen", answer}`，然后把服务
  * 给的原话（`mastery.note`、`error.message`）显示出来，自己一个判定字段都不填。
+ *
+ * `indexData` 是**给不靠浏览器的渲染自检留的缝**（#8）：给它一份索引，这一页就不去
+ * fetch，于是能在不联网、不起服务的前提下被 `renderToStaticMarkup` 渲染出来。
+ * 没有它的时候行为与以前一模一样（运行时去服务取）。
  */
-export default function RedoPage({apiBase}) {
+export default function RedoPage({apiBase, indexData = null}) {
   const location = useLocation();
   const search = location?.search || '';
 
@@ -59,10 +63,13 @@ export default function RedoPage({apiBase}) {
   }, [apiBase]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    // 自检注入了索引就不去取：渲染自检要能在**不联网、不起服务**的前提下跑
+    if (!indexData) {
+      load();
+    }
+  }, [load, indexData]);
 
-  const data = indexState.phase === 'ready' ? indexState.envelope.data : null;
+  const data = indexData ?? (indexState.phase === 'ready' ? indexState.envelope.data : null);
   const header = useMemo(
     () => (data ? redoHeader(data, parsed.ok ? parsed.basis : null) : null),
     [data, parsed],
