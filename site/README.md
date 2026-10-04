@@ -72,17 +72,54 @@ AI_NOTE_API=http://127.0.0.1:8765 npm run start -- --port 3000 --host 127.0.0.1
 `src/lib/redo.js`，一行 React 都没有，所以能脱网、装不装依赖都能测：
 
 ```bash
-node --test site/tests/            # 26 条
+node --test site/tests/            # 65 条（#7 的 26 条 + #8 的判据 39 条）
 python3 -m pytest server/tests/test_site_redo_queue.py   # 12 条：用 node 探针跑同一份实现
 ```
 
 `site/tests/probe-redo.mjs` 就是给 pytest 用的探针：规则只有一份实现，不在 Python 里抄第二遍。
 
+## 界面不变量自检（#8，替代原型的 `--selftest`）
+
+```bash
+node site/tests/selftest.mjs       # 不靠浏览器、不读 data/、不写任何东西
+```
+
+它把「屏幕重做」的四条不变量钉成可跑的检查（**32 条**），判据吃的是**渲染出来的 HTML**：
+
+| 不变量 | 判据 | 坏输入会报什么 |
+|---|---|---|
+| 1 题面只能是**擦除手写后**的图 | `checkQuestionImage` | `question_image_not_clean`（原图／掩膜／整页照片）、`question_image_missing`、`question_image_kind_mismatch` |
+| 2 解答题（及未审核／无标准答案）不给作答框 | `checkAnswerBox` | `solution_has_answer_box`、`blocked_question_has_answer_box`、`answer_box_missing`、`choice_options_missing`、`answer_mode_mismatch` |
+| 3 队列越界／缺题必须**明确失败** | `checkQueue` | `fell_back_to_the_first_problem`、`queue_failure_not_rendered`、`queue_failure_wrong_code`、`other_problem_rendered`、`spurious_queue_error` |
+| 4 自检**不得有副作用** | `checkNoSideEffects` | `selftest_created_file` / `selftest_modified_file` / `selftest_deleted_file` |
+| （附带）提交之前页面上不许有答案 | `checkNoAnswerLeak` | `answer_text_leaked`、`answer_revealed_before_submit` |
+
+三个要点：
+
+1. **HTML 从哪来**：`site/tests/ssr.mjs` 用 React 的 `renderToStaticMarkup` 渲**真组件**
+   （`RedoQuestion` / `RedoPage` / `RedoHeader`）——不开浏览器、不联网、不起服务。
+   JSX 就地过 `@babel/preset-react`（**不落盘、不建缓存**）；`RedoPage` 的
+   `indexData` 是给它留的缝（有它就不 fetch），`@docusaurus/router` 用桩注入 `search`。
+2. **报警能力每一趟都验**：`fixtures/broken.js` 是三个**故意做坏的组件**（题面退回原图、
+   解答题给作答框、越界落到第一题），判据必须对它们响——判据哪天不响了，自检自己会失败。
+   理由是验收记录里那句：「一个从没失败过的检查，和一个从没通过过的检查，同样不可信」
+   （`docs/acceptance-log.md:253`）。
+3. **退出码分两种失败**：`1` = 界面不变量失败，`2` = 这次没跑完（**环境**缺依赖）。
+   环境故障从不冒充界面故障——原型把两者混成一句「界面自检未通过」，人被引去修界面。
+
+自检**不读 `data/`**（夹具在 `fixtures/problems.mjs` 里手写），所以它在 worktree 里天然跑得起来；
+它还会把自己**前后两张目录快照**比一遍，确认自己真的没写任何东西（原型跑一次
+`--selftest` 就生成了 `data/index.json`）。
+
+pytest 侧由 `server/tests/test_ui_invariants.py` 驱动同一批判据（探针
+`site/tests/probe-invariants.mjs`），并且在**真跑子进程的前后**拍快照验副作用。
+真渲染那几条要 `site/node_modules`；没装会 skip 并说明原因。
+
 ## U0 里**没有**的东西（别以为坏了）
 
 - 判定映射（#5/#6 的后端）、审核页、上传页——分别是 #5/#6/#9/#13 的事。
-- **前端还没有组件级测试**（没有 jsdom 之类的依赖）：界面不变量的验收方式
-  （自检不迁移的原型 → 重建的界面测试）归 #8；#7 的验收证据是**真实渲染**（见下）。
+- 组件级 DOM 测试（jsdom 之类）仍然没有，也**不需要**：界面不变量的验收方式
+  是上面那份自检（真渲染成 HTML → 判据）；#7 的验收证据是**真实渲染**（见下）。
 
 ## 验收证据怎么复现
 
