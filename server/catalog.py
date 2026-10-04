@@ -13,8 +13,6 @@ from pathlib import Path
 
 from .autojudge import REASONS
 from .errors import ApiError, bad_request, not_found
-from .inbox import Inbox
-from .publicbase import is_reachable_from_other_devices, public_base_warning
 from .records import problem_detail, problem_record
 from .warnings import index_warnings
 
@@ -92,42 +90,21 @@ def screen_redo_summary(records: list[dict]) -> dict:
 
 
 class Catalog:
-    """一个数据目录。**已有数据**只读：题卡／资产／索引都不写（ADR 0001）。
-
-    #13 之后唯一的写入是「往收件目录放一个新文件」，那也不是改已有数据。
-    """
+    """一个数据目录。它只读——v0 没有任何写路径。"""
 
     def __init__(self, data_dir: Path | str, clock=None,
-                 public_base: str | None = None, *, inbox: Path | str | None = None,
-                 bind_host: str | None = None) -> None:
+                 public_base: str | None = None) -> None:
         # 假时钟是一个**测试接缝**，不是内部 mock：冷却与排序的读数取决于「现在」，
         # 真等 7 天没法测（proto/test_mastery.py 是这份做法的先例）。
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # 对外可达地址：手机要打开的链接、页锚点用它拼。**不许从 --host 推导**
         # （ADR 0007 第 5 条记着这处债），所以它必须能被显式给、且必须被暴露出来。
         self.public_base = public_base or DEFAULT_PUBLIC_BASE
-        # 绑在哪个地址上，用来判断推导出来的对外地址手机是否真能打开。
-        self.bind_host = bind_host
         self.root = Path(data_dir)
         self.problems_dir = self.root / "problems"
         self.assets_dir = self.root / "assets"
         # 页文件的落点：`<data>/pages/<hash12>.json`，与整页照片同目录并列（D5、契约 §10.2）。
         self.pages_dir = self.root / "pages"
-        # 收件目录：录入的唯一入口（ADR 0007 第 4 条）。默认在数据目录下面，
-        # 与「往 data/inbox/ 放一个文件」这句话对得上。
-        self.inbox = Inbox(inbox if inbox is not None else self.root / "inbox")
-
-    def public_url(self, path: str) -> str:
-        """把服务内的路径拼成**手机真能打开**的绝对地址。
-
-        页锚点、上传页链接都走这一个地方——只有一份拼法，就不会有一处忘了用对外地址。
-        """
-        return self.public_base + (path if path.startswith("/") else "/" + path)
-
-    def config_warnings(self) -> list[dict]:
-        """服务配置本身的会喊的检查（不只是题卡）。"""
-        warning = public_base_warning(self.bind_host, self.public_base)
-        return [warning] if warning else []
 
     # ---------------------------------------------------------------- 索引
 
@@ -178,7 +155,7 @@ class Catalog:
         records.sort(key=lambda rec: rec["sort_key"])
 
         per_card = [w for rec in records for w in rec["warnings"]]
-        warnings += self.config_warnings() + index_warnings(records) + per_card
+        warnings += index_warnings(records) + per_card
 
         stats = {
             "problems": len(records),
@@ -195,18 +172,9 @@ class Catalog:
             "problems": records,
             "stats": stats,
             "screen_redo": screen_redo_summary(records),
-            # 服务自述：手机该用哪个地址（ADR 0007 第 5 条）、上传页链接、收件目录在哪，
-            # 以及「我没有改任何已有数据」（ADR 0007 第 6 条要的就是这句话）。
-            # `upload_url` 与将来的页锚点走同一个 `public_url`：只有一份拼法。
-            "server": {
-                "public_base": self.public_base,
-                "upload_url": self.public_url("/upload"),
-                "reachable_from_other_devices": is_reachable_from_other_devices(self.public_base),
-                "inbox": str(self.inbox.dir),
-                "read_only": True,
-                "read_only_note": "题卡／资产／索引只读；唯一的新写入是 POST /api/inbox "
-                                  "往收件目录放**新**文件（#13），它不改任何已有数据",
-            },
+            # 服务自述：手机该用哪个地址（ADR 0007 第 5 条），以及 v0 **不写**任何东西
+            # ——ADR 0007 第 6 条要的就是「我做了什么、我没做什么」。
+            "server": {"public_base": self.public_base, "read_only": True},
             "warnings": warnings,
         }
         return data, warnings, skipped
