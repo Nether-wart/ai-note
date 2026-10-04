@@ -188,3 +188,27 @@ def test_validate_threshold_is_reusable_at_config_load():
     assert J.validate_threshold(0.9) == 0.9
     with pytest.raises(ValueError, match="阈值"):
         J.validate_threshold(float("nan"))
+
+
+class NeverGreater(float):
+    """重载比较使其恒假：校验若被丢掉、比较仍拿原值，闸门就被绕开了。"""
+
+    def __gt__(self, other):
+        return False
+
+    def __lt__(self, other):
+        return False
+
+
+def test_validated_threshold_is_the_one_compared():
+    """校验的返回值必须真的参与比较——「校验过了」与「拿去比的值」要是同一个东西。
+
+    这是本模块存在的那个失败模式的另一种形态：闸门被绕开。校验通过后若继续拿调用方
+    给的原值去比，一个比较运算被重载的对象就能让 0.5 的置信度越过 0.9 的阈值判成「对」。
+    """
+    threshold = NeverGreater(0.9)
+    assert J.validate_threshold(threshold) == 0.9
+    assert J.judgment_from_output({"equivalent": True, "confidence": 0.5},
+                                  threshold=threshold).verdict == J.VERDICT_UNREADABLE
+    assert J.judgment_from_output({"equivalent": True, "confidence": 0.95},
+                                  threshold=threshold).verdict == J.VERDICT_CORRECT
