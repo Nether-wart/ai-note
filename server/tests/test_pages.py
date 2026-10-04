@@ -16,21 +16,20 @@ REAL_PAGE_HASH = "41c86bcfc007"
 REAL_PID = "p-20261004-41c86b"
 
 
-def real_shaped_card(pid: str = REAL_PID, page_hash: str = REAL_PAGE_HASH) -> dict:
+def real_shaped_card(pid: str = REAL_PID, page_hash: str = REAL_PAGE_HASH, **overrides) -> dict:
     """一张与 `data/problems/p-20261004-41c86b.json` 同形状的存量卡。
 
     回填所需的料全在 `source`：整页照片 + 单块边界（`bbox_norm`；`bbox_px` 读盘上原值）。
     """
-    return make_card(
-        pid,
-        **{
-            "created_at": "2026-10-04T14:31:35+08:00",
-            "source.page_image": f"data/pages/{page_hash}.png",
-            "source.bbox_norm": [0.02, 0.12, 0.76, 0.28],
-            "source.bbox_px": [3, 20, 541, 79],
-            "source.original_file": "2.png",
-        },
-    )
+    fields = {
+        "created_at": "2026-10-04T14:31:35+08:00",
+        "source.page_image": f"data/pages/{page_hash}.png",
+        "source.bbox_norm": [0.02, 0.12, 0.76, 0.28],
+        "source.bbox_px": [3, 20, 541, 79],
+        "source.original_file": "2.png",
+    }
+    fields.update(overrides)
+    return make_card(pid, **fields)
 
 
 def read_page(api, page_id: str = REAL_PAGE_HASH) -> dict:
@@ -94,3 +93,61 @@ def test_backfill_turns_a_legacy_card_into_a_page_file(api_for):
     assert block["bbox_px"] == [3, 20, 541, 79], "读盘上的原值，不用 bbox_norm 重算"
     assert block["card_id"] == REAL_PID
     assert block["keep"] is True, "卡片在库里就是在「收」——存量卡的去留不是待定"
+
+
+def test_backfill_is_idempotent_and_never_touches_the_card(api_for):
+    """简报点名的幂等三条：不产生第二份页文件、不覆盖已有绑定、不改动卡上别的字段。"""
+    api = api_for([real_shaped_card()])
+    card_file = api.catalog.problems_dir / f"{REAL_PID}.json"
+    card_bytes = card_file.read_bytes()
+
+    pages.backfill_pages(api.catalog, apply=True)
+    after_first = read_page(api)
+    second = pages.backfill_pages(api.catalog, apply=True)
+
+    assert [c["action"] for c in second["cards"]] == ["unchanged"]
+    assert second["summary"]["pages_changed"] == 0
+    assert read_page(api) == after_first, "第二次跑必须一个字节都不改"
+    assert sorted(p.name for p in api.catalog.pages_dir.glob("*.json")) == [f"{REAL_PAGE_HASH}.json"]
+    assert card_file.read_bytes() == card_bytes, "回填只读题卡，题卡上的字段一个都不许动"
+
+
+def test_dry_run_reports_but_writes_nothing(api_for):
+    """审计只报告、回填是另一条显式命令（spec-2 笔记 §I）：预演不落盘。"""
+    api = api_for([real_shaped_card()])
+
+    report = pages.backfill_pages(api.catalog, apply=False)
+
+    assert [c["action"] for c in report["cards"]] == ["created"]
+    assert report["summary"]["pages_changed"] == 1, "预演也要说清「本来会改什么」"
+    assert not list(api.catalog.pages_dir.glob("*.json")), "预演不许写盘"
+
+
+def test_two_cards_from_one_photo_share_a_page_and_get_distinct_blocks(api_for):
+    """一页多题：两块汇进同一个页文件，各块绑定各自的题卡 id（验收 3 的回填侧）。"""
+    api = api_for([
+        real_shaped_card("p-20261004-aaaaaa"),
+        real_shaped_card("p-20261004-bbbbbb", **{
+            "source.bbox_norm": [0.02, 0.45, 0.76, 0.18],
+            "source.bbox_px": [3, 84, 541, 119],
+        }),
+    ])
+
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    assert report["summary"]["pages"] == 1, "两张卡指向同一张照片 = 一页"
+    assert {b["card_id"] for b in read_page(api)["blocks"]} == {
+        "p-20261004-aaaaaa", "p-20261004-bbbbbb"}
+    assert len(list(api.catalog.pages_dir.glob("*.json"))) == 1
+
+
+def test_backfill_skips_a_card_without_a_whole_page_photo_without_crashing(api_for):
+    """没有整页照片可回填的卡要被**明确列出来**，不是安静地少一个页文件。"""
+    api = api_for([real_shaped_card(**{"source.page_image": None})])
+
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    (entry,) = report["cards"]
+    assert entry["action"] == "skipped"
+    assert "page_image" in entry["message"]
+    assert not list(api.catalog.pages_dir.glob("*.json"))
