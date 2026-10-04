@@ -83,6 +83,28 @@
   margin: 0;
 }
 
+/* hint 是提示、不是错误（契约 §2：级别只有服务能定，界面不自行升降级）。 */
+.ai-note-hint {
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+  border-left: 3px solid var(--ai-note-border);
+  padding-left: 0.6rem;
+  margin: 0;
+}
+
+/* 重做页的作答区：一张卡里纵向排，选项一行一个。 */
+.ai-note-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.ai-note-option {
+  display: block;
+  font-weight: normal;
+}
+
 .ai-note-card_placeholder {
   color: var(--ifm-color-emphasis-600);
 }

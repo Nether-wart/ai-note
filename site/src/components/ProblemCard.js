@@ -92,8 +92,12 @@ export default function ProblemCard({problem, apiBase}) {
       </div>
 
       {(problem.warnings || []).map((warning) => (
-        <p className="ai-note-warn" key={`${problem.id}-${warning.code}`}>
-          ⚠ {warning.message}
+        <p
+          className={warning.level === 'hint' ? 'ai-note-hint' : 'ai-note-warn'}
+          key={`${problem.id}-${warning.code}`}
+          data-warning-code={warning.code}
+          data-level={warning.level || 'warning'}>
+          {warning.level === 'hint' ? '提示：' : '⚠ '} {warning.message}
           <span className="ai-note-meta">（{warning.code}／{warning.level || 'warning'}）</span>
         </p>
       ))}

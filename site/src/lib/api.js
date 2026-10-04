@@ -22,13 +22,19 @@ export class ApiError extends Error {
   }
 }
 
-export async function requestJson(apiBase, path) {
+export async function requestJson(apiBase, path, {method = 'GET', body = null} = {}) {
   const base = String(apiBase || '').replace(/\/+$/, '');
   const url = `${base}${path}`;
 
+  const init = {method, headers: {Accept: 'application/json'}};
+  if (body !== null) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+
   let response;
   try {
-    response = await fetch(url, {headers: {Accept: 'application/json'}});
+    response = await fetch(url, init);
   } catch (cause) {
     // 连不上服务是最常见的一种失败，它必须说清「该去起什么」。
     throw new ApiError(
@@ -70,6 +76,17 @@ export const fetchIndex = (apiBase) => requestJson(apiBase, '/api/index');
 
 export const fetchProblem = (apiBase, pid) =>
   requestJson(apiBase, `/api/problem/${encodeURIComponent(pid)}`);
+
+/**
+ * 写端点：提交一次屏幕重做的作答（契约 §10.1，归属 #5）。
+ *
+ * 界面**只提交「我答的是什么」**（`redo.screenPayload`）：`verdict`／`source`／
+ * `confidence`／`provider`／`model` 一个都不许由客户端给——判定是服务的事。
+ * 拒绝（422 不能自动判定／502 模型没问成）也走同一个信封，抛 `ApiError`，
+ * 调用方照 `error.message` 原话显示。
+ */
+export const postAttempt = (apiBase, pid, payload) =>
+  requestJson(apiBase, `/api/attempt/${encodeURIComponent(pid)}`, {method: 'POST', body: payload});
 
 /** 图片 URL。**只喂契约里给的 `images.*`**，界面不许自己拼路径。 */
 export const assetUrl = (apiBase, path) =>
