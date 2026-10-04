@@ -15,7 +15,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {checkAnswerBox, checkQueue, checkQuestionImage} from './invariants.mjs';
+import {
+  checkAnswerBox,
+  checkNoSideEffects,
+  checkQueue,
+  checkQuestionImage,
+} from './invariants.mjs';
 
 // ---------------------------------------------------------------- 夹具
 
@@ -239,4 +244,48 @@ test('不变量 3 坏输入：渲染了一个既不是第 i 道、也不是第�
   const html = renderedCard('p-c');
   const violations = checkQueue({html, search: '?queue=p-a,p-b&i=1', problems: QUEUE_PROBLEMS});
   assert.ok(codes(violations).includes('other_problem_rendered'), JSON.stringify(violations));
+});
+
+// ------------------------------- 不变量 4：自检不得有副作用（只读检查不是写操作）
+
+const snapshot = (files) => ({files});
+
+const FIXTURE_TREE = snapshot({
+  'data/problems/p-a.json': {size: 100, mtime_ns: 111},
+  'data/index.json': {size: 50, mtime_ns: 222},
+});
+
+test('不变量 4 好输入：跑前跑后一模一样 → 一条都不报', () => {
+  assert.deepEqual(codes(checkNoSideEffects({before: FIXTURE_TREE, after: FIXTURE_TREE})), []);
+});
+
+test('不变量 4 坏输入：自检生成了派生索引 data/index.json → 必须报警（原型 --selftest 的真事）', () => {
+  const after = snapshot({...FIXTURE_TREE.files, 'data/index.json': undefined});
+  delete after.files['data/index.json'];
+  after.files['data/index.json'] = {size: 50, mtime_ns: 333};
+  const violations = checkNoSideEffects({
+    before: snapshot({'data/problems/p-a.json': {size: 100, mtime_ns: 111}}),
+    after,
+  });
+  assert.deepEqual(codes(violations), ['selftest_created_file']);
+  assert.equal(violations[0].details.path, 'data/index.json');
+});
+
+test('不变量 4 坏输入：自检改了数据文件 → 必须报警', () => {
+  const after = snapshot({...FIXTURE_TREE.files, 'data/problems/p-a.json': {size: 100, mtime_ns: 999}});
+  const violations = checkNoSideEffects({before: FIXTURE_TREE, after});
+  assert.deepEqual(codes(violations), ['selftest_modified_file']);
+  assert.equal(violations[0].details.path, 'data/problems/p-a.json');
+});
+
+test('不变量 4 坏输入：自检删了东西 → 必须报警', () => {
+  const after = snapshot({'data/index.json': {size: 50, mtime_ns: 222}});
+  const violations = checkNoSideEffects({before: FIXTURE_TREE, after});
+  assert.deepEqual(codes(violations), ['selftest_deleted_file']);
+  assert.equal(violations[0].details.path, 'data/problems/p-a.json');
+});
+
+test('不变量 4 坏输入：建了个缓存目录（哪怕不在数据目录里）→ 也报警', () => {
+  const after = snapshot({...FIXTURE_TREE.files, '.redo-cache/x.json': {size: 1, mtime_ns: 1}});
+  assert.deepEqual(codes(checkNoSideEffects({before: FIXTURE_TREE, after})), ['selftest_created_file']);
 });
