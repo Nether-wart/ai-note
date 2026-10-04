@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -481,3 +482,55 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
         },
         "warnings": warnings,
     }
+
+
+def allocate_card_id(taken, *, at, seed: str) -> str:
+    """块的身份 → 一个**还没被占用**的题卡 id（spec #2：id 在首次入库时分配）。
+
+    形状沿用存量习惯 `p-<YYYYMMDD>-<6hex>`（真实数据：`p-20261004-41c86b`）。
+    日期是**入库日**，不是拍照日、不是凭证照片的时间——spec-2 笔记 §C 专门点了这个坑。
+
+    候选由 `seed` 决定（调用方给块的身份，如 `<页 id>#<块 id>`），**唯一性由 `taken`
+    保证**：候选在 `taken` 里就换下一个。所以 id 是「块」的函数，不再是「一张照片」
+    的函数——一页多题因此不会互撞（#9 验收 3）。
+    """
+    day = at.strftime("%Y%m%d")
+    attempt = 0
+    while True:
+        digest = hashlib.sha1(f"{seed}|{attempt}".encode("utf-8")).hexdigest()
+        pid = f"p-{day}-{digest[:6]}"
+        if pid not in taken:
+            return pid
+        attempt += 1
+
+
+def assign_card_ids(page: dict, *, taken, at) -> dict:
+    """给页里**还没有绑定**的块首次分配题卡 id（spec #2「入库」动作的分配那一半）。
+
+    返回 `{"page": 新页, "assigned": [...], "kept": [...]}`：
+
+    - `assigned` = 这一次分配出去的（每块一个，互不相同，也不与 `taken` 里已有的撞）；
+    - `kept` = 本来就有绑定的块——**不重复生成**（#15 的入库幂等靠这一条，
+      也是「重切不会把已审核、已重做过的卡片改名」在数据上的落点）。
+
+    不改动传进来的 `page`、不写盘：分配是「决定」，写回页文件是调用方的事。
+    #15 拿到这里的 `assigned` 去建卡，然后 `save_page`。
+    """
+    seen = {str(t) for t in taken or []}
+    blocks: list[dict] = []
+    assigned: list[dict] = []
+    kept: list[dict] = []
+    for index, block in enumerate(page.get("blocks") or [], start=1):
+        block = dict(block) if isinstance(block, dict) else {}
+        existing = block.get("card_id")
+        if existing:
+            kept.append({"block_id": block.get("id"), "card_id": existing})
+        else:
+            block_id = block.get("id") or f"b{index}"
+            pid = allocate_card_id(seen, at=at, seed=f"{page.get('id')}#{block_id}")
+            seen.add(pid)
+            block["card_id"] = pid
+            block.setdefault("id", block_id)
+            assigned.append({"block_id": block_id, "card_id": pid})
+        blocks.append(block)
+    return {"page": {**page, "blocks": blocks}, "assigned": assigned, "kept": kept}

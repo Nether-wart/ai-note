@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from conftest import make_card
 from server import pages
@@ -253,3 +254,83 @@ def test_rebind_tolerates_a_block_without_a_usable_box():
 
     assert report["matches"][0]["matched_from"] is None
     assert any(w["code"] == "block_without_box" for w in report["warnings"])
+
+
+# ------------------------------- 验收 3：一页多块时各块的题卡 id 互不相同
+
+
+def unbound_page(block_ids=("b1", "b2", "b3"), page_id: str = REAL_PAGE_HASH) -> dict:
+    return {
+        "version": 1,
+        "id": page_id,
+        "image": f"{page_id}.png",
+        "created_at": "2026-10-04T14:31:35+08:00",
+        "origin": {"original_file": "2.png", "sheet": None, "page_number": None},
+        "blocks": [blk(i, [0.0, 0.1 * n, 1.0, 0.08]) for n, i in enumerate(block_ids)],
+    }
+
+
+def test_three_blocks_on_one_page_get_three_distinct_card_ids():
+    """验收 3：一页多块时，各块的题卡 id 互不相同（照片哈希不再等于题卡 id）。"""
+    page = unbound_page()
+    at = datetime(2026, 10, 4, 14, 31, 35, tzinfo=timezone.utc)
+
+    result = pages.assign_card_ids(page, taken=[], at=at)
+
+    ids = [b["card_id"] for b in result["page"]["blocks"]]
+    assert len(ids) == 3
+    assert len(set(ids)) == 3, "互不相同"
+    assert all(pid.startswith("p-20261004-") for pid in ids), "日期是入库日"
+    assert [a["block_id"] for a in result["assigned"]] == ["b1", "b2", "b3"]
+    assert result["kept"] == []
+
+
+def test_assign_card_ids_never_reuses_an_id_that_is_already_taken():
+    """id 的唯一性由 `taken` 保证：撞上盘上已有的卡就换下一个候选。"""
+    at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    seed = f"{REAL_PAGE_HASH}#b1"
+
+    first = pages.allocate_card_id([], at=at, seed=seed)
+    second = pages.allocate_card_id([first], at=at, seed=seed)
+
+    assert first != second
+    assert len(first) == len("p-20261004-41c86b"), "形状沿用存量习惯"
+
+
+def test_assign_card_ids_leaves_an_already_bound_block_alone():
+    """已经入库过的块**不重复生成**——#15 的入库幂等靠这一条。"""
+    page = unbound_page(("b1", "b2"))
+    page["blocks"][0]["card_id"] = "p-20261004-41c86b"
+    at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+
+    result = pages.assign_card_ids(page, taken=["p-20261004-41c86b"], at=at)
+
+    assert [b["card_id"] for b in result["page"]["blocks"]][0] == "p-20261004-41c86b"
+    assert [k["card_id"] for k in result["kept"]] == ["p-20261004-41c86b"]
+    assert len(result["assigned"]) == 1
+    # 纯函数：不写盘，也不改传进来的那一份
+    assert page["blocks"][1]["card_id"] is None
+
+
+def test_assign_card_ids_is_idempotent_when_run_twice():
+    """跑两次不换名：第二次看到的块都已经有绑定了（重切不该给卡改名）。"""
+    at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+
+    once = pages.assign_card_ids(unbound_page(), taken=[], at=at)
+    twice = pages.assign_card_ids(once["page"], taken=[], at=at)
+
+    assert [b["card_id"] for b in twice["page"]["blocks"]] == \
+           [b["card_id"] for b in once["page"]["blocks"]]
+    assert twice["assigned"] == []
+    assert len(twice["kept"]) == 3
+
+
+def test_ids_allocated_on_one_page_do_not_collide_with_other_pages():
+    """两张页各自分配，互不撞——id 是「块」的函数，不是「照片」的函数。"""
+    at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+
+    a = pages.assign_card_ids(unbound_page(page_id="41c86bcfc007"), taken=[], at=at)
+    b = pages.assign_card_ids(unbound_page(page_id="ef7c47156392"), taken=[], at=at)
+
+    ids = [x["card_id"] for x in a["page"]["blocks"] + b["page"]["blocks"]]
+    assert len(set(ids)) == len(ids) == 6
