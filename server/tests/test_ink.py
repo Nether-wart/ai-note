@@ -67,6 +67,20 @@ def test_write_then_read_png_returns_the_same_pixels(tmp_path):
     assert back.pixels == [RED, WHITE, BLACK, WHITE, RED, BLACK]
 
 
+def test_encode_png_is_the_one_encoder(tmp_path):
+    """PNG 的写出只有一处：`write_png` 就是 `encode_png` 落盘（#12 复用它重编码缩放后的图）。
+
+    两处各写一份编码器，迟早会写出两种图（滤波器、位深、色彩类型各一套），
+    而下游（模型、擦除、统计）读的是同一批字节。
+    """
+    img = ink.InkImage(2, 1, [RED, BLACK])
+    path = tmp_path / "tiny.png"
+    ink.write_png(path, img)
+
+    assert path.read_bytes() == ink.encode_png(img)
+    assert ink.read_png(path).pixels == [RED, BLACK]
+
+
 def test_reading_something_that_is_not_a_png_says_so(tmp_path):
     """读不懂必须喊出来。静默当成空图会把「没红笔」和「读不了」混成一个答案。"""
     path = tmp_path / "not-a-png.png"

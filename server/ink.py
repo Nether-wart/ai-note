@@ -244,7 +244,17 @@ def _to_rgb(rows: list[bytearray], channels: int) -> list[tuple[int, int, int]]:
 def write_png(path: str | Path, image: InkImage) -> None:
     """把 `InkImage` 写成一个 PNG（8 位 RGB、非交错）。
 
-    生产代码不用它——它是给**合成图夹具**用的，这样测试造图不必引入图片库。
+    生产代码走 `encode_png` 那一半（#12 的抽取角色要把块图发给模型）；
+    `write_png` 是给**合成图夹具**用的，这样测试造图不必引入图片库。
+    """
+    Path(path).write_bytes(encode_png(image))
+
+
+def encode_png(image: InkImage) -> bytes:
+    """`InkImage` → PNG 字节（8 位 RGB、非交错、滤波器 0）。
+
+    PNG 的写出只有这一处：夹具落盘（`write_png`）与发给模型的数据 URL
+    （#12，缩放后要重新编码）都从这里走——两处各写一份编码器迟早写出两种图。
     """
     if len(image.pixels) != image.width * image.height:
         raise ValueError(
@@ -258,13 +268,12 @@ def write_png(path: str | Path, image: InkImage) -> None:
             r, g, b = image.pixels[y * image.width + x]
             raw += bytes((r, g, b))
     ihdr = struct.pack(">IIBBBBB", image.width, image.height, 8, 2, 0, 0, 0)
-    blob = (
+    return (
         _PNG_MAGIC
         + _chunk(b"IHDR", ihdr)
         + _chunk(b"IDAT", zlib.compress(bytes(raw), 6))
         + _chunk(b"IEND", b"")
     )
-    Path(path).write_bytes(blob)
 
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
