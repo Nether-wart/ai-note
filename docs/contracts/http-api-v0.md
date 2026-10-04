@@ -5,6 +5,9 @@
 > 实现落在 `server/`，界面落在 `site/`。将来换语言重写实现、或把服务塞进 Tauri 进程，
 > 换的是实现，不换这份契约。
 >
+> **基线**：`v0 基线 md5 5cdaf75`（= commit `765cd31`）。此后每次改这份文件，
+> 都在 §11 的「变更记录」里记一笔（改了什么、为什么），别让契约悄悄漂。
+>
 > 覆盖工单：[#3 后端骨架与契约 v0](https://github.com/nether-wart/ai-note/issues/3)（本文件）
 > 服务、被服务、被解阻的工单：[#5](https://github.com/nether-wart/ai-note/issues/5)
 > [#7](https://github.com/nether-wart/ai-note/issues/7)
@@ -20,7 +23,7 @@
 | 有 | 屏幕重做的硬闸门读数（有擦除图 **且** 可自动判定）与「另有 N/M 道进不来」的两个显式数字（§6.1） |
 | 有 | 「这道题能不能走自动判定」的**唯一一份**实现（三拒绝理由，见 §6）——#5 直接复用，不许另写 |
 | 无 | 任何写端点。`POST /api/attempt/<pid>` 的形状在 §10.1 预留，实现归 #5 |
-| 无 | 页面渲染。服务不出 HTML（ADR 0007 第 2 条），只出 JSON 与静态图片 |
+| 无 | **渲染页面**。ADR 0007 第 2 条把两件事分开说：后端**不负责渲染**（不做模板、不管界面状态），但它**托管静态资源**（手机上传页、图片、前端产物）——**托管文件不是渲染**。所以 v0 出 JSON 与静态图片字节，将来还会托管那个单文件的手机上传页（§10.3） |
 | 无 | 索引落盘。v0 每次请求**现算**（索引是派生数据，ADR 0001）；写盘归写端点 |
 
 术语一律照 `CONTEXT.md`（**题卡**、**掌握**、**冷却**、**判定**、**看不清**、**默认打印清单**、
@@ -35,7 +38,12 @@
 - 启动：`python3 -m server.app --data <dir> --host 127.0.0.1 --port 8765`。
 - **对外地址**（手机要打开的链接、页锚点）必须显式可配，不许从 `--host` 推导
   （ADR 0007 第 5 条记的是一处已查到的债务：绑 `0.0.0.0` 时推导出来的地址手机访问不到）。
-  v0 用不到，但配置项先摆在 `--public-base`，默认等于基址。使用它的端点在 #13。
+  参数是 `--public-base`（或 `AI_NOTE_PUBLIC_BASE`），默认按**绑定之后**的 `host:port` 推导
+  （`--port 0` 时端口是系统给的，先算会算错）。
+  **它必须有暴露面**，否则界面拼不出手机能打开的链接：读在 `data.server.public_base`（§3）。
+- **收件目录**（CONTEXT「收件目录」）：`--inbox`（或 `AI_NOTE_INBOX`），默认 `data/inbox/`。
+  「往这里放一个文件」是录入的唯一入口（ADR 0007 第 4 条）。v0 只把它报出来、**不监视**
+  ——目录监视与上传页归 #13。
 
 ### 时间与 id
 
@@ -117,7 +125,19 @@
 }
 ```
 
-`message` 是**给人看的完整句子**，不是错误码的复述——界面照原话显示，不改写、不吞掉。
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `code` | str | 稳定标识，界面按它决定怎么显示，测试按它断言 |
+| `message` | str | **给人看的完整句子**，不是错误码的复述——界面照原话显示，不改写、不吞掉 |
+| `id` | str \| null | 属于哪张卡；索引级的为 `null` |
+| `level` | `"warning"` \| `"hint"` | 严重度。`"warning"`（默认）= 这里有东西不对，要看；`"hint"` = 提示级（例如「旧卡缺页绑定」，旧数据不该因为新结构变成脏数据）。**级别只有服务能定**，界面不许自行降级 |
+
+**`skipped` 与 `warnings` 的分工（不要混）**：
+
+- `warnings` = **我建成了这条记录，但有些事不对劲**（脏字段、串题、缺图）。
+- `skipped` = **我根本没建出这条记录**（文件读不了、不是 JSON 对象、缺必需字段）。
+  它比 `warnings` 重：少一张卡不能只靠一句警告带过。两条都有码表（§8）。
+
 `code` 是给机器看的，允许新增，不允许悄悄改语义。
 
 ## 3. `GET /api/index` —— 读索引
@@ -143,16 +163,29 @@
     "auto_judge_ineligible": 1
   },
   "screen_redo": {
-    "basis": "in_default_list",
-    "ready": 0,
-    "blocked_total": 0,
-    "not_auto_judgeable": { "count": 0, "by_reason": [] },
-    "no_clean_image": {
-      "count": 0,
-      "ids": [],
-      "message": "另有 0 道因缺少擦除手写后的题面图不能进屏幕重做"
+    "default_basis": "in_default_list",
+    "bases": {
+      "in_default_list": {
+        "basis_text": "默认打印清单（未毕业且已脱离冷却）",
+        "ready": 0,
+        "blocked_total": 0,
+        "not_auto_judgeable": { "count": 0, "by_reason": [] },
+        "no_clean_image": {
+          "count": 0,
+          "ids": [],
+          "message": "另有 0 道因缺少擦除手写后的题面图不能进屏幕重做"
+        }
+      },
+      "including_cooling": {
+        "basis_text": "未毕业（含冷却中，「显示冷却中的题」勾上时）",
+        "ready": 0,
+        "blocked_total": 0,
+        "not_auto_judgeable": { "count": 0, "by_reason": [] },
+        "no_clean_image": { "count": 0, "ids": [], "message": "另有 0 道因缺少擦除手写后的题面图不能进屏幕重做" }
+      }
     }
   },
+  "server": { "public_base": "http://127.0.0.1:8765", "read_only": true },
   "warnings": []
 }
 ```
@@ -160,8 +193,15 @@
 - `built_at`：本次现算的时刻（v0 不落盘，所以它同时是「这份数据有多新」）。
 - `problems`：**已经排好序**。界面按原样渲染即可，不许再排一次
   （排序规则只有一份实现，见 §4）。
-- `stats`：从同一批 `problems` 一趟算出来的计数。它是**便利读数，不是第二个真源**：
-  有任何不一致，以 `problems` 为准（测试断言两者一致）。
+- `stats`：从同一批 `problems` 一趟算出来的计数。**分母是全部题卡**（`problems` 里的每一张），
+  与 §6.1 里 `screen_redo` 的分母**不是一回事**（那个是某个候选总体）。两处名字相近，
+  口径不同，看数字时先看它属于哪一段。
+  它是**便利读数，不是第二个真源**：有任何不一致，以 `problems` 为准（测试断言两者一致）。
+- `screen_redo`：屏幕重做的两个显式数字（§6.1）。**两套候选总体都算好**摆在 `bases` 里，
+  界面按「显示冷却中的题」开关**取**，不许自己重算。
+- `server`：服务的自述。`public_base` 是**手机真能访问到的地址**（ADR 0007 第 5 条，
+  页锚点与上传页链接用它拼）；`read_only: true` 是 v0 对自己「我没做什么」的交代
+  ——ADR 0007 第 6 条要的就是这句话。
 - `data.warnings` 与信封的 `warnings` 是**同一份列表**（同一个数组内容）。
   两个位置都有，是为了让「按端点取警告」和「按信封统一取警告」两种写法都对。
   索引级警告与逐卡警告都在这一个平铺列表里，逐卡警告同时**也**出现在那张卡的
@@ -211,7 +251,7 @@
 | `has_clean` | bool | 派生 | 有没有**擦除手写后的题面图**。没有的题不进屏幕重做、也不进重做纸 |
 | `auto_judge` | `{eligible,reason,reason_text}` | 派生 | 能不能走自动判定（§6） |
 | `screen_redo` | `{ready,blockers,blocker_text}` | 派生 | 能不能进**屏幕重做**（§6.1）。两条硬闸门：有擦除图 **且** 通过自动判定。`blockers` 是**全部**原因，不是第一个 |
-| `warnings` | Warning[] | 派生 | 这张卡自己的自检结果（§7.2 码表） |
+| `warnings` | Warning[] | 派生 | 这张卡自己的自检结果（码表见 §8，形状见 §2） |
 
 ### 3.2 Attempt（重做记录，摘要形态）
 
@@ -232,7 +272,9 @@
 }
 ```
 
-`at` 在摘要里截到日期（`YYYY-MM-DD`）；完整时刻见 §5 的 `attempts_detail`。
+`at` 在摘要里截到日期（`YYYY-MM-DD`）；完整时刻见 §5 的 `attempts_detail`
+——**它就是卡里 `attempts` 的原样、不裁剪**，所以 `provider` / `model` / `overrode`
+这些字段也在里面（裁决 D2、#5 验收第 2 条）。
 
 - `source` 的取值**只有两个机器可读的值**：`"auto"`（自动判定）与 `"human"`（人工确认），
   中文渲染另走 `source_cn`（编排裁决 D2，沿用原型的取值）。改判（#6）后 `source` 变成
@@ -250,8 +292,15 @@
 2. **成员资格**：`in_default_list == true`，即未毕业且已脱离冷却。
 3. 「显示冷却中的题」开关 = 界面不过滤 `cooling`；它**不改变顺序**，
    这类重做照常记录但不推进掌握——那是状态机的事（#5），不是排序的事。
+   这个开关连带改变 §6.1 里 N/M 的候选总体，所以服务把两套数字都算好（`bases`）。
 
 界面**不重新实现**这套规则：它拿 `in_default_list` 与 `sort_key` 当**读数**用。
+
+**队列是快照，不是实时视图（#7 必须照这条做）。** 重做页把这一批题放在 URL 里
+原样传递（`/redo?queue=<题目列表>&i=<第几题>`），服务端**不参与**队列的维护，也不
+「现算第 i+1 题」。理由是硬的：**判完一道题的瞬间它进了冷却、从默认打印清单里消失了**，
+现算出来的第 i+1 题会漂到别处去。第九轮那条教训在这里同样适用——越界必须明确失败，
+绝不悄悄落到别的题上。
 规则的中文口径与边界（判错立刻回池、冷却只挡「计入正确」）在 `docs/adr/0001`…
 之外的 `CONTEXT.md` 词条里，参考实现见 `proto/slice.py` 的 `cooldown_until`
 与 `proto/test_mastery.py`（假时钟、12 条断言、不联网）。
@@ -279,6 +328,7 @@
   "clean": {
     "method": "erase_ink",
     "boxes_norm": [[0.58, 0.05, 0.08, 0.22]],
+    "manual": { "add": [], "drop": [] },
     "mask_px": 3442,
     "colored_px": 211,
     "residual_px": 0,
@@ -297,10 +347,24 @@
 
 | 详情专属字段 | 含义 |
 |---|---|
-| `attempts_detail` | **全部**重做记录（不是最近 6 条），原始形状：`{at,channel,verdict,source,confidence,error_causes,note,overrode?}` |
-| `source` | 这张卡从哪来：整页照片、归一化与像素边界、原始文件名。**没有就是 `null`**（存量或手工录入的卡） |
-| `clean` | 擦除手写这一趟的产物读数：方法、掩膜框、像素统计、体检。没有就是 `null` |
+| `attempts_detail` | **全部**重做记录（不是最近 6 条）。**就是卡里 `attempts` 的原样，不裁剪**：`{at,channel,verdict,source,confidence,provider,model,error_causes,note,overrode?}` |
+| `source` | 这张卡从哪来：整页照片、归一化与像素边界、原始文件名。**没有就是 `null`**（存量或手工录入的卡）。⚠ 这里的 `bbox_norm` / `bbox_px` 是**整页**坐标 |
+| `clean` | 擦除手写这一趟的产物读数。没有就是 `null`。字段见下 |
 | `provenance` | 是哪次模型调用造出这张卡的（角色／模型／当时的警告／逐字段置信度）。没有就是 `null` |
+
+`clean` 里的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `method` | 擦除是怎么做的（`"erase_ink"`）。换方法就换这个值，别悄悄改行为 |
+| `boxes_norm` | **这一趟认定的手写掩膜框**（`[x, y, w, h]` 归一化）。⚠ **裁剪图坐标**，不是整页坐标 |
+| `manual` | 你在审核时手工增删的框：`{add: [...], drop: [...]}`，同一套**裁剪图坐标**。空对象也要给（`{"add": [], "drop": []}`），别用 `null` 表示「没有」——那与「没跑过擦除」混在一起了 |
+| `mask_px` / `colored_px` / `residual_px` / `dropped_px` | 掩膜、彩笔、残留、被丢掉的像素数。框的**个数**不单列：`len(boxes_norm)` |
+| `health` | 擦除体检读数（残留彩笔、印刷体被伤到的孔洞等） |
+
+> ⚠ **两套坐标基准，不许混用**：`source.bbox_*` 是**整页**坐标，
+> `clean.boxes_norm` / `clean.manual` 是**裁剪图**坐标。任何「把块画到原图上」或
+> 「把掩膜框画到页上」的地方（尤其 #14）**必须显式换算**。
 
 **「超集」是一条硬承诺**：列表页与详情页对同一道题说不同的话，是这个项目已经出过的
 那类事故（界面把第一题的文字写进了第二题）。所以两者由**同一个**记录构造函数产出，
@@ -367,41 +431,63 @@
 `blockers` 是**全部**阻塞原因，不是第一个——一张题可以同时踩两个坑，界面要能一次说清。
 `blocker_text` 与它一一对应，界面照原话显示。
 
-索引级汇总（`data.screen_redo`，编排裁决 D3/D4）：
+「擦除手写后的题面图」是哪一张：`data/assets/<pid>-clean.png` 这一族
+（手写掩膜是 `<pid>-cleanmask.png`）。**没有第二张可以替代**——见下。
+
+索引级汇总（`data.screen_redo`，编排裁决 D3/D4）。**两套候选总体都算好**：
 
 ```jsonc
 {
-  "basis": "in_default_list",      // 候选总体：默认打印清单（未毕业且已脱离冷却）
-  "ready": 1,                      // 这个总体里真正能进屏幕重做的
-  "blocked_total": 3,              // 至少有一个 blocker 的卡数
-  "not_auto_judgeable": {          // 「另有 N 道不能自动判定」的那个 N
-    "count": 2,
-    "by_reason": [
-      { "reason": "solution_type", "reason_text": "解答题只能人工确认：…",
-        "count": 1, "ids": ["p-…"] },
-      { "reason": "unreviewed", "reason_text": "这道题还没审核 → …",
-        "count": 1, "ids": ["p-…"] }
-    ]
-  },
-  "no_clean_image": {              // 「另有 M 道缺擦除图」的那个 M
-    "count": 2, "ids": ["p-…", "p-…"],
-    "message": "另有 2 道因缺少擦除手写后的题面图不能进屏幕重做"
+  "default_basis": "in_default_list",     // 开关没勾时用这一套
+  "bases": {
+    "in_default_list": {                  // 默认打印清单：未毕业且已脱离冷却
+      "basis_text": "默认打印清单（未毕业且已脱离冷却）",
+      "ready": 1,                         // 这个总体里真正能进屏幕重做的
+      "blocked_total": 3,                 // 至少有一个 blocker 的卡数（去重）
+      "not_auto_judgeable": {             // 「另有 N 道不能自动判定」的那个 N
+        "count": 2,
+        "by_reason": [
+          { "reason": "solution_type", "reason_text": "解答题只能人工确认：…",
+            "count": 1, "ids": ["p-…"] },
+          { "reason": "unreviewed", "reason_text": "这道题还没审核 → …",
+            "count": 1, "ids": ["p-…"] }
+        ]
+      },
+      "no_clean_image": {                 // 「另有 M 道缺擦除图」的那个 M
+        "count": 2, "ids": ["p-…", "p-…"],
+        "message": "另有 2 道因缺少擦除手写后的题面图不能进屏幕重做"
+      }
+    },
+    "including_cooling": { /* 同形状。总体 = 未毕业（含冷却中） */ }
   }
 }
 ```
 
-三条口径，写死在契约里免得 #7 与界面各算各的：
+四条口径，写死在契约里免得 #7 与界面各算各的：
 
-1. **候选总体是默认打印清单**（`basis`），不是「全部题卡」。一张冷却中的解答题本来就不在
-   队列里，它不是「因为不能判定才没进」——把它算进 N，页头那句话就在撒谎。
-2. **N 与 M 可以重叠**：一张既无擦除图、又是解答题的卡同时出现在两个列表里，
+1. **候选总体由开关决定，服务把两套都算好**：不勾「显示冷却中的题」用
+   `in_default_list`（未毕业且已脱离冷却），勾上用它旁边那套 `including_cooling`
+   （未毕业、含冷却中）。界面按开关**取**数字，**不许重算**——一处实现，一个真源。
+   两套里都排除毕业的卡：这个开关管的是冷却，不是毕业。
+2. **N 的口径**：这个总体里因为**不能自动判定**（§6 的三个理由）而进不了队列的卡数。
+   一张冷却中的解答题在不勾时根本不在总体里——它不是「因为不能判定才没进」，
+   把它算进 N，页头那句话就在撒谎。
+3. **N 与 M 可以重叠**：一张既无擦除图、又是解答题的卡同时出现在两个列表里，
    因为两句话都真的成立。`blocked_total` 是**去重**的卡数，所以允许 `N + M > blocked_total`。
-3. **真源是每张卡的 `screen_redo.blockers`**；`by_reason` 与 M 只是从同一批记录一趟算出来的
+4. **真源是每张卡的 `screen_redo.blockers`**；`by_reason` 与 M 只是从同一批记录一趟算出来的
    便利读数。有任何一个数字对不上，以 `problems` 为准。
 
 ## 7. `GET /api/problem/<pid>/image/<kind>` —— 读图片
 
 `kind` ∈ `original`（原题裁剪图）｜`clean`（**擦除手写后的题面图**）｜`mask`（手写掩膜）。
+
+三张图各自对应磁盘上的哪个文件，由题卡里的字段决定（`Problem.images` 已经把 URL 给全）：
+
+| `kind` | 来源 |
+|---|---|
+| `original` | `problem.image`（如 `data/assets/<pid>-problem.png`） |
+| `clean` | `problem.clean_image`（如 `data/assets/<pid>-clean.png`） |
+| `mask` | **约定文件名** `<pid>-cleanmask.png`（题卡里没有这个字段）。只有卡里有擦除图时才存在 |
 
 **成功**：直接是图片字节。
 
@@ -456,10 +542,10 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 
 ## 8. 警告码表（v0）
 
-`code` 稳定；`message` 是给人看的原话，允许打磨。**每一条码都对应一个会喊的检查**
-（ADR 0007 第 6 条：每个由人填写的字段都要有一个会喊的检查）。
+`code` 稳定；`message` 是给人看的原话，允许打磨；`level` 见 §2。
+**每一条码都对应一个会喊的检查**（ADR 0007 第 6 条：每个由人填写的字段都要有一个会喊的检查）。
 
-逐卡（出现在 `Problem.warnings` 里）：
+逐卡（出现在 `Problem.warnings` 里，`level` 全是 `"warning"`，除非另注）：
 
 | `code` | 触发 | `message` |
 |---|---|---|
@@ -473,21 +559,32 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `no_clean_image` | 没有擦除手写后的题面图 | 没有擦除手写后的题面图 → 不进屏幕重做，也不进重做纸 |
 | `clean_image_file_missing` | 卡里记了 `clean_image`，文件不在 | 卡里记了擦除图 …，但文件不在 → 屏幕重做会拿到一个 404 |
 | `original_image_file_missing` | 卡里记了题面图，文件不在 | 同上 |
+| `page_binding_missing` （`level: "hint"`） | 卡没有页文件绑定（`source.page_image` 缺，或按 §10.2 推出来的页文件不在） | **v0 登记码与级别，检查由 #9 落地**。#9 验收第 2 条：旧卡缺页绑定要报**提示**而不是错误——旧数据不该因为新结构变成脏数据 |
 
-索引级（出现在 `data.warnings` 与信封 `warnings` 里）：
+索引级警告（出现在 `data.warnings` 与信封 `warnings` 里，`level` 全是 `"warning"`）：
 
 | `code` | 触发 | 为什么值得单独响 |
 |---|---|---|
 | `duplicate_transcript` | 两张卡的题干**逐字相同** | `CONTEXT.md`「串题」：两道不同的题不可能有同一段题干，这条**没有例外**。第八轮那次污染就是这么被抓出来的 |
 | `problem_id_mismatch` | 文件名与卡内 `id` 不一致 | 改名事故或复制粘贴事故 |
-| `problem_not_dict` / `problem_missing_field` | 卡不是对象 / 缺 `problem.transcript` 这类必需字段 | 建不出这条记录，进 `skipped`，同时响一声 |
+
+**跳过码表（出现在 `skipped` 里，不是 `warnings`）**——这一档比警告重：**记录根本没建出来**。
+
+| `code` | 触发 | `message` |
+|---|---|---|
+| `problem_file_unreadable` | 文件读不了（JSON 解析失败、权限、编码） | `<路径> 读不了：<异常类名>: <说明>` |
+| `problem_not_dict` | 文件里不是 JSON 对象 | `<路径> 不是一个 JSON 对象` |
+| `problem_missing_field` | 缺 `problem.transcript` 这类必需字段 | `<路径> 缺 problem.transcript，建不出这条记录` |
+
+`skipped` 非空时 `stats.problems_skipped` 也非零，且 `count` **不含**被跳过的那些
+——「少了一张卡」必须是一个看得见的数字，不是一个安静的空位。
 
 ## 9. 错误码表（v0）
 
 | `code` | HTTP | 场景 |
 |---|---|---|
-| `bad_request` | 400 | 路径参数、查询参数、body 不合法。`details` 里必须点名**是哪个参数、值是什么、允许什么** |
-| `not_found` | 404 | 没有这条路由 / 没有这道题 / 没有这张图。路由级 404 的 `message` 会指出**这条路径像哪条已知路由**，避免手打错一个字母变成静默的 404 |
+| `bad_request` | 400 | 路径参数、查询参数、body 不合法。`details` 里必须点名**是哪个参数、值是什么、允许什么**，`hint` 里给**规则本身**（例如 id 的字符集）。**输入错不许用 404 或 500 表达** |
+| `not_found` | 404 | 没有这条路由 / 没有这道题 / 没有这张图。路由级 404 的 `message` 会指出**这条路径像哪条已知路由**；命中 §10 的预留命名空间时另带 `details.reserved`，明说「预留、还没实现」——含糊的 404 会让人以为是打错了字 |
 | `method_not_allowed` | 405 | 只读端点收到 POST/PUT/DELETE。`details.allowed` 列出允许的方法 |
 | `internal_error` | 500 | 服务自己出错。`message` 带异常类名，`hint` 指向服务日志。**不允许用 500 表达「输入不对」** |
 | `not_auto_judgeable` | **422** | **v0 预留，未实现**（#5）：`reason` ∈ §6 的三个码之一，`message` 就是那句中文原话，`warnings[]` 带该卡的自检警告。**不是 400，更不是 500**（编排裁决 D1） |
@@ -518,13 +615,54 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 
 | 结果 | HTTP | `error` |
 |---|---|---|
-| 成功 | 200 | `data: {attempt: {…完整那一次…}, mastery: {streak,state,cooling,credited,note}, index_rebuilt_at: "…"}` |
+| 成功 | 200 | `data: {attempt: {…完整那一次…}, mastery: {…见下…}, run_id: "…", index_rebuilt_at: "…"}` |
 | 三个拒绝理由 | **422** | `{code:"not_auto_judgeable", reason:"solution_type"\|"no_standard_answer"\|"unreviewed", message:"<autojudge 那句原话>", details:{id}, }` + `warnings[]` = 该卡的自检警告 |
 | 模型调用失败 | **502** | `{code:"model_unavailable", reason:"model_unavailable", message:"…", hint:"可以直接重试；这一次没有留下任何记录"}` |
 | `channel`／`verdict` 取值非法 | 400 | `{code:"bad_request", details:{param,value,allowed}}` |
 
 `reason` 与 `message` **必须**取自 `server/autojudge.py` 的同一份实现（§6）——
 #5 的派发简报已经写明「必须调用它、不许重写」。
+
+**这一次重做记成什么形状**（`attempt`，字段与 `Problem.attempts_detail` 的元素同一个形状）：
+
+```jsonc
+{
+  "at": "2026-10-04T09:39:57+00:00",   // 这一次重做的时刻（定点修正靠它定位，不靠「最近一次」）
+  "channel": "screen",                 // 枚举只有两个值：screen（屏幕重做）｜ paper（纸上重做）
+  "verdict": "correct",                // correct（对）｜ wrong（错）｜ unreadable（看不清）
+  "source": "auto",                    // auto（自动判定）｜ human（人工确认）；改判后变 human
+  "confidence": 0.93,                  // 模型给的把握；人工确认时为 null
+  "provider": "deepseek",              // 谁判的（裁决 D2：与 model 是两个字段）
+  "model": "deepseek-flash",
+  "error_causes": ["计算失误"],
+  "note": "判对且脱离冷却：连续正确 1/2",
+  "overrode": { "verdict": "wrong", "source": "auto", "confidence": 0.6 }  // 只在改判后出现
+}
+```
+
+**`mastery` 是这次重做之后的读数**（形状与 `Problem.mastery` 一致，另加两个解释用的字段）：
+
+```jsonc
+{
+  "state": "in_pool",       // in_pool（在池）｜ graduated（毕业）
+  "streak": 1,              // 连续正确次数
+  "last_attempt_at": "2026-10-04T09:39:57+00:00",
+  "cooling": false,         // 更新之后是否仍在冷却（判错**也**进冷却，那是设计不是 bug）
+  "credited": true,         // **这一次**算不算进连续正确。false = 只是热身（判对但在冷却期内）
+  "gap_days": 8,            // 距上一次重做几天（从未重做过的以录入时间起算）
+  "note": "判对且脱离冷却：连续正确 1/2"   // 给人看的原话，界面照它显示
+}
+```
+
+#7 的两句读数就长在这里（spec #1 的故事 8/9）：
+
+- **「已计入 1/2」** = `mastery.credited == true` 时的 `streak` / 2（掌握 = 连续 2 次）。
+- **「只热身、不计入掌握」** = `mastery.credited == false`（判对但仍在冷却期），
+  此时 `streak` 不动，`note` 里也有这句原话。
+
+**留档（`runs/`）**：#5 验收第 3 条要求每次自动判定留一份调用档（提示词与用量）。
+`run_id` 就是那份档的标识，200 时一并返回；`runs/` 不进仓库（`.gitignore` 里已有）。
+人工确认不调模型，**不留档**，`run_id` 为 `null`。
 
 ### 10.2 页资源 —— 归属 #9 #10 #12 #14（编排裁决 D5）
 
@@ -544,10 +682,22 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 > `Problem.clean.boxes_norm`／`manual` 是**裁剪图**坐标。任何「把块画到原图上」或
 > 「把掩膜框画到页上」的地方（尤其 #14）**必须显式换算**。这是本轮登记在案的一处坑。
 
-### 10.3 收件目录 —— 归属 #13
+### 10.3 收件目录与手机上传页 —— 归属 #13
 
-`/api/inbox*` 命名空间预留（往收件目录放一个文件、上传页、目录监视的手动等价入口）。
-形状由那份工单定。
+「往收件目录放一个文件」是录入的唯一入口（ADR 0007 第 4 条）。v0 已经把两样东西
+摆出来了，只是还没有端点：
+
+- **收件目录本身**：`--inbox` / `AI_NOTE_INBOX`，默认 `data/inbox/`（§1）。
+- **对外地址**：`data.server.public_base`（§3）——上传页链接与页锚点都用它拼，
+  **不许**从 `--host` 推导。
+
+预留的路径形状（形状由 #13 定稿，位置先占住）：
+
+| 路径 | 用途 |
+|---|---|
+| `GET /upload` | **后端托管的单文件上传页**（无构建步骤、不依赖 Docusaurus 产物）：手机上打开它拍照 → 上传 → 看切分结果。**这是「托管静态资源」不是「渲染页面」**（ADR 0007 第 2 条） |
+| `POST /api/inbox` | 往收件目录放一个文件（照片进来） |
+| `POST /api/inbox/scan` | 目录监视失效时的**手动等价入口**（`inotify` 在某些挂载与同步盘上不可靠，ADR 0007 的待验证项） |
 
 **命名空间先占住**：`/api/attempt/*`、`/api/page*`、`/api/inbox*`。
 `GET` 到这些路径现在返回 404，且 `message` 明说「这条路由是预留的、v0 还没实现」，
@@ -558,9 +708,11 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | 决定 | 为什么 |
 |---|---|
 | 图片端点是二进制字节，是「全部 JSON」的唯一例外 | §7.1。已在 issue #3 评论留痕 |
+| 图片字段**改名**：proto / 现存的 `data/index.json` 用 `image`、`clean_image`、`mask_url`、`clean_stats.{boxes,…}`；契约用 `images.{original,clean,mask}` + `has_clean` | 旧名把「一张图」和「一个 URL」混在一个字段里，而且 `mask_url` 是拼出来的、不保证能取到。新名以 `images` 收口，取不到的给 `null`。**改名要记账**（BRIEF 硬规则 3），这张表就是账。旧文件保持原样，见下一条 |
 | `warnings` 从 proto 的 `list[str]` 变成 `Warning[]`（`{code,message,id}`） | 界面要照原话显示，测试要按 `code` 断言。字符串列表两者都做不到。口径（该检查什么）全盘继承 proto，只是形状结构化了 |
 | 新增 `skipped[]` | ADR 0007 第 6 条要的就是「我没做什么」。索引建不出来一条卡时，光有 `warnings` 说不清「少了一张」 |
 | 索引**不落盘**，每次请求现算 | v0 只读，写路径归写端点。现算 = 永远没有陈旧索引。落盘与否**不改契约**（客户端看不出区别） |
+| `data/index.json` 是 **proto 遗留物**，新服务不写它、不读它、不删它 | ADR 0001 说过索引是派生数据；proto 每次 `build_index()` 都写盘。新服务**每次请求现算**，不写任何文件。那个文件（及其旧形状）在磁盘上保持原样——它是私人数据、也是历史证据。**形状基准是这份契约，不是那个文件**；客户端一律经 HTTP 读索引 |
 | `Problem` 在列表与详情里由同一个构造函数产出，详情是其超集 | §5 的硬承诺，防串题那类事故 |
 | 加 CORS（`Access-Control-Allow-Origin: *` 与 `OPTIONS`） | `site/` 在 :3000，服务在 :8765，是跨源。没有它列表页一行数据都拿不到。服务只监听本机（ADR 0003），`*` 的暴露面就是本机 |
 | 三个端点就三个端点，不加 `/api/queue`、`/api/health` | 队列（默认打印清单）由 §4 的读数与 §6.1 的 `screen_redo` 汇总额外提供，界面不重算规则；加第四个端点等于把同一套规则再实现一遍 |
@@ -569,6 +721,13 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | 进屏幕重做 = 有擦除图 **且** 可自动判定；缺擦除图不回退原图，但要把道数报出来 | 编排裁决 D4。原型那条 `or`（`proto/server.py:235`）会让「已审核但无擦除图」的卡渲染成 `<img src="None">`；而静默丢掉又是这个项目最怕的失败 |
 | 页文件的 `<hash12>` 取自 `page_image` 文件名；块边界以归一化坐标为规范基准 | 编排裁决 D5。照片同目录、与照片同寿命；归一化坐标不随重编码失效 |
 | `deps`：`server/` 零第三方依赖（只用标准库 `http.server`） | 十轮实测的资产在 Python 里，但**这一层没有图像与模型的活**；少一个依赖就少一次打包与升级的谈判 |
+
+### 变更记录
+
+| 版本 | 改了什么 | 为什么 |
+|---|---|---|
+| `5cdaf75` | 初版（= commit `765cd31`） | 工单 #3：契约优先，先把形状钉住 |
+| 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 

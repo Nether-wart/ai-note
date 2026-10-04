@@ -22,20 +22,29 @@ ID_PATTERN = r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$"
 # 页头那句话说「解答题／未审核／无标准答案」，就是这个顺序（契约 §6）。
 _REASON_ORDER = ["solution_type", "no_standard_answer", "unreviewed"]
 
+DEFAULT_PUBLIC_BASE = "http://127.0.0.1:8765"
+
 
 def _skip(code: str, message: str, pid: str | None) -> dict:
     return {"code": code, "message": message, "id": pid}
 
 
 # 「另有 N 道不能自动判定」与「另有 M 道缺擦除图」是**同一候选总体**上的两个数
-# （编排裁决 D3/D4）。候选总体 = 默认打印清单：一张冷却中的解答题本来就不在队列里，
-# 它不是「因为不能判定才没进」，算进来会让页头那句话撒谎。
-_SCREEN_REDO_BASIS = "in_default_list"
+# （编排裁决 D3/D4）。而候选总体取决于界面那个「显示冷却中的题」开关，所以两套
+# 都算好、都摆在 `bases` 里，界面按开关**取**，不许自己重算（契约 §6.1 / §4）。
+_SCREEN_REDO_BASES = {
+    "in_default_list": "默认打印清单（未毕业且已脱离冷却）",
+    "including_cooling": "未毕业（含冷却中，「显示冷却中的题」勾上时）",
+}
 
 
-def screen_redo_summary(records: list[dict]) -> dict:
-    """`screen_redo` 的索引级汇总。真源永远是每张卡自己的 `screen_redo.blockers`。"""
-    candidates = [r for r in records if r["in_default_list"]]
+def _population(records: list[dict], basis: str) -> list[dict]:
+    if basis == "in_default_list":
+        return [r for r in records if r["in_default_list"]]
+    return [r for r in records if not r["graduated"]]
+
+
+def _summarize_population(candidates: list[dict]) -> dict:
     by_reason: dict[str, list[str]] = {}
     no_clean: list[str] = []
     for rec in candidates:
@@ -48,7 +57,6 @@ def screen_redo_summary(records: list[dict]) -> dict:
     ineligible = sorted(by_reason.items(), key=lambda kv: _REASON_ORDER.index(kv[0]))
     blocked = [r for r in candidates if r["screen_redo"]["blockers"]]
     return {
-        "basis": _SCREEN_REDO_BASIS,
         "ready": len(candidates) - len(blocked),
         "blocked_total": len(blocked),
         "not_auto_judgeable": {
@@ -66,13 +74,32 @@ def screen_redo_summary(records: list[dict]) -> dict:
     }
 
 
+def screen_redo_summary(records: list[dict]) -> dict:
+    """`screen_redo` 的索引级汇总。真源永远是每张卡自己的 `screen_redo.blockers`。
+
+    `bases` 里的每个总体都带 `basis_text`——数字旁边必须有一句话说明它是**在哪一堆题**
+    上数的，否则「另有 0 道」会让人以为整库都没问题。
+    """
+    return {
+        "default_basis": "in_default_list",
+        "bases": {
+            name: {"basis_text": text, **_summarize_population(_population(records, name))}
+            for name, text in _SCREEN_REDO_BASES.items()
+        },
+    }
+
+
 class Catalog:
     """一个数据目录。它只读——v0 没有任何写路径。"""
 
-    def __init__(self, data_dir: Path | str, clock=None) -> None:
+    def __init__(self, data_dir: Path | str, clock=None,
+                 public_base: str | None = None) -> None:
         # 假时钟是一个**测试接缝**，不是内部 mock：冷却与排序的读数取决于「现在」，
         # 真等 7 天没法测（proto/test_mastery.py 是这份做法的先例）。
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # 对外可达地址：手机要打开的链接、页锚点用它拼。**不许从 --host 推导**
+        # （ADR 0007 第 5 条记着这处债），所以它必须能被显式给、且必须被暴露出来。
+        self.public_base = public_base or DEFAULT_PUBLIC_BASE
         self.root = Path(data_dir)
         self.problems_dir = self.root / "problems"
         self.assets_dir = self.root / "assets"
@@ -143,6 +170,9 @@ class Catalog:
             "problems": records,
             "stats": stats,
             "screen_redo": screen_redo_summary(records),
+            # 服务自述：手机该用哪个地址（ADR 0007 第 5 条），以及 v0 **不写**任何东西
+            # ——ADR 0007 第 6 条要的就是「我做了什么、我没做什么」。
+            "server": {"public_base": self.public_base, "read_only": True},
             "warnings": warnings,
         }
         return data, warnings, skipped
@@ -158,9 +188,10 @@ class Catalog:
         if not re.fullmatch(ID_PATTERN, pid or ""):
             raise bad_request(
                 f"题卡 id 非法：{pid!r}",
+                hint="id 只允许字母、数字、点、下划线与连字符，必须以字母或数字开头，"
+                     "且不许出现 '..'",
                 param="pid",
                 value=pid,
-                reason="id 只允许字母、数字、点、下划线与连字符，必须以字母或数字开头，且不许出现 '..'",
             )
         path = self.problems_dir / f"{pid}.json"
         if not path.is_file():

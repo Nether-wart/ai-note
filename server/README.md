@@ -21,7 +21,8 @@ curl -s http://127.0.0.1:8765/api/index | python3 -m json.tool | head -40
 | `--data` | 仓库根的 `data/`（可用 `AI_NOTE_DATA` 覆盖） | 数据目录。只读 |
 | `--host` | `127.0.0.1` | **默认只监听本机**（ADR 0003） |
 | `--port` | `8765` | `0` = 让系统挑一个空闲端口（测试用） |
-| `--public-base` | 等于基址 | **对外可达地址**（手机要打开的链接）。v0 用不到，但先能配：不许从 `--host` 推导（ADR 0007 第 5 条记着这处债） |
+| `--public-base` | 按**绑定之后**的 `host:port` 推导 | **对外可达地址**（手机要打开的链接、页锚点）。不许从 `--host` 猜（ADR 0007 第 5 条记着这处债）。它是可读的：`GET /api/index` 的 `data.server.public_base` |
+| `--inbox` | `data/inbox/` | 收件目录（「往这里放一个文件」就是录入）。v0 只报出来，不监视——归 #13 |
 
 ## 测试
 
@@ -46,6 +47,15 @@ python3 -m pytest server/tests -q
 | `catalog.py` | 一个数据目录的只读访问：索引、一题、数据目录形状 |
 | `http.py` | 路由 + 信封（`Api.handle` 是纯函数，不碰 socket） |
 | `app.py` | CLI 与 `http.server` 接线 |
+
+## 两件容易搞错的事
+
+- **`data/index.json` 是 proto 遗留物**：新服务**不写它、不读它、不删它**（索引每次请求现算，
+  理由见 ADR 0001）。磁盘上那个文件（及其旧形状）保持原样——它是私人数据，也是历史证据。
+  **形状基准是 `docs/contracts/http-api-v0.md`，不是那个文件**；客户端一律经 HTTP 读索引。
+- **屏幕重做的两个数字有两套口径**：`data.screen_redo.bases` 里
+  `in_default_list`（开关没勾）与 `including_cooling`（勾了「显示冷却中的题」）都算好了，
+  界面按开关取，不许重算。`stats.*` 的分母是**全部题卡**，与它们不是一回事。
 
 ## v0 不做
 

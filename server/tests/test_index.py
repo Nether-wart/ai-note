@@ -101,3 +101,13 @@ def test_images_auto_judge_and_stats(api_for):
         "auto_judge_ineligible": 0,
     }
     assert body["warnings"] == []
+
+
+def test_index_states_which_address_the_phone_should_use(api_for):
+    """`--public-base` 必须有暴露面：手机要打开的链接不能靠猜（ADR 0007 第 5 条）。"""
+    status, body = get_json(api_for([]), "/api/index")
+
+    assert body["data"]["server"] == {
+        "public_base": "http://127.0.0.1:8765",
+        "read_only": True,
+    }

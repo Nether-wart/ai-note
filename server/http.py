@@ -60,8 +60,9 @@ def json_response(
 
 
 class Api:
-    def __init__(self, data_dir: Path | str, clock=None) -> None:
-        self.catalog = Catalog(data_dir, clock=clock)
+    def __init__(self, data_dir: Path | str, clock=None,
+                 public_base: str | None = None) -> None:
+        self.catalog = Catalog(data_dir, clock=clock, public_base=public_base)
 
     def handle(self, method: str, target: str) -> Response:
         raw_path, _, query = target.partition("?")

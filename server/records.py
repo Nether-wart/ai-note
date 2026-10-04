@@ -137,13 +137,17 @@ def problem_detail(card: dict, catalog, at: datetime | None = None) -> dict:
     """
     record = problem_record(card, catalog, at)
     clean = (card.get("problem") or {}).get("clean") or {}
+    if clean and "manual" not in clean:
+        clean = {**clean, "manual": {"add": [], "drop": []}}
     record.update(
         attempts_detail=card.get("attempts") or [],
         source=card.get("source"),
+        # 擦除那一趟的读数。`boxes_norm` 与 `manual` 是**裁剪图坐标**，
+        # 与 `source.bbox_*` 的整页坐标是两套基准，跨用必须换算（契约 §5、§10.2）。
         clean={
             key: clean.get(key)
-            for key in ("method", "boxes_norm", "mask_px", "colored_px", "residual_px",
-                        "dropped_px", "health")
+            for key in ("method", "boxes_norm", "manual", "mask_px", "colored_px",
+                        "residual_px", "dropped_px", "health")
         }
         if clean
         else None,

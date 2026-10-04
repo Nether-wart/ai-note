@@ -10,6 +10,12 @@ samples/*
 __pycache__/
 *.pyc
 
+# 前端依赖与构建产物（site/）。npm 缓存目录很大，绝不能进这个公开仓库的 git 历史。
+.npm-cache/
+node_modules/
+.docusaurus/
+site/build/
+
 # 调用留档（含提示词与用量，可能夹带题目内容）
 runs/
 

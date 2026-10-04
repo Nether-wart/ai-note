@@ -67,7 +67,9 @@ def test_index_reports_the_n_and_m_numbers_separately(api_for):
     )
 
     block = data["screen_redo"]
-    assert block["basis"] == "in_default_list"
+    assert block["default_basis"] == "in_default_list"
+    block = block["bases"]["in_default_list"]
+    assert block["basis_text"] == "默认打印清单（未毕业且已脱离冷却）"
     assert block["ready"] == 1
     assert block["blocked_total"] == 3
 
@@ -85,8 +87,12 @@ def test_index_reports_the_n_and_m_numbers_separately(api_for):
     }
 
 
-def test_the_counts_use_the_default_list_as_the_candidate_basis(api_for):
-    """冷却中的解答题不该被算进 N：它本来就不在队列里，不是「因为不能判定才没进」。"""
+def test_both_bases_are_computed_so_the_switch_never_recomputes_it(api_for):
+    """「显示冷却中的题」勾上/不勾上是**两套数字**，两套都由服务算好。
+
+    冷却中的解答题：不勾时它根本不在候选总体里，勾上时它在——所以它算进
+    `including_cooling` 的 N，不算进 `in_default_list` 的 N。
+    """
     from datetime import datetime, timezone
 
     now = datetime(2026, 10, 4, 9, 0, tzinfo=timezone.utc)
@@ -94,13 +100,20 @@ def test_the_counts_use_the_default_list_as_the_candidate_basis(api_for):
         "p-cooling", **{"problem.type": "solution", "created_at": "2026-10-02T09:00:00+00:00"}
     )
     status, body = get_json(api_for([cooling_solution], clock=lambda: now), "/api/index")
-    block = body["data"]["screen_redo"]
+    data = body["data"]
 
-    assert body["data"]["problems"][0]["in_default_list"] is False
-    assert block["basis"] == "in_default_list"
-    assert block["blocked_total"] == 0
-    assert block["not_auto_judgeable"]["count"] == 0
-    assert block["no_clean_image"]["count"] == 0
+    assert data["problems"][0]["in_default_list"] is False
+    assert set(data["screen_redo"]["bases"]) == {"in_default_list", "including_cooling"}
+
+    off = data["screen_redo"]["bases"]["in_default_list"]
+    on = data["screen_redo"]["bases"]["including_cooling"]
+    assert (off["blocked_total"], off["not_auto_judgeable"]["count"]) == (0, 0)
+    assert on["basis_text"] == "未毕业（含冷却中，「显示冷却中的题」勾上时）"
+    assert on["not_auto_judgeable"]["count"] == 1
+    assert on["not_auto_judgeable"]["by_reason"][0]["reason"] == "solution_type"
+    assert on["not_auto_judgeable"]["by_reason"][0]["ids"] == ["p-cooling"]
+    # 毕业的卡两套里都不算：开关管的是冷却，不是毕业
+    assert on["ready"] == 0 and on["blocked_total"] == 1
 
 
 def test_the_counts_stay_consistent_with_the_per_card_flags(api_for):
@@ -111,7 +124,8 @@ def test_the_counts_stay_consistent_with_the_per_card_flags(api_for):
     per_card = Counter(
         blocker for p in data["problems"] for blocker in p["screen_redo"]["blockers"]
     )
-    assert data["screen_redo"]["no_clean_image"]["count"] == per_card["no_clean_image"]
-    assert data["screen_redo"]["not_auto_judgeable"]["count"] == sum(
+    block = data["screen_redo"]["bases"]["in_default_list"]
+    assert block["no_clean_image"]["count"] == per_card["no_clean_image"]
+    assert block["not_auto_judgeable"]["count"] == sum(
         per_card[reason] for reason in ("solution_type", "no_standard_answer", "unreviewed")
     )

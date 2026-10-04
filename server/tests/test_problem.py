@@ -66,6 +66,10 @@ def test_detail_carries_the_audit_material(api_for):
     assert rec["clean"]["method"] == "erase_ink"
     assert rec["clean"]["mask_px"] == 100
     assert rec["clean"]["health"] == {"residual_color_px": 0, "print_holes_px": 0}
+    # 掩膜的几何读数：**裁剪图坐标**（与整页坐标是两套基准，见契约 §5/§10.2）
+    assert rec["clean"]["boxes_norm"] == [[0.1, 0.1, 0.2, 0.2]]
+    assert rec["clean"]["manual"] == {"add": [], "drop": []}
+    # `attempts_detail` = 卡里 attempts 的**原样**，不裁剪——provider/model 也在里面（裁决 D2）
     assert rec["attempts_detail"] == card["attempts"]
 
 

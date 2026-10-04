@@ -40,8 +40,8 @@ class ApiError(Exception):
         return out
 
 
-def bad_request(message: str, **details) -> ApiError:
-    return ApiError(400, "bad_request", message, details=details)
+def bad_request(message: str, *, hint: str | None = None, **details) -> ApiError:
+    return ApiError(400, "bad_request", message, hint=hint, details=details)
 
 
 def not_found(message: str, hint: str | None = None, **details) -> ApiError:
