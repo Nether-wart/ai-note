@@ -66,12 +66,14 @@ def judgment_from_output(raw, *, threshold: float = CONFIDENCE_THRESHOLD,
 
     `threshold` 默认取模块常量，只为测试边界留出显式入口。**坏阈值当场抛
     `ValueError`**（见 `validate_threshold`）：NaN 阈值下 `confidence < threshold`
-    恒为 False，等于把闸门整个拆掉。
+    恒为 False，等于把闸门整个拆掉。校验通过后**一律用它的返回值参与比较**——
+    「校验过了」与「拿去比的值」必须是同一个东西。
 
     provider／model 由调用方（知道角色配置的那一层）传入并照抄进结果，用于留档；
     这里绝不猜。
     """
-    validate_threshold(threshold)   # 先校验配置：坏阈值在任何输入上都要喊，不许静默
+    # 先校验配置：坏阈值在任何输入上都要喊，不许静默。赋值回去，比较用的是校验后的值。
+    threshold = validate_threshold(threshold)
     is_mapping = isinstance(raw, Mapping)
     confidence = _as_confidence(raw.get("confidence")) if is_mapping else None
     reason = _as_reason(raw.get("reason")) if is_mapping else ""
