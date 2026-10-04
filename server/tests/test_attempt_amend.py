@@ -116,3 +116,76 @@ def test_a_changed_verdict_keeps_the_original_judgment_visible(api_for):
     detail = get_json(api, f"/api/problem/{PID}")[1]["data"]["attempts_detail"]
     assert detail[0]["overrode"]["verdict"] == "correct", "详情页也看得到原判定"
     assert detail[0]["source"] == "human"
+
+
+def test_the_cooldown_gate_is_taken_before_last_attempt_at_is_written(api_for):
+    """定点钉住顺序：重放里每一步都是**先算冷却门、后写 `last_attempt_at`**。
+
+    这一次重做发生在录入后 22 天（早已脱离冷却）→ 改判成「对」必须计入。
+    若实现先把 `last_attempt_at` 写成这一刻再算冷却，这一刻就落在冷却里，
+    读数会变成「只热身」——那正是 `docs/acceptance-log.md:277` 记的「真错」。
+    """
+    at = NOW - 8 * DAY
+    original = rec(at, "unreadable", confidence=0.2)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 0, "last_attempt_at": original["at"]},
+                     created_at=NOW - 30 * DAY)
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": original["at"], "verdict": "correct"})
+
+    mastery = body["data"]["mastery"]
+    assert mastery["cooling"] is False, "这一刻尚未进入冷却（基准是录入时间）"
+    assert mastery["credited"] is True, "冷却门必须在 last_attempt_at 被改写之前取"
+    assert mastery["streak"] == 1
+    assert "连续正确 1/2" in mastery["note"]
+
+
+def test_a_changed_verdict_inside_the_window_is_only_a_warmup(api_for):
+    """冷却期内的改判也照旧规则：只热身，`streak` 不动（同一条门，不是另一套规则）。"""
+    first = rec(NOW - 2 * DAY, "correct", confidence=0.9)
+    second = rec(NOW - 1 * DAY, "unreadable", confidence=0.2)
+    card = card_with([first, second],
+                     mastery={"state": "in_pool", "streak": 1,
+                              "last_attempt_at": second["at"]})
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": second["at"], "verdict": "correct"})
+
+    mastery = body["data"]["mastery"]
+    assert (mastery["cooling"], mastery["credited"], mastery["streak"]) == (True, False, 1)
+    assert mastery["gap_days"] == 1
+    assert "热身" in mastery["note"]
+
+
+def test_amending_an_attempt_that_is_not_the_last_one_replays_the_rest(api_for):
+    """验收 1 的边界：被改的那次**不是最后一次**时，掌握由整段历史重放得到。
+
+    三次重做各自隔了 8 天、都是「看不清」，只有最后一次是「对」→ 现在 streak=1。
+    把**第一次**改成「对」：后面每一次都脱离冷却，于是第 1、3 次计入 → 直接毕业。
+    卡级终态是重放的结果；而被改那一次的读数（`credited`/`note`）说的是它自己那一步。
+    """
+    a1 = rec(NOW - 17 * DAY, "unreadable", confidence=0.2)
+    a2 = rec(NOW - 9 * DAY, "unreadable", confidence=0.2)
+    a3 = rec(NOW - 1 * DAY, "correct", confidence=0.95)
+    card = card_with([a1, a2, a3],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": a3["at"]},
+                     created_at=NOW - 31 * DAY)
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}", {"attempt_at": a1["at"], "verdict": "correct"})
+
+    mastery = body["data"]["mastery"]
+    # 被改那一次自己那一步
+    assert (mastery["credited"], mastery["cooling"]) == (True, False)
+    assert "连续正确 1/2" in mastery["note"]
+    # 重放后的卡级终态：第 3 次接着第 1 次的计数 → 毕业
+    assert (mastery["state"], mastery["streak"]) == ("graduated", 2)
+    assert mastery["last_attempt_at"] == a3["at"], "最后一次的时刻没被改"
+
+    saved = card_on_disk(api)
+    assert [a["verdict"] for a in saved["attempts"]] == ["correct", "unreadable", "correct"]
+    assert saved["mastery"]["mastered_at"] == a3["at"]
+    assert get_json(api, "/api/index")[1]["data"]["problems"][0]["graduated"] is True
