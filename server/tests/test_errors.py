@@ -31,12 +31,12 @@ def test_write_methods_on_read_only_endpoints_are_405(api_for):
 
 
 def test_reserved_write_namespaces_say_they_are_reserved(api_for):
-    """#9 #13 要落在这里。含糊的 404 会让人以为是打错了字。
+    """#9 #10 #12 #14 要落在这里。含糊的 404 会让人以为是打错了字。
 
-    `/api/attempt/` 已由 #5 落地，不在这一列：它收到 GET 是 405（说清收 POST），
-    见 `test_attempt_endpoint.py`。
+    已落地的不在这一列：`/api/attempt/`（#5）与 `/api/inbox*`（#13）收到 GET 都是
+    **405**（说清它收 POST），分别见 `test_attempt_endpoint.py` 与 `test_inbox.py`。
     """
-    for target in ("/api/page/p-x", "/api/inbox", "/api/inbox/scan"):
+    for target in ("/api/page/p-x",):
         status, body = get_json(api_for([]), target)
 
         assert status == 404, target

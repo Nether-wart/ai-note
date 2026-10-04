@@ -194,11 +194,8 @@ def test_unparseable_model_output_is_unreadable_and_says_so(api_for):
     assert body["data"]["attempt"]["verdict"] == "unreadable"
     codes = [w["code"] for w in body["warnings"]]
     assert "judge_output_unparsed" in codes
-    # 级别要显式发出来（契约 §2 的 level），界面不靠猜。不能断言「一律是 warning」：
-    # 这张卡还没有页文件，会另带一条 **hint** 级 page_binding_missing（#9 验收 2）——
-    # 提示与警告并存，正是级别要显式的原因。
-    assert all(w["level"] in ("warning", "hint") for w in body["warnings"])
-    assert next(w for w in body["warnings"] if w["code"] == "judge_output_unparsed")["level"] == "warning"
+    # 级别要显式发出来（契约 §2 的 level），界面不靠猜
+    assert all(w["level"] == "warning" for w in body["warnings"])
     assert body["data"]["mastery"]["streak"] == 0
 
 

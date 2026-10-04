@@ -22,6 +22,21 @@ def fetch(url: str):
         return response.status, response.headers, response.read()
 
 
+def post_multipart(base_url: str, files):
+    """真的从 socket 上传一次：容器里的 curl 与手机的 FormData 走的就是这条路。"""
+    import urllib.request
+
+    from conftest import multipart_body
+
+    body, ctype = multipart_body(files)
+    request = urllib.request.Request(
+        f"{base_url}/api/inbox", data=body, method="POST",
+        headers={"Content-Type": ctype, "Content-Length": str(len(body))},
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.status, json.loads(response.read())
+
+
 def post(url: str, payload: dict):
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"),
@@ -72,6 +87,154 @@ def test_real_server_answers_even_a_bogus_route_with_json(tmp_path):
             body = json.loads(exc.read())
             assert body["ok"] is False
             assert body["error"]["reason"] == "not_found"
+
+
+# ------------------------------------------------- #13：手机上传这条路真的通
+
+
+def test_a_real_socket_takes_the_upload_and_serves_the_upload_page(tmp_path):
+    """验收 1 的服务端那一半：起真服务 → 一次 HTTP 上传 → 收件目录里多了那个文件。
+
+    剩下那一半是「手机浏览器能不能打开」——那需要一个真的手机与局域网，
+    在沙箱里验不到，所以这里只验到「页面能被 HTTP 取到 + 上传真的落盘」。
+    """
+    from server.app import serve
+
+    root = make_data_dir(tmp_path, [])
+    with serve(root, port=0) as base_url:
+        status, headers, body = fetch(f"{base_url}/upload")
+        assert status == 200
+        assert headers["Content-Type"] == "text/html; charset=utf-8"
+        assert b"capture=\"environment\"" in body
+        assert b"/api/inbox" in body
+
+        status, env = post_multipart(base_url, [("phone.jpg", PNG_1X1)])
+        assert status == 200 and env["ok"] is True
+        assert env["data"]["received"][0]["stored_as"].endswith(".jpg")
+        assert env["data"]["received"][0]["bytes"] == len(PNG_1X1)
+        assert list((root / "inbox").iterdir())[0].read_bytes() == PNG_1X1
+
+        # 手动入口也真的在 socket 上活着
+        request = urllib.request.Request(f"{base_url}/api/inbox/scan", data=b"", method="POST")
+        with urllib.request.urlopen(request) as response:
+            scan = json.loads(response.read())
+        assert [f["name"] for f in scan["data"]["found"]] == \
+            [env["data"]["received"][0]["stored_as"]]
+
+
+def test_an_oversized_body_is_refused_with_json_without_reading_it(tmp_path):
+    """上限要在**读 body 之前**判。判据是可观察的：声明 5000 字节却只发几个字节，
+    服务必须在没有读到那 5000 字节的情况下就把 413 发回来（先读再拒会一直等下去）。
+    """
+    import http.client
+    import urllib.parse
+
+    from server.app import serve
+
+    with serve(make_data_dir(tmp_path, []), port=0, max_upload_bytes=32) as base_url:
+        parsed = urllib.parse.urlsplit(base_url)
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        conn.putrequest("POST", "/api/inbox")
+        conn.putheader("Content-Type", "multipart/form-data; boundary=x")
+        conn.putheader("Content-Length", "5000")
+        conn.endheaders()
+        conn.send(b"only a few bytes")  # 远少于声明的 5000
+        response = conn.getresponse()
+        body = json.loads(response.read())
+        conn.close()
+
+    assert response.status == 413
+    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+    assert body["error"]["code"] == "payload_too_large"
+    assert not (tmp_path / "data" / "inbox").exists()
+
+
+# ------------------------------------- 验收 2：绑 0.0.0.0 时印出来的地址
+
+
+def test_binding_a_wildcard_host_but_printing_the_explicit_phone_address(tmp_path):
+    """ADR 0007 第 5 条那处债的正面判据：绑 `0.0.0.0` 是为了让手机连上来，
+    此时上传页链接与页锚点必须用**显式给的对外地址**，不是 `--host`。"""
+    from server.app import serve
+
+    explicit = "http://192.168.1.50:8765"
+    # 客户端连的是 127.0.0.1（服务真绑在 0.0.0.0 上），响应里给的却是给人手机用的地址
+    with serve(make_data_dir(tmp_path, []), host="0.0.0.0", port=0,
+               public_base=explicit) as base_url:
+        status, _, body = fetch(f"{base_url}/api/index")
+    server = json.loads(body)["data"]["server"]
+
+    assert status == 200
+    assert server["public_base"] == explicit
+    assert server["upload_url"] == f"{explicit}/upload"
+    assert "0.0.0.0" not in server["upload_url"]
+    assert server["reachable_from_other_devices"] is True
+
+
+def test_a_wildcard_bind_without_an_explicit_address_shouts_in_the_index(tmp_path):
+    """不许静默：推导出来的地址手机打不开时，索引里必须有一句会喊的警告。"""
+    from server.app import serve
+
+    with serve(make_data_dir(tmp_path, []), host="0.0.0.0", port=0) as base_url:
+        status, _, body = fetch(f"{base_url}/api/index")
+
+    server = json.loads(body)["data"]["server"]
+    assert server["public_base"].startswith("http://0.0.0.0:")
+    assert server["reachable_from_other_devices"] is False
+    assert "public_base_not_reachable" in [w["code"] for w in json.loads(body)["warnings"]]
+
+
+def test_the_cli_takes_the_inbox_and_the_public_base_from_flags_and_env(monkeypatch, tmp_path):
+    """配置项必须有**两个**入口（命令行＋环境变量）：手机那条路上，
+    服务往往是被脚本或桌面图标拉起来的，改不了命令行。"""
+    from server.app import build_parser
+
+    monkeypatch.setenv("AI_NOTE_INBOX", str(tmp_path / "box"))
+    monkeypatch.setenv("AI_NOTE_PUBLIC_BASE", "http://10.0.0.2:9000")
+    args = build_parser().parse_args([])
+    assert args.inbox == str(tmp_path / "box")
+    assert args.public_base == "http://10.0.0.2:9000"
+
+    args = build_parser().parse_args(["--inbox", "x", "--public-base", "http://1.2.3.4"])
+    assert (args.inbox, args.public_base) == ("x", "http://1.2.3.4")
+
+
+def test_the_inbox_follows_the_data_dir_when_nothing_says_otherwise(monkeypatch):
+    """换了 `--data` 却还往仓库里的 `data/inbox` 写，就是往真数据里写
+    ——这是本工单最硬的一条禁令，所以默认值是「没给」而不是一个绝对路径。"""
+    from server.app import build_parser
+
+    monkeypatch.delenv("AI_NOTE_INBOX", raising=False)
+    assert build_parser().parse_args(["--data", "/tmp/somewhere"]).inbox is None
+
+    # 没给收件目录时，Catalog 把它落在数据目录下面（upload 的端到端测试验的就是这条）
+    from server.http import Api
+
+    api = Api("/tmp/somewhere-else")
+    assert str(api.catalog.inbox.dir) == "/tmp/somewhere-else/inbox"
+
+
+def test_env_local_can_set_the_public_base_and_the_inbox(tmp_path, monkeypatch):
+    """`.env.local` 里的 `AI_NOTE_*` 必须真的生效。
+
+    这条不是形式主义：`--public-base`/`--inbox` 的默认值是**建 parser 时**从环境里现算的，
+    所以 `main()` 必须**先**把 `.env.local` 灌进环境再建 parser。顺序反了的话，
+    写进文件里的对外地址会**静默失效**——正是 ADR 0007 第 6 条要挡的那类失败。
+    """
+    from server.app import build_parser, load_local_env
+
+    (tmp_path / ".env.local").write_text(
+        "AI_NOTE_PUBLIC_BASE=http://10.1.2.3:8765\nAI_NOTE_INBOX=/tmp/from-env-file/inbox\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AI_NOTE_PUBLIC_BASE", raising=False)
+    monkeypatch.delenv("AI_NOTE_INBOX", raising=False)
+
+    # 仓库根那份先灌（`~/.env.local` 可能有，但 setdefault 让先来的赢）
+    assert (tmp_path / ".env.local") in load_local_env(tmp_path)
+    args = build_parser().parse_args([])
+    assert args.public_base == "http://10.1.2.3:8765"
+    assert args.inbox == "/tmp/from-env-file/inbox"
 
 
 def test_real_server_writes_a_screen_attempt_over_a_socket(tmp_path):
