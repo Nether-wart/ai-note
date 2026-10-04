@@ -637,7 +637,7 @@ def _assert_warning_shape(warnings, where: str):
 
 
 def test_reconcile_warnings_all_carry_the_contract_shape():
-    """三条判据全响 + 没给墨迹：出口每一条都必须是 `{code, level, message, id}`。"""
+    """三条判据全响 + 没给墨迹：出口每一条都必须是 `{code, message, id, level}`。"""
     blocks = [blk("b1", (0.0, 0.0, 1.0, 0.3), question_no=17),
               blk("b2", (0.0, 0.2, 0.5, 0.3), question_no=19),
               blk("b3", None), "oops"]
@@ -711,3 +711,17 @@ def test_parse_candidate_blocks_warnings_all_carry_the_contract_shape():
     garbage = segmentation.parse_candidate_blocks("抱歉，我看不清")
     _assert_warning_shape(garbage["warnings"], "parse_candidate_blocks(失败)")
     assert garbage["warnings"][0]["level"] == "warning", "「切分没跑成」是真矛盾"
+
+
+def test_an_unknown_rebind_code_is_reported_at_the_loudest_level():
+    """`rebind` 将来加一条新码、级别表却没跟上时：按**最响**的那一级报，不许安静降级。
+
+    这条兜底分支也要有自己的测试（编排裁决 D9：每个跳过／兜底分支至少一条测试）——
+    安静地把一条真矛盾降成 `hint`，正是这套检查要防的失败。
+    """
+    fact = {"code": "some_brand_new_code", "message": "页上出了点新花样"}
+
+    warning = segmentation._reemit(fact)
+
+    assert warning == {"code": "some_brand_new_code", "message": "页上出了点新花样",
+                       "id": None, "level": "warning"}
