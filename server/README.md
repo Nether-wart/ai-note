@@ -84,8 +84,8 @@ python3 -m pytest server/tests -q
 |---|---|
 | `autojudge.py` | **「能不能自动判定」的唯一实现**（三个拒绝理由 + 优先级）。`#5` 的写端点**调用**它，不重写 |
 | `judge.py` | **映射的唯一实现**：模型输出（等价 / 置信度 / 残缺）→ 三值判定。纯逻辑，脱网可测 |
-| `mastery.py` | 掌握与冷却的**读数 + 状态机**。规则本体一处（`step`）：`apply_attempt`（#5，追加）与 `recompute_mastery`（#6，定点修正后重放整段历史）都从它走。冷却基准（从未重做过的以录入时间起算）、比较前归一化到 UTC、冷却门必须在更新 `last_attempt_at` **之前**算 |
-| `amend.py` | 定点修正（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，掌握交给 `recompute_mastery`，审计字段只有它能写 |
+| `mastery.py` | 掌握与冷却的**读数 + 状态机**。规则本体一处（`step`）：`apply_attempt`（#5，追加）与 `recompute_mastery`（#6，改判后重放整段历史）都从它走。冷却基准（从未重做过的以录入时间起算）、比较前归一化到 UTC、冷却门必须在更新 `last_attempt_at` **之前**算（`cooldown_gate` 就是那**一份**门）。`peek_step`（#6，只改错因时的**只读**读数）读同一份门，不改任何东西 |
+| `amend.py` | 定点修正（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，审计字段只有它能写。掌握**按 payload 是否改判据分流**（裁决 D10）：改判 → `recompute_mastery` 重放重算；只改错因 → 一个字都不重算，卡上 `mastery` 与 `attempts[i].note` 逐字保留 |
 | `config.py` | 装载处配置：provider 白名单、阈值校验一次（坏配置起不来）、`.env.local` 读取 |
 | `judge_client.py` | 判定角色的调用接缝：纯文本提示词（不发图）、HTTP transport 可注入、留档 `runs/`、失败抛 `ModelUnavailable` |
 | `attempt.py` | 写端点：客户端不碰判定、调用 autojudge/judge/mastery、原子回写题卡、索引重建 |

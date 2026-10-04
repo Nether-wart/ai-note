@@ -741,17 +741,29 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
   （spec #1 US 28）。**只改错因不算改判**：不写 `overrode`，来源与置信度一概不动。
 - 同一 payload 重复提交**幂等**：不追加记录、不改状态、`overrode` 不覆盖（验收 3）。
 
-**掌握只能重算**（`server/mastery.recompute_mastery`）：改的是历史里某一次（甚至不是
-最后一次）时，把卡里 `attempts` 从头按既定规则**重放**一遍。状态机对
-「`created_at` + 一串 (at, verdict)」是确定的纯函数，所以重放得到的读数**就是**
-「这条判定从一开始就是这样」时该有的读数；就地打补丁会让后面几次的 `credited`
-仍按旧判定算。重放用的是**同一个冷却门**（先算门、后写 `last_attempt_at`，见下），
-不允许定点修正另写一套。
+**掌握按「判据变没变」分流**（#6 编排裁决 D10）：
+
+- **改判**（给了 `verdict` 且与现值**不同**）→ **重放重算**（`server/mastery.recompute_mastery`）：
+  改的是历史里某一次（甚至不是最后一次）时，把卡里 `attempts` 从头按既定规则**重放**一遍。
+  状态机对「`created_at` + 一串 (at, verdict)」是确定的纯函数，所以重放得到的读数**就是**
+  「这条判定从一开始就是这样」时该有的读数；就地打补丁会让后面几次的 `credited`
+  仍按旧判定算。重放用的是**同一个冷却门**（先算门、后写 `last_attempt_at`，见下），
+  不允许定点修正另写一套。
+- **只改错因**（没给 `verdict`，或给的与现值**相同**）→ **一个字都不重算**：卡上存的
+  `mastery` 与既有 `attempts[i].note` **逐字保留**，只写 `error_causes`。纯标注编辑不该销毁
+  人动过的状态（spec #2 的同一原则：「人动过的部分不许被一次无关操作抹掉」），更不该静默地改
+  （ADR 0007 第 6 条）；「卡上状态与历史不一致」这种漂移该被审计报出来（#15），
+  而不是被一次无关编辑顺手改掉。
 
 于是定点修正返回的 `mastery` **分两层**（改的是最后一次时两者重合）：
 
-- `state`／`streak`／`last_attempt_at` = **重放后卡级的终态**（与 `GET /api/index` 一致）；
-- `cooling`／`credited`／`gap_days`／`note` = **被改那一次**在重放里的读数。
+- `state`／`streak`／`last_attempt_at` = **卡级终态**（重放后与 `GET /api/index` 一致；
+  没重放时就是卡上原样存的那三个）；
+- `cooling`／`credited`／`gap_days` = **被改那一次**的读数，`note` = 那一次记录上的原话
+  （契约：`attempt.note` 与 `mastery.note` 是同一句）。这几个读数由 `mastery.peek_step`
+  **只读地**看（与重放共用同一份冷却门、同一条 `credited` 规则），所以「改判」与「只改错因」
+  两条路径给出的读数**逐字一致**——同一 payload 重发一次（第一次改判、第二次已是同一个
+  verdict）幂等的证据正是这个。
 
 **`mastery` 是这次重做之后的读数**（形状与 `Problem.mastery` 一致，另加两个解释用的字段）：
 
@@ -969,14 +981,15 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
 | 本版（B2 / #10） | §8 加「页级对账码表」16 条（含 `hint`/`warning` 两级，并写明 `replaced` 恒为 0 是结构性的）；§10.2.2 更新 `rebind` 的口径（IoU ≥ 0.5 **或** 重叠系数 ≥ 0.8）并加 `server/segmentation.py`；§12 加该模块的角色 | 工单 #10 验收 1–4。**先写进 issue #10 的评论再动手**（BRIEF 硬规则 3）。要点：三条判据都要**返回结构化结论**而不是打印（ADR 0007 第 6 条）；#9 留给 #10 的是 `MATCH_IOU` 的**口径裁决**——纯 IoU 会把「同一个块被重切细化了边界」判成旧块消失，从而孤立一张已审核的卡，所以补一条包含判据；重切三态里「替换」不允许作为自动结果出现。`inbox.py` 的 `segmenter` 接缝**本版没接**：接它需要「模型失败 → 502」的错误契约，而 `run_pipeline` 现在会让异常落到兜底 500 |
 | 本版（B2 / #10 收尾） | §8 的页级对账码表**改回 §2 的 `Warning` 形状**（`{code, message, id, level}`，页级 `id` 为 `null`、卡级填卡 id；`rebind` 交回的事实由出口补级别，表里没有的码按 `warning` 报） | 上一条预告写的 `{code, level, message}` 与 §2「形状一致」自相矛盾，实测也确实漏了：`pages.rebind` 手搓的三条码（`block_without_box`/`block_not_an_object`/`block_removed_with_card`）**没有 `level`**，而 `classify_resegment` 原样透传——于是页级对账的出口会漏出「没有 level 的警告」，下游只能靠猜（正是 §2 要防的）。同时发现 `classify_resegment` 在调 `rebind` 前用 `isinstance(b, dict)` 静默 filter 掉块列表里的非对象项（`rebind` 明明会报 `block_not_an_object`）——与 `proto/server.py:320-321`、`:933-936` 同一种写法。两条都有会红的测试钉住；记账见 issue #10 的评论 |
+| 本版（D10 / #6） | §10.1 的「**掌握只能重算**」改成「**按 payload 是否改判据分流**」：改判（`verdict` 与现值不同）仍必须重放重算；只改错因（没给 `verdict` 或与现值相同）**不重算**，卡上 `mastery` 与既有 `attempts[i].note` 逐字保留。`mastery` 的「被改那一次的读数」由 `mastery.peek_step` **只读地**给（与重放共用同一份冷却门，故两条路径逐字一致，幂等不受影响）。§12 的 `mastery.py`／`amend.py` 两行跟上 | 独立验证者在 #6 上找到的边界：**只改 `error_causes`** 时，若卡上存的 `mastery` 不是历史的重放固定点，`recompute_mastery` 会把它重放改写——一张「已毕业、连对 5 次」的卡因一次纯标注编辑被**静默重置回池**，连 `attempts[i].note` 也被重写。理由三条：无关编辑不该销毁人动过的状态（spec #2 同一原则）、不许静默（ADR 0007 第 6 条）、漂移该由审计报出来（#15）而不是被顺手改掉。**修法是分流，不是取消重放**（#6 验收 1 一条都不许取消） |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
 | 模块 | 角色 |
 |---|---|
 | `server/autojudge.py` | **「能不能自动判定」的唯一实现**：三个拒绝理由与它们的优先级。`#5` 的写端点**必须调用它**，不许重写；界面只显示 `reason_text`，不许自己再判一遍（编排裁决 D3） |
-| `server/mastery.py` | **掌握与冷却的读数 + 状态机的唯一一份实现**：冷却基准（从未重做过的以录入时间起算）、比较前先归一化到 UTC、冷却门取在写 `last_attempt_at` **之前**。规则本体只有一处（`step`）：`apply_attempt`（#5，追加一次重做）与 `recompute_mastery`（#6，定点修正后重放整段历史）都从它走——两套规则分开写迟早各判各的 |
-| `server/amend.py` | **定点修正的唯一实现**（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，掌握交给 `mastery.recompute_mastery`，审计字段（`source`/`confidence`/`provider`/`model`/`overrode`）只有它能写 |
+| `server/mastery.py` | **掌握与冷却的读数 + 状态机的唯一一份实现**：冷却基准（从未重做过的以录入时间起算）、比较前先归一化到 UTC、冷却门取在写 `last_attempt_at` **之前**（`cooldown_gate` 是那**一份**门）。规则本体只有一处（`step`）：`apply_attempt`（#5，追加一次重做）与 `recompute_mastery`（#6，改判后重放整段历史）都从它走——两套规则分开写迟早各判各的；`peek_step`（#6，只改错因时的**只读**读数）读的是同一份门，不改任何东西 |
+| `server/amend.py` | **定点修正的唯一实现**（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，审计字段（`source`/`confidence`/`provider`/`model`/`overrode`）只有它能写。掌握**按 payload 是否改判据分流**（D10）：改判 → `mastery.recompute_mastery` 重放重算；只改错因 → 一个字都不重算，卡上 `mastery` 与 `attempts[i].note` 逐字保留 |
 | `server/publicbase.py` | **对外可达地址的唯一实现**（ADR 0007 第 5 条）：`resolve_public_base`（显式优先，否则按绑定之后的 `host:port` 推导）与 `public_base_warning`（推出来的地址别的设备打不开就喊）。`Catalog.public_url` 用它拼上传页链接与将来的页锚点 |
 | `server/inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、`POST /api/inbox/scan` 的手动扫描、`multipart/form-data` 解析。**切分（#10）的接缝**在这里：可注入 `segmenter`，不注入就报 `segmentation_not_implemented`、`blocks` 给 `null`——不许编块列表 |
 | `server/static/upload.html` | 手机上传页：**一个文件**，无构建步骤、不引任何外部资源。改它不用碰 Python |
