@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import re
 
-from . import assets
+from . import assets, pages
 from .mastery import TYPE_CN
 
 _CHOICE_LETTER = re.compile(r"[A-Da-d]")
 
 
 def _warn(code: str, message: str, pid: str | None, level: str = "warning") -> dict:
+    """一条警告。`level` 由**服务**给（契约 §2：级别只有服务能定，界面不许自行升降级）。"""
     return {"code": code, "message": message, "id": pid, "level": level}
 
 
@@ -68,6 +69,12 @@ def card_warnings(card: dict, catalog) -> list[dict]:
     if assets.recorded_path(card, "original") and not assets.asset_file(catalog, card, "original"):
         warns.append(_warn("original_image_file_missing",
                            f"卡里记了题面图 {assets.recorded_path(card, 'original')!r}，但文件不在", pid))
+
+    # 页绑定（契约 §8、#9 验收 2、编排裁决 D5）。级别由 `page_binding` 一处定：
+    # 旧卡还没回填 = 提示；页实体在场却对不上账 = 警告。这里不重新判一遍。
+    binding = pages.page_binding(catalog, card)
+    if not binding["bound"]:
+        warns.append(_warn(binding["code"], binding["message"], pid, level=binding["level"]))
     return warns
 
 

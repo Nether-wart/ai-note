@@ -564,7 +564,8 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `no_clean_image` | 没有擦除手写后的题面图 | 没有擦除手写后的题面图 → 不进屏幕重做，也不进重做纸 |
 | `clean_image_file_missing` | 卡里记了 `clean_image`，文件不在 | 卡里记了擦除图 …，但文件不在 → 屏幕重做会拿到一个 404 |
 | `original_image_file_missing` | 卡里记了题面图，文件不在 | 同上 |
-| `page_binding_missing` （`level: "hint"`） | 卡没有页文件绑定（`source.page_image` 缺，或按 §10.2 推出来的页文件不在） | **v0 登记码与级别，检查由 #9 落地**。#9 验收第 2 条：旧卡缺页绑定要报**提示**而不是错误——旧数据不该因为新结构变成脏数据 |
+| `page_binding_missing` （`level: "hint"`） | 卡没有页文件绑定（`source.page_image` 缺，或按 §10.2 推出来的页文件不在） | **落地于 #9**（B1）。#9 验收第 2 条：旧卡缺页绑定要报**提示**而不是错误——旧数据不该因为新结构变成脏数据。回填（`python3 -m server.backfill --apply`）之后这条消失 |
+| `page_binding_lost` （`level: "warning"`，**B1 新增**） | 页文件**在**，却读不了／不是 JSON 对象，或里面没有任何块绑定这张卡 | 页实体已经在场却对不上账，这是矛盾不是旧数据，所以要**警告**。与上一条同一个判据（`server/pages.py: page_binding`），只有级别不同——**两种缺绑定不许混成一个级别**（#9 验收 2、#15 在它上面扩展） |
 
 索引级警告（出现在 `data.warnings` 与信封 `warnings` 里，`level` 全是 `"warning"`）：
 
@@ -652,7 +653,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
   "state": "in_pool",       // in_pool（在池）｜ graduated（毕业）
   "streak": 1,              // 连续正确次数
   "last_attempt_at": "2026-10-04T09:39:57+00:00",
-  "cooling": false,         // **这次重做发生时**是否处于冷却窗口：判定门在写入 `last_attempt_at` **之前**取（顺序反了会让当天判对计入掌握）。`cooling:true` → `credited:false`（只热身）；判错**也**进冷却，那是设计不是 bug
+  "cooling": false,         // 更新之后是否仍在冷却（判错**也**进冷却，那是设计不是 bug）
   "credited": true,         // **这一次**算不算进连续正确。false = 只是热身（判对但在冷却期内）
   "gap_days": 8,            // 距上一次重做几天（从未重做过的以录入时间起算）
   "note": "判对且脱离冷却：连续正确 1/2"   // 给人看的原话，界面照它显示
@@ -686,6 +687,57 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 > ⚠ **两套坐标基准，不许混用**：`Problem.source.bbox_*` 是**整页**坐标，而
 > `Problem.clean.boxes_norm`／`manual` 是**裁剪图**坐标。任何「把块画到原图上」或
 > 「把掩膜框画到页上」的地方（尤其 #14）**必须显式换算**。这是本轮登记在案的一处坑。
+
+#### 10.2.1 页文件形状（**B1 落地**，= `server/pages.py`）
+
+```jsonc
+// data/pages/41c86bcfc007.json
+{
+  "version": 1,
+  "id": "41c86bcfc007",            // = 文件名主干 = 整页照片的文件名主干
+  "image": "41c86bcfc007.png",     // 整页照片的**文件名**（与页文件同目录并列）
+  "created_at": "2026-10-04T14:31:35+08:00",
+  "origin": {                      // 来源信息（spec #2：「第几页、哪张卷子」）
+    "original_file": "2.png",      // 上传时的原始文件名（来自 source.original_file）
+    "sheet": null,                 // 哪张卷子；未填为 null
+    "page_number": null            // 第几页；未填为 null
+  },
+  "blocks": [
+    {
+      "id": "b1",                                   // 页内唯一、稳定的块 id
+      "bbox_norm": [0.02, 0.12, 0.76, 0.28],        // 规范基准：整页归一化 xywh
+      "bbox_px": [3, 20, 541, 79],                  // 只作交叉验证：整页像素 xyxy
+      "card_id": "p-20261004-41c86b",              // 绑定；null = 还没入库
+      "keep": true                                   // 去留：true 收 / false 丢弃 / null 待定
+    }
+  ]
+}
+```
+
+**两个边界的形状不一样，别当成同一件事**：
+
+| 字段 | 形状 | 来源 |
+|---|---|---|
+| `bbox_norm` | `[x, y, w, h]`（**xywh**），相对**整页**归一化、原点左上 | 与 `source.bbox_norm` **同一语义**（`proto/slice.py:281`） |
+| `bbox_px` | `[x0, y0, x1, y1]`（**xyxy**），整页像素 | `crop_problem(pad=0.015)` 加 1.5% pad 又裁到页边界的结果（`proto/slice.py:544-555`） |
+
+回填时 `bbox_px` **照抄盘上的原值**，不用 `bbox_norm` 重算。
+下游扩展键**先占名字**（B1 不写）：`question_no`（#10）、`ink`（#11 红笔统计）、`type`（#14）。
+
+**题卡上的 `source.{page_image,bbox_norm,bbox_px,original_file}` 保留不动**：
+绑定关系只记在页文件里（spec #2 原话），所以「这张卡有没有页绑定」是从页文件推出来的，
+卡上不加新字段。
+
+#### 10.2.2 模块与命令（B1 落地）
+
+| 位置 | 是什么 |
+|---|---|
+| `server/pages.py` | 页文件的读写，以及两处**唯一实现**：`page_binding(catalog, card)`（这张卡有没有页绑定，`card_warnings` 与 #15 的审计都消费它）、`rebind(old, new)`（重切时按位置重合保留绑定） |
+| `server/pages.py: allocate_card_id` / `assign_card_ids` | 题卡 id **首次入库时分配**：形状沿用 `p-<YYYYMMDD>-<6hex>`，日期是**入库日**（不是拍照日）；候选由**块的身份**（`<页 id>#<块 id>`）决定、唯一性由已在库的 id 集合保证 → 一页多块各得一个互不相同的 id（#9 验收 3） |
+| `server/pages.py: rebind` | 重切对账的匹配：位置重合度 = **IoU**，具名常量 `MATCH_IOU = 0.5`（口径的最终裁决在 #10）。一对一贪心；配上的新块继承旧块的 `card_id` 与 `keep`（人动过的两样）；配不上的 `card_id = null`（分配在入库那一刻）。**只给事实、不写盘不写题卡**；对照事实在并排的 `matches` 里，不写进块 |
+| `python3 -m server.backfill --data <dir>` | 存量卡 → 页文件的迁移，**默认预演（只读）**，`--apply` 才写；幂等（跑两次不改一个字节、不动题卡） |
+
+**不加任何 HTTP 写端点**：v0 的只读立场不变，§10.2 开头那四个页动作归 #10/#12/#14/#15。
 
 ### 10.3 收件目录与手机上传页 —— 归属 #13
 
@@ -734,7 +786,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `5cdaf75` | 初版（= commit `765cd31`） | 工单 #3：契约优先，先把形状钉住 |
 | 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表。另：§6.1 增第 5 条——M 的那句话由服务给、界面照原话显示（真实渲染验证时发现界面自己又拼了一遍，出现重复行），N 必须逐个理由列数 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
 | 本版 | 空 id（`GET /api/problem/`）与空 kind（`…/image/`）明确成 **400**（不是 404、且错要指向 `kind` 而不是 `pid`）；`Warning.level` 明确「总是显式发出来」；§6 术语滑词「同一个答案」改回「同一个**判定**」 | 独立验证查出的口径差：只差这「空」一档看着像漏网；`level` 有默认值却不出现在响应里，下游只能靠猜 |
-| 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
+| 本版（B1 / #9） | §10.2 从「预留」落成**具体形状**：加 §10.2.1 页文件字段（含 `bbox_norm` 是 xywh、`bbox_px` 是 xyxy 的对照表）与 §10.2.2 模块/命令表（`server/pages.py`、`allocate_card_id`/`assign_card_ids`、`rebind`、`python3 -m server.backfill`）；§8 加 `page_binding_lost`（`level: "warning"`），并把 `page_binding_missing` 标成 B1 落地；§12 模块角色加 `server/pages.py`；§12.1 补页的纯逻辑测试接缝 | 工单 #9 验收 1/2/3。**先写进 issue #9 的评论再动手**（BRIEF 硬规则 3）。要点：两套坐标基准（整页 vs 裁剪图）不许混用；「一页多块 id 互不相同」与「重切保留绑定」是同一份逻辑；旧卡缺绑定是**提示**、页↔卡对不上账才是**警告** |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
@@ -742,6 +794,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 |---|---|
 | `server/autojudge.py` | **「能不能自动判定」的唯一实现**：三个拒绝理由与它们的优先级。`#5` 的写端点**必须调用它**，不许重写；界面只显示 `reason_text`，不许自己再判一遍（编排裁决 D3） |
 | `server/mastery.py` | **掌握与冷却的只读读数**：冷却基准（从未重做过的以录入时间起算）与「比较前先归一化到 UTC」。写状态机（`apply_attempt`）归 `#5`，也在这一处实现，免得两套规则 |
+| `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
 
 ## 12.1 测试接缝
 
@@ -749,5 +802,9 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
   与真起一个 socket 的端到端冒烟。测试不碰内部函数名，不 mock 内部协作者。
 - 纯逻辑（冷却／排序／可判性／警告码）用**假时钟 + 构造记录**喂进去测，不联网、不花钱、
   不画图——`proto/test_mastery.py` 是这份做法的先例。
+- **页的纯逻辑**（`server/pages.py`：`page_binding`／`rebind`／`allocate_card_id`／
+  `assign_card_ids`）用**构造的块列表**喂进去测，同样不联网、不画图——这是 spec #2
+  「测试四层」的第 1 层，#9 的验收就落在这一层。它同时也是 HTTP 那一层的判据来源
+  （`card_warnings` 里的页绑定提示由 `page_binding` 一处产出）。
 - 测试数据**自造在临时目录里**，测完即删。真实题卡只有两张、重做次数是 0，
   测试绝不碰它们（工单 #1 的第 35 条 user story）。

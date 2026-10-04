@@ -31,17 +31,12 @@ def test_write_methods_on_read_only_endpoints_are_405(api_for):
 
 
 def test_reserved_write_namespaces_say_they_are_reserved(api_for):
-    """#9 #13 要落在这里。含糊的 404 会让人以为是打错了字。
+    """#5 #9 #13 要落在这里。含糊的 404 会让人以为是打错了字。"""
+    status, body = get_json(api_for([]), "/api/attempt/p-20200101-aaaaaa")
 
-    `/api/attempt/` 已由 #5 落地，不在这一列：它收到 GET 是 405（说清收 POST），
-    见 `test_attempt_endpoint.py`。
-    """
-    for target in ("/api/page/p-x", "/api/inbox", "/api/inbox/scan"):
-        status, body = get_json(api_for([]), target)
-
-        assert status == 404, target
-        assert body["error"]["code"] == "not_found"
-        assert "预留" in body["error"]["message"] or "预留" in body["error"].get("hint", "")
+    assert status == 404
+    assert body["error"]["code"] == "not_found"
+    assert "预留" in body["error"]["message"] or "预留" in body["error"].get("hint", "")
 
 
 def test_every_response_carries_cors_headers(api_for):

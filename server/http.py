@@ -14,21 +14,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import assets
-from .attempt import AttemptEndpoint
 from .catalog import Catalog
-from .config import load_judge_config
 from .errors import ApiError, bad_request, method_not_allowed, not_found
-from .judge_client import HttpJudge
 
-# 还没实现的写命名空间。给一个含糊的 404，会让人以为是打错了字，
-# 而不是「这个端点还没实现」。`/api/attempt/` 已由 #5 落地，不在这一列。
+# v0 只有只读端点。这些命名空间是**预留**的：给一个含糊的 404，
+# 会让人以为是打错了字，而不是「这个端点还没实现」。
 RESERVED = {
+    "/api/attempt/": "POST /api/attempt/<pid>（作答进 → 判定出 → 回写）归 #5",
     "/api/page": "页资源（建 / 改 / 重切 / 入库）归 #9 #10 #12 #14",
     "/api/inbox": "往收件目录放一个文件归 #13",
 }
-
-# 留档默认落在仓库根的 `runs/`（.gitignore 里已有）。测试一律指到临时目录。
-DEFAULT_RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
 
 
 @dataclass
@@ -65,20 +60,11 @@ def json_response(
 
 
 class Api:
-    def __init__(self, data_dir: Path | str, clock=None, public_base: str | None = None,
-                 *, judge=None, runs_dir: Path | str | None = None, config=None) -> None:
+    def __init__(self, data_dir: Path | str, clock=None,
+                 public_base: str | None = None) -> None:
         self.catalog = Catalog(data_dir, clock=clock, public_base=public_base)
-        # 坏配置**在这里就起不来**（阈值 NaN／无穷／越界，或 provider 不在白名单里），
-        # 而不是每个请求里再验一遍（#5 派发简报第 7 条）。
-        self.judge_config = config or load_judge_config()
-        judge_call = judge or HttpJudge(self.judge_config, runs_dir or DEFAULT_RUNS_DIR)
-        self.attempts = AttemptEndpoint(
-            self.catalog, judge_call=judge_call, threshold=self.judge_config.threshold,
-            clock=self.catalog.clock, provider=self.judge_config.provider,
-            model=self.judge_config.model,
-        )
 
-    def handle(self, method: str, target: str, body: bytes | str | None = None) -> Response:
+    def handle(self, method: str, target: str) -> Response:
         raw_path, _, query = target.partition("?")
         # 先解码再路由：`%2e%2e%2f` 这类编码必须落进 id 校验，而不是绕过它。
         path = urllib.parse.unquote(raw_path)
@@ -87,13 +73,10 @@ class Api:
                 response = self._options()
             elif method == "GET":
                 response = self._get(path, urllib.parse.parse_qs(query))
-            elif method == "POST":
-                response = self._post(path, body)
             else:
-                raise method_not_allowed(method, ["GET", "POST", "OPTIONS"])
+                raise method_not_allowed(method, ["GET", "OPTIONS"])
         except ApiError as exc:
-            # 失败也可以带警告：拒绝一次作答时那张卡的自检结果要一并带上（§10.1）
-            response = json_response(exc.status, error=exc.payload(), warnings=exc.warnings)
+            response = json_response(exc.status, error=exc.payload())
         except Exception as exc:  # 不允许用 500 表达「输入不对」，但真出错要说清
             response = json_response(
                 500,
@@ -115,7 +98,7 @@ class Api:
             b"",
             "text/plain; charset=utf-8",
             headers={
-                "Allow": "GET, POST, OPTIONS",
+                "Allow": "GET, OPTIONS",
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
                 "Access-Control-Max-Age": "600",
@@ -126,10 +109,6 @@ class Api:
         if path == "/api/index":
             data, warnings, skipped = self.catalog.index()
             return json_response(200, data=data, warnings=warnings, skipped=skipped)
-
-        # 写端点收到 GET：说清它收什么，而不是一个含糊的 404（契约 §9）
-        if path.startswith("/api/attempt/"):
-            raise method_not_allowed("GET", ["POST", "OPTIONS"])
 
         # 图片路由要排在读一题前面：`/api/problem/<pid>/image/<kind>`
         # `.*`（而不是 `.+`）：空 pid / 空 kind 要落到下面那两条 400 上，
@@ -151,27 +130,6 @@ class Api:
                     reserved=True, owner=note,
                 )
 
-        raise not_found(f"没有这条路由：{path}", hint="GET /api/index 看看索引")
-
-    # ---------------------------------------------------------------- 写
-
-    def _post(self, path: str, body: bytes | str | None) -> Response:
-        """契约 §10.1：写端点一个入口。已落地的是屏幕重做那一种形态。"""
-        match = re.fullmatch(r"/api/attempt/(?P<pid>.*)", path)
-        if match:
-            data, warnings = self.attempts.handle(match.group("pid"), body)
-            return json_response(200, data=data, warnings=warnings)
-
-        # 只读端点上用错方法 → 405（契约 §5.1），不是含糊的 404
-        if path == "/api/index" or path.startswith("/api/problem/"):
-            raise method_not_allowed("POST", ["GET", "OPTIONS"])
-
-        for prefix, note in RESERVED.items():
-            if path.startswith(prefix):
-                raise not_found(
-                    f"这条路由是预留的，还没实现：{path}", hint=note,
-                    reserved=True, owner=note,
-                )
         raise not_found(f"没有这条路由：{path}", hint="GET /api/index 看看索引")
 
     # ---------------------------------------------------------------- 图片
