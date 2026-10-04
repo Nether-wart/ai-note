@@ -331,3 +331,146 @@ def page_binding(catalog, card: dict) -> dict:
         return _binding(True, None, None, None, page_id, path, f"已绑定在页 {page_id} 上")
     return _binding(False, PAGE_BINDING_LOST, "warning", "card_not_bound", page_id, path,
                     f"页文件 {path} 在，但里面没有任何块绑定这张卡 → 页↔卡对不上账")
+
+
+# 「位置重合度」的判据 spec 没给公式（spec-2 笔记 §C 待确认）：先钉 0.5，口径的最终
+# 裁决在 #10——改这一个常量即可，匹配逻辑只有这一处。
+MATCH_IOU = 0.5
+# 匹配上的块要从旧块继承的键 = **人动过**的那些：绑定与去留（#14 验收 2）。
+# 几何（bbox_*）当然用新的；题号与红笔统计是切分/统计的产物，重新算，不继承。
+PRESERVED_KEYS = ("card_id", "keep")
+
+
+def _xywh(box):
+    """一个可用的整页归一化框 → `(x, y, w, h)`；读不出来（或退化）→ `None`。"""
+    if not _is_box(box):
+        return None
+    x, y, w, h = (float(v) for v in box)
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, w, h
+
+
+def iou(a, b) -> float:
+    """两个**整页归一化** xywh 框的交并比。任一个读不出来 → `0.0`（不猜）。"""
+    ra, rb = _xywh(a), _xywh(b)
+    if ra is None or rb is None:
+        return 0.0
+    ax, ay, aw, ah = ra
+    bx, by, bw, bh = rb
+    ix = min(ax + aw, bx + bw) - max(ax, bx)
+    iy = min(ay + ah, by + bh) - max(ay, by)
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
+    """重切对账的**唯一**匹配逻辑：按位置重合度把新旧块配上，配上就**保留原有绑定**。
+
+    - 一对一**贪心**：所有 IoU ≥ 阈值的新旧块对按 IoU 从大到小排序，依次配对
+      （同分时按块序定序）。确定性、可测：同样的输入永远同样的输出。
+    - 配上的新块继承旧块的 `PRESERVED_KEYS`——所以**重切不会给已审核、已重做过的
+      卡片改名**，也不会把人定过的去留抹掉（spec #2 的目标句）。
+    - 配不上的新块 `card_id` 为 `None`：**分配新 id 发生在入库那一刻**
+      （`assign_card_ids`），不在重切里。
+    - 没被任何新块配上的旧块进 `removed`；**带着卡片的必须喊**——「人动过的卡片
+      不允许被一次重切抹掉」（spec #2）。
+
+    本函数**不写盘、不写题卡**，只给事实：`matched_from` 与 `iou`。界面上
+    「新增／替换／保留」怎么措辞由 #10 定（它在这些事实上做三态映射）。
+
+    ⚠ 已知弱点：匹配的判据只有**位置**。块被大幅拖动（IoU < 阈值）会被算成
+    「旧的消失 + 新的出现」而不是「同一个块被移动」——所以消失的块带着卡片时会喊。
+    """
+    warnings: list[dict] = []
+
+    old_list = []
+    for old in old_blocks or []:
+        if not isinstance(old, dict):
+            warnings.append({"code": "block_not_an_object",
+                             "message": f"旧块列表里有一项不是对象：{old!r}"})
+            continue
+        if _xywh(old.get("bbox_norm")) is None:
+            warnings.append({"code": "block_without_box", "id": old.get("id"),
+                             "message": f"旧块 {old.get('id')!r} 没有可用的 bbox_norm"
+                                        f"（整页归一化边界）→ 无法按位置匹配"})
+        old_list.append(old)
+
+    new_list: list[dict] = []
+    for new in new_blocks or []:
+        if not isinstance(new, dict):
+            warnings.append({"code": "block_not_an_object",
+                             "message": f"新块列表里有一项不是对象：{new!r}"})
+            continue
+        if _xywh(new.get("bbox_norm")) is None:
+            warnings.append({"code": "block_without_box", "id": new.get("id"),
+                             "message": f"新块 {new.get('id')!r} 没有可用的 bbox_norm"
+                                        f" → 无法按位置匹配"})
+        new_list.append(new)
+
+    matchable = [i for i, block in enumerate(old_list) if _xywh(block.get("bbox_norm"))]
+    pairs = []
+    for slot, old_index in enumerate(matchable):
+        for new_index, new in enumerate(new_list):
+            score = iou(old_list[old_index].get("bbox_norm"), new.get("bbox_norm"))
+            if score >= iou_threshold:
+                pairs.append((score, slot, new_index))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+
+    matched_old: set[int] = set()
+    matched_new: dict[int, tuple[dict, float]] = {}
+    for score, slot, new_index in pairs:
+        old_index = matchable[slot]
+        if old_index in matched_old or new_index in matched_new:
+            continue
+        matched_old.add(old_index)
+        matched_new[new_index] = (old_list[old_index], score)
+
+    blocks: list[dict] = []
+    for new_index, new in enumerate(new_list):
+        block = {**new}
+        if new_index in matched_new:
+            old, score = matched_new[new_index]
+            for key in PRESERVED_KEYS:
+                block[key] = old.get(key)
+            block["matched_from"] = old.get("id")
+            block["iou"] = score
+        else:
+            for key in PRESERVED_KEYS:
+                block.setdefault(key, None)
+            block["matched_from"] = None
+            block["iou"] = None
+        blocks.append(block)
+
+    removed: list[dict] = []
+    for old_index, old in enumerate(old_list):
+        if old_index in matched_old:
+            continue
+        removed.append({
+            "id": old.get("id"),
+            "card_id": old.get("card_id"),
+            "keep": old.get("keep"),
+            "bbox_norm": old.get("bbox_norm"),
+        })
+        if old.get("card_id"):
+            warnings.append({
+                "code": "block_removed_with_card",
+                "id": old.get("card_id"),
+                "message": f"块 {old.get('id')!r} 在新切分里找不到位置重合的块，"
+                           f"但它绑着卡片 {old['card_id']} → 卡片不会被自动抹掉，先人工确认",
+            })
+
+    return {
+        "blocks": blocks,
+        "removed": removed,
+        "summary": {
+            "matched": len(matched_new),
+            "new": len(blocks) - len(matched_new),
+            "removed": len(removed),
+            "removed_with_card": sum(1 for r in removed if r["card_id"]),
+        },
+        "warnings": warnings,
+    }

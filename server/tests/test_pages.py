@@ -151,3 +151,101 @@ def test_backfill_skips_a_card_without_a_whole_page_photo_without_crashing(api_f
     assert entry["action"] == "skipped"
     assert "page_image" in entry["message"]
     assert not list(api.catalog.pages_dir.glob("*.json"))
+
+
+# ------------------------------------- 重切：位置重合保留原有绑定（#10/#14 的地基）
+
+
+def blk(block_id: str, bbox_norm, card_id=None, keep=None) -> dict:
+    return {"id": block_id, "bbox_norm": list(bbox_norm), "bbox_px": None,
+            "card_id": card_id, "keep": keep}
+
+
+def test_rebind_keeps_the_binding_of_a_block_that_stayed_put():
+    """目标句：重切不会把已审核、已重做过的卡片改名（spec #2 的核心）。"""
+    old = [blk("b1", [0, 0, 1, 1], card_id="p-20261004-aaa111", keep=True)]
+    new = [blk("n1", [0.005, 0.005, 0.99, 0.99])]   # 几乎没动
+
+    report = pages.rebind(old, new)
+
+    (block,) = report["blocks"]
+    assert block["card_id"] == "p-20261004-aaa111", "绑定照旧"
+    assert block["matched_from"] == "b1"
+    assert block["iou"] > 0.9
+    assert report["summary"] == {"matched": 1, "new": 0, "removed": 0, "removed_with_card": 0}
+
+
+def test_rebind_geometry_boundaries():
+    """三条边界：完全重合 / 部分重叠但没重合到算同一块 / 完全不相交（spec-2 §C）。
+
+    重合度的期望值是**手算的几何**，不是拿实现算一遍再跟自己比。
+    """
+    old_box = [0, 0, 0.5, 0.5]
+    assert pages.iou(old_box, [0, 0, 0.5, 0.5]) == 1.0                  # 完全重合
+    assert round(pages.iou(old_box, [0.3, 0, 0.4, 0.5]), 4) == 0.2857   # 0.1/(0.25+0.2-0.1)
+    assert pages.iou(old_box, [0.6, 0.6, 0.3, 0.3]) == 0.0              # 完全不相交
+
+    old = [blk("b1", old_box, card_id="p-20261004-aaa111")]
+
+    same = pages.rebind(old, [blk("n1", [0, 0, 0.5, 0.5])])
+    assert same["blocks"][0]["matched_from"] == "b1"
+
+    partial = pages.rebind(old, [blk("n1", [0.3, 0, 0.4, 0.5])])
+    assert partial["blocks"][0]["matched_from"] is None, "IoU≈0.29 < 0.5：这不是同一块"
+    assert partial["summary"] == {"matched": 0, "new": 1, "removed": 1, "removed_with_card": 1}
+
+    disjoint = pages.rebind(old, [blk("n1", [0.6, 0.6, 0.3, 0.3])])
+    assert disjoint["blocks"][0]["matched_from"] is None
+    assert disjoint["blocks"][0]["iou"] is None, "没配上就没有重合度可言"
+
+
+def test_rebind_never_invents_an_id_for_a_genuinely_new_block():
+    """只有真正新增的块才分配新 id——分配发生在入库那一刻，不在重切里。"""
+    report = pages.rebind([], [blk("n1", [0.1, 0.1, 0.2, 0.2])])
+
+    assert report["blocks"][0]["card_id"] is None
+    assert report["summary"]["new"] == 1
+
+
+def test_rebind_preserves_human_decisions_on_a_matched_block():
+    """人动过的部分不被一次重切抹掉：绑定与去留都跟着块走（#14 验收 2 的地基）。"""
+    old = [blk("b1", [0, 0, 1, 1], card_id="p-20261004-aaa111", keep=False)]
+    new = [blk("n1", [0, 0, 1, 1])]
+
+    (block,) = pages.rebind(old, new)["blocks"]
+
+    assert (block["card_id"], block["keep"]) == ("p-20261004-aaa111", False)
+
+
+def test_rebind_matches_one_to_one_greedily_by_overlap():
+    """一对一：一个旧块只喂给重合度最高的那个新块，不许一夫多妻。"""
+    old = [blk("b1", [0, 0, 1, 1], card_id="p-20261004-aaa111")]
+    new = [blk("n1", [0, 0, 0.9, 1]), blk("n2", [0.2, 0, 0.8, 1])]
+
+    report = pages.rebind(old, new)
+
+    assert [b["matched_from"] for b in report["blocks"]] == ["b1", None]
+    assert report["blocks"][1]["card_id"] is None
+    assert report["summary"] == {"matched": 1, "new": 1, "removed": 0, "removed_with_card": 0}
+
+
+def test_rebind_shouts_when_a_removed_block_carried_a_card():
+    """「人动过的卡片不允许被一次重切抹掉」——消失的块如果带着卡，必须显式喊。"""
+    old = [blk("b1", [0, 0, 0.3, 0.3], card_id="p-20261004-aaa111")]
+
+    report = pages.rebind(old, [blk("n1", [0.6, 0.6, 0.3, 0.3])])
+
+    assert report["summary"]["removed_with_card"] == 1
+    (removed,) = report["removed"]
+    assert removed["card_id"] == "p-20261004-aaa111"
+    assert any(w["code"] == "block_removed_with_card" for w in report["warnings"])
+
+
+def test_rebind_tolerates_a_block_without_a_usable_box():
+    """边界读不出来就没法按位置匹配——不静默、不猜，明说匹配不上。"""
+    old = [{"id": "b1", "bbox_norm": None, "card_id": "p-20261004-aaa111"}]
+
+    report = pages.rebind(old, [blk("n1", [0, 0, 1, 1])])
+
+    assert report["blocks"][0]["matched_from"] is None
+    assert any(w["code"] == "block_without_box" for w in report["warnings"])
