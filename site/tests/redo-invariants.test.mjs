@@ -17,9 +17,11 @@ import assert from 'node:assert/strict';
 
 import {
   checkAnswerBox,
+  checkNoAnswerLeak,
   checkNoSideEffects,
   checkQueue,
   checkQuestionImage,
+  leakCandidates,
 } from './invariants.mjs';
 
 // ---------------------------------------------------------------- 夹具
@@ -288,4 +290,59 @@ test('不变量 4 坏输入：自检删了东西 → 必须报警', () => {
 test('不变量 4 坏输入：建了个缓存目录（哪怕不在数据目录里）→ 也报警', () => {
   const after = snapshot({...FIXTURE_TREE.files, '.redo-cache/x.json': {size: 1, mtime_ns: 1}});
   assert.deepEqual(codes(checkNoSideEffects({before: FIXTURE_TREE, after})), ['selftest_created_file']);
+});
+
+// ----------------- 不变量 5：提交之前不许出现任何答案（含标准答案与正解文本）
+
+const LEAKY_PROBLEM = {
+  id: pid,
+  type: 'choice',
+  transcript: '1. 下列哪个是充分不必要条件？',
+  options: [{label: 'A', text: '甲'}, {label: 'B', text: '乙'}],
+  standard_answer: 'A',
+  original_answer: 'B',
+  correction: '订正：应选 A，因为集合的包含关系反了',
+  correct_solution: '标准解法：先写出两个集合，再比较包含关系',
+};
+
+test('不变量 5 好输入：只渲染题干与选项 → 一条都不报', () => {
+  const html = card('choice', CHOICE_BODY).replace('1. 一道题', '');
+  assert.deepEqual(codes(checkNoAnswerLeak({html, problem: LEAKY_PROBLEM})), []);
+});
+
+test('不变量 5 覆盖范围：单字母的标准答案（"A"）逐字判据抓不住，必须显式声明覆盖不到', () => {
+  const coverage = leakCandidates(LEAKY_PROBLEM);
+  assert.deepEqual(coverage.checked.map((c) => c.field).sort(), ['correct_solution', 'correction']);
+  assert.deepEqual(coverage.skipped.map((c) => c.field).sort(), ['original_answer', 'standard_answer']);
+});
+
+test('不变量 5 坏输入：页面上出现了正解文本 → 必须报警', () => {
+  const html = card('choice', `${CHOICE_BODY}<p>标准解法：先写出两个集合，再比较包含关系</p>`);
+  const violations = checkNoAnswerLeak({html, problem: LEAKY_PROBLEM});
+  assert.deepEqual(codes(violations), ['answer_text_leaked']);
+  assert.equal(violations[0].details.field, 'correct_solution');
+});
+
+test('不变量 5 坏输入：页面上出现了订正（含答案）→ 必须报警', () => {
+  const html = card('choice', `${CHOICE_BODY}<p>订正：应选 A，因为集合的包含关系反了</p>`);
+  assert.ok(codes(checkNoAnswerLeak({html, problem: LEAKY_PROBLEM})).includes('answer_text_leaked'));
+});
+
+test('不变量 5 坏输入：多字符的标准答案出现在页面上 → 必须报警', () => {
+  const problem = {...LEAKY_PROBLEM, standard_answer: 'x = 2 或 x = 3'};
+  const html = card('choice', `${CHOICE_BODY}<p>答案：x = 2 或 x = 3</p>`);
+  const violations = checkNoAnswerLeak({html, problem});
+  assert.ok(codes(violations).includes('answer_text_leaked'), JSON.stringify(violations));
+  assert.equal(violations[0].details.field, 'standard_answer');
+});
+
+test('不变量 5 坏输入：提交之前页面上就出现了判定节点（结果区）→ 必须报警', () => {
+  const html = card('choice', `${CHOICE_BODY}<div data-attempt-result="true" data-verdict="correct">判对了</div>`);
+  const violations = checkNoAnswerLeak({html, problem: LEAKY_PROBLEM});
+  assert.ok(codes(violations).includes('answer_revealed_before_submit'), JSON.stringify(violations));
+});
+
+test('不变量 5 好输入：提交之后结果区就该在 → 不报（判据按阶段区分）', () => {
+  const html = card('choice', `${CHOICE_BODY}<div data-attempt-result="true" data-verdict="correct">判对了</div>`);
+  assert.deepEqual(codes(checkNoAnswerLeak({html, problem: LEAKY_PROBLEM, phase: 'after_submit'})), []);
 });
