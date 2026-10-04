@@ -14,9 +14,14 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from server import judge as J
+
+# 巨整数：json 真能给出这种数（`float()` 转它会直接 OverflowError，而不是落向看不清）
+HUGE_INT = json.loads("1" + "0" * 400)
 
 # 模型返回、阈值、期望判定、期望「该不该记这次重做」
 CASES: list[tuple[str, object, float, str, bool]] = [
@@ -120,3 +125,66 @@ def test_call_failure_is_not_a_judgment(reason):
     assert got.confidence is None
     assert got.source is None
     assert reason in got.note and got.note.strip()
+
+
+# —— 加固：独立证伪钉住的两个反例（崩溃、以及静默绕过闸门）
+
+@pytest.mark.parametrize("name,raw,verdict", [
+    ("巨整数置信度 10**400 → 看不清，不崩",
+     {"equivalent": True, "confidence": HUGE_INT}, J.VERDICT_UNREADABLE),
+    ("巨负整数置信度 → 看不清，不崩",
+     {"equivalent": True, "confidence": -HUGE_INT}, J.VERDICT_UNREADABLE),
+    ("巨整数置信度 + 判不等价 → 错，不崩",
+     {"equivalent": False, "confidence": HUGE_INT}, J.VERDICT_WRONG),
+], ids=lambda v: v if isinstance(v, str) else "")
+def test_huge_integer_confidence_is_unusable_not_a_crash(name, raw, verdict):
+    """越界的数就是不可用的置信度——先判范围再转 float，巨整数不该把端点打成 500。"""
+    got = J.judgment_from_output(raw)
+    assert got.verdict == verdict
+    assert got.should_record is True
+
+
+BAD_THRESHOLDS: list[tuple[str, object]] = [
+    ("NaN", float("nan")),
+    ("正无穷", float("inf")),
+    ("负无穷", float("-inf")),
+    ("越界 1.5", 1.5),
+    ("越界 -0.1", -0.1),
+    ("字符串", "0.9"),
+    ("None", None),
+    ("布尔 True", True),
+    ("巨整数 10**400", HUGE_INT),
+]
+
+
+@pytest.mark.parametrize("name,threshold", BAD_THRESHOLDS, ids=[b[0] for b in BAD_THRESHOLDS])
+@pytest.mark.parametrize("raw", [{"equivalent": True, "confidence": 0.95},
+                                 {"equivalent": False}],
+                         ids=["判等价", "判不等价"])
+def test_bad_threshold_screams_instead_of_silently_passing(name, threshold, raw):
+    """坏阈值是配置错，必须当场喊出来。
+
+    NaN 阈值下 `confidence < threshold` 恒为 False，等于把闸门整个拆掉：
+    0.0 的置信度也会变成「对」——这是这套设计唯一禁止的错，宁可抛异常。
+    校验对任何输入都先发生（判不等价那条也一样），坏配置不许只在某些路径上发作。
+    """
+    with pytest.raises(ValueError) as err:
+        J.judgment_from_output(raw, threshold=threshold)
+    assert str(err.value).strip()
+
+
+def test_threshold_bounds_are_legal():
+    """0.0 与 1.0 是合法阈值：前者全放行，后者只认满置信度。"""
+    assert J.judgment_from_output({"equivalent": True, "confidence": 0.0},
+                                  threshold=0.0).verdict == J.VERDICT_CORRECT
+    assert J.judgment_from_output({"equivalent": True, "confidence": 1.0},
+                                  threshold=1.0).verdict == J.VERDICT_CORRECT
+    assert J.judgment_from_output({"equivalent": True, "confidence": 0.99},
+                                  threshold=1.0).verdict == J.VERDICT_UNREADABLE
+
+
+def test_validate_threshold_is_reusable_at_config_load():
+    """#11 把阈值收成一份常量／配置时，能在装载处先校验，而不是等第一次判定。"""
+    assert J.validate_threshold(0.9) == 0.9
+    with pytest.raises(ValueError, match="阈值"):
+        J.validate_threshold(float("nan"))
