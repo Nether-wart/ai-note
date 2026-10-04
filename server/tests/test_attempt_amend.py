@@ -500,3 +500,29 @@ def test_the_index_is_rebuilt_after_an_amendment(api_for):
     assert problem["attempts"] == 1, "不追加记录"
     assert problem["last_verdict"] == "wrong"
     assert problem["streak"] == 0 and problem["graduated"] is False
+
+
+def test_restating_the_same_verdict_is_not_a_change_of_judgment(api_for):
+    """给的 `verdict` 与现值**相同** → 不是改判：来源仍是机器、不写 `overrode`。
+
+    否则「提交一次 verdict=correct」会把一条机器判定偷偷标成人工确认，并在历史里
+    造出一条没发生过的改判（spec #1 US 17 要的就是「人工改的不能看起来从来就是人对的」，
+    反过来也一样）。
+    """
+    original = rec(NOW - 8 * DAY, "correct", confidence=0.95)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": original["at"], "verdict": "correct",
+                              "error_causes": ["粗心"]})
+
+    assert status == 200, body
+    attempt = body["data"]["attempt"]
+    assert attempt["error_causes"] == ["粗心"], "错因照改"
+    assert (attempt["source"], attempt["confidence"]) == ("auto", 0.95), \
+        "判定没变，来源就不许变成人"
+    assert attempt["provider"] == "deepseek"
+    assert "overrode" not in attempt, "没改判就不该出现原判定"
+    assert body["data"]["mastery"]["streak"] == 1
