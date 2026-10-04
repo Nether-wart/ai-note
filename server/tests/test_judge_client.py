@@ -240,3 +240,54 @@ def test_judge_messages_pins_the_equivalence_shape():
     system, user = judge_messages("2/√3", "2√3/3")
     assert "equivalent" in system and "confidence" in system
     assert "2/√3" in user and "2√3/3" in user
+
+
+def test_the_real_urllib_transport_works_against_a_local_server(tmp_path):
+    """真的走一遍默认 transport（stdlib urllib），只是把上游换成本机一个假 endpoint。
+
+    这是「接缝后面那一层」唯一没有假 transport 覆盖的地方：Authorization 头、
+    JSON body、状态码与响应读取。仍然不联网、不花钱（本机回环）。
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            seen["auth"] = self.headers.get("Authorization")
+            seen["payload"] = json.loads(self.rfile.read(length))
+            blob = OK_BODY.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+
+        def log_message(self, *args):  # 别把测试的访问日志打到 stderr
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+        cfg = config.JudgeConfig(role="judge", provider="deepseek", base_url=base,
+                                 model="deepseek-flash", key_env="DEEPSEEK_API_KEY",
+                                 threshold=0.9)
+        judge = HttpJudge(cfg, tmp_path / "runs", env={"DEEPSEEK_API_KEY": KEY})
+
+        call = judge("A", "B")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    assert seen["auth"] == f"Bearer {KEY}"
+    assert seen["payload"]["model"] == "deepseek-flash"
+    assert [m["role"] for m in seen["payload"]["messages"]] == ["system", "user"]
+    assert json.loads(call.text)["equivalent"] is True
+    assert (tmp_path / "runs" / call.run_id).is_file()

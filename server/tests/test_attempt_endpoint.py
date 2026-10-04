@@ -150,6 +150,11 @@ def test_a_second_correct_in_the_cooling_window_is_only_a_warmup(api_for):
     assert (second["data"]["mastery"]["credited"], second["data"]["mastery"]["streak"]) == (False, 1)
     assert second["data"]["mastery"]["state"] == "in_pool", "一次热身不许推进到毕业"
 
+    # `cooling` 是**这一次重做落在冷却里没有**（proto/slice.py:620 的口径：写之前取的闸门），
+    # 不是「写完之后还在不在冷却」——后者恒为真，读数就没有信息了。
+    assert first["data"]["mastery"]["cooling"] is False
+    assert second["data"]["mastery"]["cooling"] is True
+
     _, body = get_json(api, "/api/index")
     assert body["data"]["problems"][0]["attempts"] == 2
 
