@@ -21,11 +21,17 @@ spec #2 第 24 条），归 #12（B4）。所以这里不许长出 `verdict`/`ki
 
 把 `60` 与 `20` 收成同一颗常量是**错的**——它们是两个不同问题的答案。原型真正
 重复实现的是 `60`：它在体检（`_ink_masks`）与擦除（`_np_masks`）里**各写了一遍**。
-收掉之后，`ink_masks`（像素级掩膜）、`colored_pixels`（按框统计）、`cropcheck`
-（框级判据）三条路径都读**同一个** `COLORED_SATURATION_MIN`；`cropcheck` 的
-「框里有红笔」再叠上框级的 `COLOR_MIN_PIXELS`。
 
-收掉 `60` 的收益是具体的：擦除与筛选从此不可能对同一张图给出不同的彩笔像素数。
+**收成了什么、谁共用**：`ink_masks`（像素级掩膜）、`colored_pixels`（按框统计，
+筛选侧）、`ink_statistics`（统计）、`cropcheck`（框级判据的输入）四条读数**都读
+同一个** `COLORED_SATURATION_MIN`；`cropcheck` 的「框里有红笔」再叠上框级的
+`COLOR_MIN_PIXELS`。深色那两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）
+同样收掉了原型的三份副本。
+
+**诚实边界**：擦除路径（原型的 `_np_masks`）**还没被搬进 `server/`**（`#11` 不管
+擦除），所以「擦除与筛选读同一颗」这句话现在是**结构上不再可能分叉**，不是
+「已经接好线」——将来搬擦除时，`ink_masks` 就是它该调的那一个函数，不许再写第二份
+`sat >= 60`。
 
 ## 深色掩膜：为什么它与红笔掩膜共用同一个派生量
 
@@ -295,8 +301,9 @@ def ink_masks(image: InkImage) -> tuple[list[bool], list[bool]]:
     黑笔与印刷体在灰度上同色（`proto/slice.py:860-862`），所以深色掩膜分不开它们——
     它只用来挡「红笔统计把黑笔算进去」，不是「这是印刷体」的判据。
 
-    **这是 `COLORED_SATURATION_MIN` 的消费者之一**：擦除路径与体检路径读的是
-    同一颗常量，所以两条路径对同一张图必然给出同一个红笔像素数。
+    **这是 `COLORED_SATURATION_MIN` 唯一的消费点**：筛选、体检、统计都经它拿掩膜，
+    所以几方不可能对同一张图给出不同的红笔像素数（原型的 `60` 在体检与擦除里
+    各写了一遍，这里只有一份）。
     """
     colored: list[bool] = []
     dark: list[bool] = []
