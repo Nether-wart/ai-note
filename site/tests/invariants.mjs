@@ -17,7 +17,7 @@
  * 方便测试与自检断言；`details` 说清「哪儿、看到了什么」。
  */
 
-import {answerMode} from '../src/lib/redo.js';
+import {answerMode, parseRedoQuery, resolveQueueItem} from '../src/lib/redo.js';
 
 /** 违规码表。测试与自检都对着这些码断言，别改字面量。 */
 export const CODES = Object.freeze({
@@ -233,4 +233,104 @@ export function checkAnswerBox({html, problem}) {
   }
 
   return violations;
+}
+
+// --------------------------- 不变量 3：越界必须失败，绝不悄悄落到别的题上
+
+/**
+ * 验收 3（spec #1 第 34 条、契约 §4）：**队列是快照**——判完一道题的瞬间它进了冷却、
+ * 从默认打印清单里消失，所以服务端现算的「第 i+1 题」会漂到别处去。队列只由 URL 带着走。
+ *
+ * 于是「i 越界了」这件事**必须显式失败**。原型有两处静默过滤，这条判据专门盯它们：
+ *   · `proto/server.py:320-321` 的 `if pid in by_id`——队列里的题查不到就悄悄少一道；
+ *   · `:933-936` 的 `continue`——同上。
+ * 第九轮那条教训在这里同样适用（`docs/acceptance-log.md:284`）：越界必须明确失败。
+ *
+ * 失败**长什么样**也要查：必须是一个带 `data-error-code` 的面板，而且码要对得上
+ * （把「越界」报成「队列为空」同样是坏事：人按错码去修错的地方）。
+ */
+export function checkQueue({html, search, problems = null}) {
+  const violations = [];
+  const parsed = parseRedoQuery(search);
+  const tags = parseTags(html);
+  const panel = tags.find((tag) => 'data-error-code' in tag.attrs);
+  const article = tags.find((tag) => tag.name === 'article' && 'data-current-pid' in tag.attrs);
+  const renderedPid = article ? article.attrs['data-current-pid'] : null;
+
+  /** 期望出现的失败码：来自同一份实现（parseRedoQuery / resolveQueueItem），不在判据里重算。 */
+  let expectedFailure = null;
+  if (!parsed.ok) {
+    expectedFailure = parsed.code;
+  } else if (problems) {
+    const resolution = resolveQueueItem(problems, parsed.queue, parsed.i);
+    if (!resolution.ok) {
+      expectedFailure = resolution.code;
+    }
+  }
+
+  if (expectedFailure) {
+    if (!panel) {
+      violations.push(
+        violate('queue_failure_not_rendered',
+          `队列这份快照不成立（${expectedFailure}），页面上却没有一个明确的失败面板：` +
+            '静默跳过正是这个项目反复被咬的那类失败。',
+          {expected_code: expectedFailure, search: String(search || '')}),
+      );
+    } else if (panel.attrs['data-error-code'] !== expectedFailure) {
+      violations.push(
+        violate('queue_failure_wrong_code',
+          `失败面板报的是 '${panel.attrs['data-error-code']}'，这件事的码应当是 '${expectedFailure}'。`,
+          {declared: panel.attrs['data-error-code'], expected: expectedFailure}),
+      );
+    }
+
+    if (renderedPid !== null) {
+      violations.push(
+        violate(renderedPid === (parsed.ok ? null : firstQueuePid(search))
+          ? 'fell_back_to_the_first_problem'
+          : 'other_problem_rendered',
+        `这一批题不成立（${expectedFailure}），页面却渲染出了题卡 ${renderedPid}：` +
+          '越界／缺失必须明确失败，绝不悄悄落到别的题上。',
+        {rendered: renderedPid, expected_code: expectedFailure}),
+      );
+    }
+
+    return violations;
+  }
+
+  if (panel) {
+    violations.push(
+      violate('spurious_queue_error',
+        `队列是好的，页面上却摆了一个失败面板（data-error-code="${panel.attrs['data-error-code']}"）。`,
+        {code: panel.attrs['data-error-code']}),
+    );
+  }
+
+  if (problems) {
+    const expectedPid = parsed.queue[parsed.i];
+    if (renderedPid === null) {
+      violations.push(
+        violate('expected_problem_not_rendered',
+          `队列第 ${parsed.i} 道是 ${expectedPid}，页面上却一道题都没渲染出来。`,
+          {expected: expectedPid, search: String(search || '')}),
+      );
+    } else if (renderedPid !== expectedPid) {
+      violations.push(
+        violate(renderedPid === parsed.queue[0] && parsed.i > 0
+          ? 'fell_back_to_the_first_problem'
+          : 'other_problem_rendered',
+        `队列第 ${parsed.i} 道是 ${expectedPid}，页面渲染的却是 ${renderedPid}。` +
+          '「第 i 道」在 URL 里定住了，渲染出别的题就是悄悄换了一批。',
+        {rendered: renderedPid, expected: expectedPid, i: parsed.i}),
+      );
+    }
+  }
+
+  return violations;
+}
+
+/** 队列里的第一道（只用来区分「回退到第一题」与「落到别的题上」）。 */
+function firstQueuePid(search) {
+  const raw = new URLSearchParams(String(search || '').replace(/^\?/, '')).get('queue');
+  return raw ? raw.split(',')[0] : null;
 }

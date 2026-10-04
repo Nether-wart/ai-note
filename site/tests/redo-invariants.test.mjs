@@ -229,9 +229,10 @@ test('不变量 3 好输入：队列里的题在索引里找不到，但渲染�
   assert.deepEqual(codes(checkQueue({html, search: '?queue=p-a,p-gone&i=1', problems: QUEUE_PROBLEMS})), []);
 });
 
-test('不变量 3 坏输入：队列解析失败（没有 queue）却没有失败面板 → 报警', () => {
+test('不变量 3 坏输入：队列解析失败（没有 queue）却没有失败面板 → 报警，且不得渲染出题', () => {
   const violations = checkQueue({html: renderedCard('p-a'), search: '', problems: QUEUE_PROBLEMS});
-  assert.deepEqual(codes(violations), ['queue_failure_not_rendered']);
+  // 两件事都坏了：没有失败面板，而且它仍然渲染出了一张题卡（没有队列就没有「第 i 道」）
+  assert.deepEqual(codes(violations).sort(), ['other_problem_rendered', 'queue_failure_not_rendered']);
 });
 
 test('不变量 3 坏输入：渲染了一个既不是第 i 道、也不是第一道的题 → 报警（绝不悄悄落到别的题上）', () => {
