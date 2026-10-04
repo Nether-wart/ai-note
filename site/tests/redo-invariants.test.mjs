@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {checkAnswerBox, checkQuestionImage} from './invariants.mjs';
+import {checkAnswerBox, checkQueue, checkQuestionImage} from './invariants.mjs';
 
 // ---------------------------------------------------------------- 夹具
 
@@ -162,4 +162,74 @@ test('不变量 2 坏输入：选择题的选项丢了（题型枚举静默退�
 test('不变量 2 坏输入：data-answer-mode 与判据读数不符 → 报警（组件宣称的和做的不一样）', () => {
   const violations = checkAnswerBox({html: card('choice', FILLIN_BOX_BODY), problem: SOLUTION_PROBLEM});
   assert.ok(codes(violations).includes('answer_mode_mismatch'), JSON.stringify(violations));
+});
+
+// --------------------------------- 不变量 3：越界必须失败，不回退到别的题
+
+const QUEUE_PROBLEMS = [
+  {id: 'p-a', type: 'choice', options: [{label: 'A', text: '甲'}]},
+  {id: 'p-b', type: 'choice', options: [{label: 'A', text: '甲'}]},
+];
+
+const renderedCard = (renderedPid) => card('choice', CHOICE_BODY).replace(`data-current-pid="${pid}"`, `data-current-pid="${renderedPid}"`);
+const failurePanel = (code) =>
+  `<div class="ai-note-banner" role="alert" data-status="failed" data-error-code="${code}">` +
+  `<p data-error-message="true">…</p></div>`;
+
+test('不变量 3 好输入：队列在范围内、渲染的是第 i 道 → 一条都不报', () => {
+  const html = renderedCard('p-b');
+  assert.deepEqual(codes(checkQueue({html, search: '?queue=p-a,p-b&i=1', problems: QUEUE_PROBLEMS})), []);
+});
+
+test('不变量 3 好输入：越界时渲染成带 data-error-code 的失败面板 → 一条都不报', () => {
+  const html = failurePanel('index_out_of_range');
+  assert.deepEqual(codes(checkQueue({html, search: '?queue=p-a,p-b&i=9', problems: QUEUE_PROBLEMS})), []);
+});
+
+test('不变量 3 坏输入：越界却渲染出了第一题（悄悄落到别的题上）→ 必须报警', () => {
+  const html = renderedCard('p-a');
+  const violations = checkQueue({html, search: '?queue=p-a,p-b&i=9', problems: QUEUE_PROBLEMS});
+  assert.ok(codes(violations).includes('fell_back_to_the_first_problem'), JSON.stringify(violations));
+});
+
+test('不变量 3 坏输入：越界但页面上什么失败都没有（静默跳过）→ 必须报警', () => {
+  const violations = checkQueue({html: '<div data-redo-page="true"></div>', search: '?queue=p-a,p-b&i=9', problems: QUEUE_PROBLEMS});
+  assert.deepEqual(codes(violations), ['queue_failure_not_rendered']);
+});
+
+test('不变量 3 坏输入：失败面板报的是另一个码（越界说成队列为空）→ 报警', () => {
+  const violations = checkQueue({html: failurePanel('queue_empty'), search: '?queue=p-a,p-b&i=9', problems: QUEUE_PROBLEMS});
+  assert.ok(codes(violations).includes('queue_failure_wrong_code'), JSON.stringify(violations));
+});
+
+test('不变量 3 坏输入：在范围内却渲染了第一题（第 i 道被换掉）→ 报警', () => {
+  const violations = checkQueue({html: renderedCard('p-a'), search: '?queue=p-a,p-b&i=1', problems: QUEUE_PROBLEMS});
+  assert.ok(codes(violations).includes('fell_back_to_the_first_problem'), JSON.stringify(violations));
+});
+
+test('不变量 3 坏输入：在范围内却一道题都没渲染出来 → 报警', () => {
+  const violations = checkQueue({html: '<div data-redo-page="true"></div>', search: '?queue=p-a,p-b&i=1', problems: QUEUE_PROBLEMS});
+  assert.deepEqual(codes(violations), ['expected_problem_not_rendered']);
+});
+
+test('不变量 3 坏输入：没出错却摆了一个失败面板 → 报警（不许吓人）', () => {
+  const violations = checkQueue({html: renderedCard('p-b') + failurePanel('index_out_of_range'),
+    search: '?queue=p-a,p-b&i=1', problems: QUEUE_PROBLEMS});
+  assert.ok(codes(violations).includes('spurious_queue_error'), JSON.stringify(violations));
+});
+
+test('不变量 3 坏输入：队列里的题在索引里找不到却跳过它继续做题（原型 :320-321 那种过滤）→ 报警', () => {
+  const html = renderedCard('p-a');
+  const violations = checkQueue({html, search: '?queue=p-a,p-gone&i=1', problems: QUEUE_PROBLEMS});
+  assert.ok(codes(violations).includes('other_problem_rendered'), JSON.stringify(violations));
+});
+
+test('不变量 3 好输入：队列里的题在索引里找不到，但渲染成 problem_not_in_index 面板 → 一条都不报', () => {
+  const html = failurePanel('problem_not_in_index');
+  assert.deepEqual(codes(checkQueue({html, search: '?queue=p-a,p-gone&i=1', problems: QUEUE_PROBLEMS})), []);
+});
+
+test('不变量 3 坏输入：队列解析失败（没有 queue）却没有失败面板 → 报警', () => {
+  const violations = checkQueue({html: renderedCard('p-a'), search: '', problems: QUEUE_PROBLEMS});
+  assert.deepEqual(codes(violations), ['queue_failure_not_rendered']);
 });
