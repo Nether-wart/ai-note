@@ -4,23 +4,26 @@
 写进了第二题，于是那张卡带着另一道题的标准答案被标成了「已审核」。
 所以判据不测措辞、只测「该响的响了」。
 
-每个警告是 `{code, message, id, level}`：`code` 稳定（机器/测试读它），
-`message` 是给人看的原话（界面照原话显示，不改写、不吞掉），
-`level` **显式发出来**（`"warning"`｜`"hint"`）——有默认值却不出现在响应里，
-#9 加 `hint` 级码时就得改判定逻辑、界面也只能靠猜。
+每个警告是 `{code, message, id}`：`code` 稳定（机器/测试读它），
+`message` 是给人看的原话（界面照原话显示，不改写、不吞掉）。
 """
 
 from __future__ import annotations
 
 import re
 
-from . import assets
+from . import assets, pages
 from .mastery import TYPE_CN
 
 _CHOICE_LETTER = re.compile(r"[A-Da-d]")
 
 
 def _warn(code: str, message: str, pid: str | None, level: str = "warning") -> dict:
+    """一条警告。`level` **显式**写出来（契约 §2：级别只有服务能定）——
+    `"warning"` = 这里有东西不对，要看；`"hint"` = 提示级（旧数据不该因为新结构变成脏数据）。
+
+    不靠「省略即默认」：默认值是给人读的，机器读的是盘上那个键。
+    """
     return {"code": code, "message": message, "id": pid, "level": level}
 
 
@@ -68,6 +71,12 @@ def card_warnings(card: dict, catalog) -> list[dict]:
     if assets.recorded_path(card, "original") and not assets.asset_file(catalog, card, "original"):
         warns.append(_warn("original_image_file_missing",
                            f"卡里记了题面图 {assets.recorded_path(card, 'original')!r}，但文件不在", pid))
+
+    # 页绑定（契约 §8、#9 验收 2、编排裁决 D5）。级别由 `page_binding` 一处定：
+    # 旧卡还没回填 = 提示；页实体在场却对不上账 = 警告。这里不重新判一遍。
+    binding = pages.page_binding(catalog, card)
+    if not binding["bound"]:
+        warns.append(_warn(binding["code"], binding["message"], pid, level=binding["level"]))
     return warns
 
 

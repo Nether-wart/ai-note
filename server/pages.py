@@ -273,3 +273,61 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
         },
         "warnings": warnings,
     }
+
+
+# 「这张卡有没有页绑定」的两个码与两个级别（#9 验收 2；#15 的审计在它上面扩展）。
+# 级别只有服务能定（契约 §2），界面不许自行升降级。
+PAGE_BINDING_MISSING = "page_binding_missing"   # 提示级：旧数据（页文件还没建）
+PAGE_BINDING_LOST = "page_binding_lost"         # 警告级：页实体在场却对不上账
+
+
+def _binding(bound: bool, code: str | None, level: str | None, reason: str | None,
+             page_id: str | None, path: Path | None, message: str) -> dict:
+    return {
+        "bound": bound,
+        "code": code,
+        "level": level,
+        "reason": reason,
+        "page_id": page_id,
+        "page_path": str(path) if path is not None else None,
+        "message": message,
+    }
+
+
+def page_binding(catalog, card: dict) -> dict:
+    """「这张卡有没有页绑定」的**唯一实现**（`card_warnings` 与 #15 的审计都消费它）。
+
+    返回 `{bound, code, level, reason, page_id, page_path, message}`；绑定时 `code` 为 `None`。
+
+    两种「没绑定」的级别不同，因为它们的性质不同：
+
+    - 盘上**没有**页文件（或卡里根本没记整页照片）→ `page_binding_missing`，**提示**：
+      这是旧数据（存量卡至今没有页文件），不该因为新结构变成脏数据。
+    - 页文件**在**却读不了、或里面没有任何块绑定这张卡 → `page_binding_lost`，**警告**：
+      页实体已经在场，本该有绑定却对不上账，这是矛盾。
+
+    ⚠ **这条检查能抓住的，永远只是它判据覆盖的那一部分**：绑定只记在页文件里，所以
+    「页文件被整个删掉」与「旧卡从没有过页文件」在盘上长得一样——前者只能报提示。
+    """
+    pid = card.get("id")
+    page_id = page_hash_from_image((card.get("source") or {}).get("page_image"))
+    if not page_id:
+        return _binding(False, PAGE_BINDING_MISSING, "hint", "no_page_image", None, None,
+                        "卡里没记整页照片（source.page_image 为空/不可用）→ 推不出页文件，"
+                        "回填也无从下手")
+    path = page_path(catalog, page_id)
+    page, error = read_page(catalog, page_id)
+    if error:
+        return _binding(False, PAGE_BINDING_LOST, "warning", "page_file_unreadable",
+                        page_id, path, f"{error} → 页实体在，却读不出绑定")
+    if page is None:
+        return _binding(False, PAGE_BINDING_MISSING, "hint", "page_file_missing",
+                        page_id, path,
+                        f"按 source.page_image 推出来的页文件 {path} 不在 → 这是还没回填的旧数据"
+                        f"（可以回填，不是错误）")
+    blocks = page.get("blocks")
+    blocks = blocks if isinstance(blocks, list) else []
+    if any(isinstance(b, dict) and b.get("card_id") == pid for b in blocks):
+        return _binding(True, None, None, None, page_id, path, f"已绑定在页 {page_id} 上")
+    return _binding(False, PAGE_BINDING_LOST, "warning", "card_not_bound", page_id, path,
+                    f"页文件 {path} 在，但里面没有任何块绑定这张卡 → 页↔卡对不上账")

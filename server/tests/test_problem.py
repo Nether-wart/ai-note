@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from conftest import PNG_1X1, get_json, make_card
+from server import pages
 
 PID = "p-20200101-aaaaaa"
 
@@ -25,6 +26,9 @@ def card_with_attempts() -> dict:
 def test_detail_passes_through_the_whole_card(api_for):
     api = api_for([card_with_attempts()], images={f"{PID}-problem.png": PNG_1X1,
                                                  f"{PID}-clean.png": PNG_1X1})
+    # 这张卡号称「一条警告都没有」，所以它也得有页绑定：旧卡缺页绑定现在会响一条
+    # **提示**（#9 验收 2）。先回填，把与本节无关的那条噪音去掉。
+    pages.backfill_pages(api.catalog, apply=True)
     status, body = get_json(api, f"/api/problem/{PID}")
     rec = body["data"]
 

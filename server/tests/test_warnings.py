@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 
-from conftest import PNG_1X1, get_json, make_card
+from conftest import PNG_1X1, make_card
+from server import pages
 
 
 def index_of(api):
@@ -26,10 +27,21 @@ def card_codes(api_for, card, *, images=None):
     return codes_of(body["data"]["problems"][0])
 
 
+def warnings_of(api, code: str) -> list[dict]:
+    return [w for w in index_of(api)["warnings"] if w["code"] == code]
+
+
 def test_a_clean_card_warns_about_nothing(api_for):
+    """字段自检干净、页绑定也在 → 一条都没有（连提示也不该有）。"""
     pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
     images = {f"{pid}-problem.png": PNG_1X1, f"{pid}-clean.png": PNG_1X1}
-    assert card_codes(api_for, make_card(pid), images=images) == set()
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})],
+                  images=images)
+    # 让这张卡变成「有页绑定」：走真的回填，而不是在夹具里手搓一个页文件
+    pages.backfill_pages(api.catalog, apply=True)
+
+    assert codes_of(index_of(api)["data"]["problems"][0]) == set()
 
 
 def test_missing_standard_answer_warns(api_for):
@@ -119,25 +131,82 @@ def test_per_card_warnings_show_up_in_both_places(api_for):
     assert body["data"]["warnings"] == flat
 
 
-def test_every_warning_says_its_level_out_loud(api_for):
-    """`level` 必须显式发出来（契约 §2）。
+# ------------------------------------------- 页绑定：提示不是错误（#9 验收 2）
 
-    现在的码一律 `"warning"`，`hint` 级的 `page_binding_missing` 归 #9。
-    但只要它有默认值却不出现在响应里，#9 加 hint 码时就得改判定逻辑，
-    界面也只能靠猜——ADR 0007 第 6 条要的是「显式喊出来」。
+
+def test_a_legacy_card_without_a_page_file_is_a_hint_not_an_error(api_for):
+    """#9 验收 2：旧卡缺页绑定报**提示**——旧数据不该因为新结构变成脏数据。
+
+    原型里同族的先例是解答题的「标准答案为空」（`proto/server.py:1044-1051`）：
+    把按设计如此的事报成问题，会训练人忽略体检——那比漏报更糟。
     """
-    card = make_card("p-20261004-ef7c47", **{
-        "problem.type": "solution",
-        "standard_answer.value": "",
-        "topics": [],
-    })
-    # 两张题干逐字相同的卡 → 索引级警告（id 为 null 那一种）
-    status, body = get_json(
-        api_for([card, make_card("p-20261004-999999")]), "/api/index"
-    )
+    pid = "p-20200101-aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": "data/pages/aaaaaa.png"})])
 
-    per_card = body["data"]["problems"][0]["warnings"]
-    assert per_card and all(w["level"] == "warning" for w in per_card)
-    index_level = [w for w in body["warnings"] if w["id"] is None]
-    assert index_level and all(w["level"] == "warning" for w in index_level)
-    assert all(w["level"] == "warning" for w in body["skipped"])
+    body = index_of(api)
+
+    assert body["ok"] is True, "提示不是错误：索引照建、卡照出现"
+    assert "error" not in body
+    assert body["data"]["count"] == 1
+
+    (hint,) = warnings_of(api, "page_binding_missing")
+    assert hint["level"] == "hint"
+    assert hint["id"] == pid
+    assert "aaaaaa.json" in hint["message"], "提示里要能定位到缺的是哪个页文件"
+    assert "回填" in hint["message"], "提示要说出下一步怎么办"
+
+
+def test_backfilling_a_legacy_card_clears_the_hint(api_for):
+    """回填之后就这条提示就消失——提示是「还没回填」，不是永久的脏标记。"""
+    pid = "p-20200101-aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": "data/pages/aaaaaa.png"})])
+    assert warnings_of(api, "page_binding_missing"), "先确认它本来会响"
+
+    pages.backfill_pages(api.catalog, apply=True)
+
+    assert not warnings_of(api, "page_binding_missing")
+
+
+def test_a_page_file_that_does_not_bind_the_card_is_a_warning(api_for):
+    """本该有却缺失 = 矛盾，必须喊（提示与错误的级别要分开）。"""
+    pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})])
+    pages.save_page(api.catalog, {
+        "version": 1, "id": page_id, "image": f"{page_id}.png",
+        "created_at": None, "origin": {"original_file": None, "sheet": None, "page_number": None},
+        "blocks": [],   # 页文件在，却一个块都没绑定这张卡
+    })
+
+    (warn,) = warnings_of(api, "page_binding_lost")
+    assert warn["level"] == "warning"
+    assert warn["id"] == pid
+    assert not warnings_of(api, "page_binding_missing"), "两种缺绑定不许混成一个"
+
+
+def test_an_unreadable_page_file_is_a_warning_not_a_silent_hint(api_for):
+    """页文件读不了 = 对不上账，不能装作「旧卡没有页」。"""
+    pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{page_id}.json").write_text("{ 这不是 JSON", encoding="utf-8")
+
+    (warn,) = warnings_of(api, "page_binding_lost")
+    assert warn["level"] == "warning"
+    assert "读不了" in warn["message"]
+
+
+def test_every_warning_carries_an_explicit_level(api_for):
+    """契约 §2 的 Warning 有 `level`：不许靠「省略即默认」——级别只有服务能定。"""
+    a = make_card("p-20200101-aaaaaa", **{
+        "source.page_image": "data/pages/aaaaaa.png",
+        "standard_answer.value": None,
+        "problem.clean_image": None,
+    })
+    b = make_card("p-20200101-bbbbbb", **{"problem.transcript": "1. 一道题"})
+    body = index_of(api_for([a, b]))
+
+    assert body["warnings"], "这组夹具本来就该有警告，否则这条测试是空转"
+    assert all(w.get("level") in ("warning", "hint") for w in body["warnings"])
+    assert "page_binding_missing" in {w["code"] for w in body["warnings"]}

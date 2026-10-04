@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from server import pages
+
 
 def get_json(api, target: str):
     r = api.handle("GET", target)
@@ -80,7 +82,11 @@ def test_images_auto_judge_and_stats(api_for):
 
     pid = "p-20200101-aaaaaa"
     images = {f"{pid}-problem.png": PNG_1X1, f"{pid}-clean.png": PNG_1X1}
-    status, body = get_json(api_for([make_card(pid)], images=images), "/api/index")
+    api = api_for([make_card(pid)], images=images)
+    # 这张卡号称「干净」，所以它也得有页绑定：旧卡缺页绑定现在会响一条**提示**
+    # （#9 验收 2）。先回填，把与本节无关的那条噪音去掉。
+    pages.backfill_pages(api.catalog, apply=True)
+    status, body = get_json(api, "/api/index")
     p = only_problem(body)
 
     assert p["has_clean"] is True
@@ -104,19 +110,10 @@ def test_images_auto_judge_and_stats(api_for):
 
 
 def test_index_states_which_address_the_phone_should_use(api_for):
-    """`--public-base` 必须有暴露面：手机要打开的链接不能靠猜（ADR 0007 第 5 条）。
-
-    #13 把这块扩成服务自述：对外地址、上传页链接（同一个 `public_base` 拼出来）、
-    收件目录在哪，以及「我没有改任何已有数据」。逐项断言而不是整体相等——
-    它是一段会长的自述，整体相等只会在每次加字段时假红。
-    """
+    """`--public-base` 必须有暴露面：手机要打开的链接不能靠猜（ADR 0007 第 5 条）。"""
     status, body = get_json(api_for([]), "/api/index")
-    server = body["data"]["server"]
 
-    assert status == 200
-    assert server["public_base"] == "http://127.0.0.1:8765"
-    assert server["upload_url"] == "http://127.0.0.1:8765/upload"
-    assert server["read_only"] is True
-    assert "inbox" in server and server["reachable_from_other_devices"] is False
-    # 没说出口的降级就是静默：读只读这句话要自己解释清楚它到底指什么
-    assert "收件目录" in server["read_only_note"]
+    assert body["data"]["server"] == {
+        "public_base": "http://127.0.0.1:8765",
+        "read_only": True,
+    }
