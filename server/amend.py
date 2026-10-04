@@ -19,18 +19,17 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 
 from . import mastery, warnings as warnings_mod
-from .errors import ApiError, bad_request
+from .errors import ambiguous_attempt_at, attempt_not_found, bad_request
 
 # 这一种形态**只收这三个键**（契约 §10.1）。多一个键就 400：静默忽略等于没听见。
 AMEND_FORM_KEYS = frozenset({"attempt_at", "error_causes", "verdict"})
 # 这些字段是**服务**写给审计看的，客户端提交一律 400。`verdict` 与 `error_causes`
 # 恰恰是定点修正**允许**改的两个字段，所以不在这张表里。
 NOT_CLIENT_WRITABLE = ("source", "confidence", "provider", "model", "overrode",
-                       "evidence_image", "channel", "at", "answer", "judge_note")
+                       "evidence_image", "channel", "at", "answer", "note", "judge_note")
 # 改判后 `overrode` 里保留的原判定。前三个键照契约 §10.1 的例子；`provider`/`model`
 # 是超集，否则「原本是哪台机器误判的」会永久丢失（spec #1 US 28）。
 _OVERRIDDEN_KEYS = ("verdict", "source", "confidence", "provider", "model")
@@ -39,9 +38,12 @@ _OVERRIDDEN_KEYS = ("verdict", "source", "confidence", "provider", "model")
 class AmendEndpoint:
     """一次定点修正的完整处理。时钟是构造函数注入的接缝（与写路径同一个）。"""
 
-    def __init__(self, catalog, *, clock: Callable) -> None:
+    def __init__(self, catalog, *, clock: Callable, write_card: Callable) -> None:
         self.catalog = catalog
         self.clock = clock
+        # 回写用**写路径那一份**实现（`AttemptEndpoint._write_card`）：原子替换只有一处，
+        # 免得两个形态各写各的、迟早一个忘了 .tmp 或忘了 os.replace。
+        self.write_card = write_card
 
     def handle(self, pid: str, body: dict) -> tuple[dict, list[dict]]:
         """返回 `(data, warnings)`；失败一律抛 `ApiError`（HTTP 层收进信封）。"""
@@ -62,7 +64,7 @@ class AmendEndpoint:
         # 幂等（验收 3）：一个字都没变就不碰盘。第二次提交同一 payload 时，
         # 重算的读数与 `overrode` 都与第一次相同，于是这里连写都不写。
         if _snapshot(card) != before:
-            self._write_card(pid, card)
+            self.write_card(pid, card)
 
         # 「索引重建」在 v0 是立刻读一次现算索引（ADR 0001），与写路径同一条路。
         index_data, _, _ = self.catalog.index()
@@ -85,15 +87,6 @@ class AmendEndpoint:
             "index_rebuilt_at": index_data["built_at"],
         }
         return data, card_warnings
-
-    # ---------------------------------------------------------------- 回写
-
-    def _write_card(self, pid: str, card: dict) -> None:
-        """原子地写回**读进来的那个文件**（按 pid，不按卡里的 id）。"""
-        path = self.catalog.problems_dir / f"{pid}.json"
-        tmp = self.catalog.problems_dir / f"{pid}.json.tmp"
-        tmp.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
 
 
 # -------------------------------------------------------------------- 改判
@@ -139,26 +132,10 @@ def _locate(attempts: list, raw: str, pid: str, *, warnings: list) -> int:
     hits = [i for i, a in enumerate(attempts)
             if isinstance(a, dict) and mastery.parse_dt(a.get("at")) == moment]
     if not hits:
-        raise ApiError(
-            404, "not_found",
-            f"这道题的重做历史里没有 attempt_at = {raw!r} 那一次重做",
-            reason="attempt_not_found",
-            hint=("这几次重做的时刻：" + " / ".join(map(str, available))) if available
-                 else "这道题还没有任何重做记录",
-            details={"id": pid, "attempt_at": raw, "available": available},
-            warnings=warnings,
-        )
+        raise attempt_not_found(raw, pid=pid, available=available, warnings=warnings)
     if len(hits) > 1:
         # 同一秒里有两次重做：`attempt_at` 定位不了唯一一次。挑一个就是「猜」。
-        raise ApiError(
-            409, "ambiguous_attempt_at",
-            f"attempt_at = {raw!r} 对应 {len(hits)} 次重做（同一秒里做了两次），"
-            "定位不到唯一一次",
-            reason="ambiguous_attempt_at",
-            hint="这两次重做的时刻逐字相同，定点修正无法区分它们；先修数据或多给一位精度",
-            details={"id": pid, "attempt_at": raw, "candidates": hits},
-            warnings=warnings,
-        )
+        raise ambiguous_attempt_at(raw, pid=pid, candidates=hits, warnings=warnings)
     return hits[0]
 
 

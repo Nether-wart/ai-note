@@ -99,3 +99,39 @@ def model_unavailable(message: str, *, pid: str, provider: str | None = None,
         hint="可以直接重试；这一次没有留下任何记录",
         details=details,
     )
+
+
+def attempt_not_found(raw: str, *, pid: str, available: list, warnings: list | None = None) -> ApiError:
+    """定点修正（#6）：`attempt_at` 在重做历史里**没有**那一次 → **404**。
+
+    不是 400：请求本身合法，只是它指的那一次不存在。也不是「落到最近一次」——
+    那是原型最讨厌的静默降级。`available` 把**实际有哪些**时刻说出来（ADR 0007 第 6 条）。
+    """
+    return ApiError(
+        404,
+        "not_found",
+        f"这道题的重做历史里没有 attempt_at = {raw!r} 那一次重做",
+        reason="attempt_not_found",
+        hint=("这几次重做的时刻：" + " / ".join(map(str, available))) if available
+             else "这道题还没有任何重做记录",
+        details={"id": pid, "attempt_at": raw, "available": available},
+        warnings=warnings,
+    )
+
+
+def ambiguous_attempt_at(raw: str, *, pid: str, candidates: list,
+                         warnings: list | None = None) -> ApiError:
+    """定点修正（#6）：`attempt_at` 定位到**不止一次**重做（同一秒里做了两次）→ **409**。
+
+    那几次确实存在，只是这个参数区分不了它们；挑一个就是「猜」。
+    """
+    return ApiError(
+        409,
+        "ambiguous_attempt_at",
+        f"attempt_at = {raw!r} 对应 {len(candidates)} 次重做（同一秒里做了两次），"
+        "定位不到唯一一次",
+        reason="ambiguous_attempt_at",
+        hint="这几次重做的时刻逐字相同，定点修正无法区分它们；先修数据或多给一位精度",
+        details={"id": pid, "attempt_at": raw, "candidates": candidates},
+        warnings=warnings,
+    )

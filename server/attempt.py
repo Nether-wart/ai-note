@@ -2,16 +2,22 @@
 
 `POST /api/attempt/<pid>`，body `{"channel": "screen", "answer": "<作答文本>"}`。
 
+同一个路径还收**第三种形态**——定点修正 `{attempt_at, error_causes?, verdict?}`（#6，
+契约 §10.1）：那种形态只改既有那一次重做，不新建、不重跑判定、不调模型，实现全在
+`server/amend.py`；这里只按**键**分流（带 `attempt_at` 的一律走它）。
+
 职责分工写死在这里，一处都不许漂：
 
   · **客户端不碰判定**（spec #1 Implementation Decisions）。服务自己问模型、自己映射、
     自己记来源与置信度；`verdict`／`source`／`confidence`／`provider`／`model` 这些字段
     由客户端提交就直接 400 —— 第八轮那次事故正是把不该写的字段写进了卡里。
+    （**定点修正形态例外地允许人给 `verdict`／`error_causes`**——那是 spec #1 US 16 的
+    当场改判；审计字段仍然只有服务能写。）
   · **能不能自动判定只有一份实现**：`server/autojudge.reject_reason`（#3 立的）。
     三种拒绝理由在这里被**调用**，绝不重写；文案照它的原话。
   · **映射只有一份实现**：`server/judge.judgment_from_output`（#4 立的）。
-  · **状态机只有一份实现**：`server/mastery.apply_attempt`。回写后索引重建
-    （v0 索引每次请求现算，所以「重建」= 写盘之后立刻读一次，拿到新的 `built_at`）。
+  · **状态机只有一份实现**：`server/mastery.apply_attempt`（#6 的重算走同一个 `step`）。
+    回写后索引重建（v0 索引每次请求现算，所以「重建」= 写盘之后立刻读一次，拿到新的 `built_at`）。
   · **调用失败不是判定**（编排裁决 D1）：`ModelUnavailable` → 502，这一次重做不留记录，
     也不改冷却；原型的 `die()` = `sys.exit(2)` 在这里一处都不许出现。
 """
@@ -24,6 +30,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import autojudge, judge, warnings as warnings_mod
+from .amend import AmendEndpoint
 from .autojudge import REASONS
 from .errors import bad_request, model_unavailable, not_auto_judgeable
 from .judge_client import ModelUnavailable, extract_json
@@ -49,12 +56,23 @@ class AttemptEndpoint:
         # 只在 502 的 details 里用：这次本来想用哪个模型（#5 验收：模型失败要说清）
         self.provider = provider
         self.model = model
+        # 同一个端点的第三种形态（#6）：定点修正只改既有那一次重做，不碰判定角色。
+        # 回写用它那一份实现：原子替换只有一处。
+        self.amend = AmendEndpoint(catalog, clock=clock, write_card=self._write_card)
 
     # ---------------------------------------------------------------- 入口
 
     def handle(self, pid: str, raw_body: bytes | str | None) -> tuple[dict, list[dict]]:
-        """返回 `(data, warnings)`；失败一律抛 `ApiError`（由 HTTP 层收进信封）。"""
+        """返回 `(data, warnings)`；失败一律抛 `ApiError`（由 HTTP 层收进信封）。
+
+        同一个端点收两种形态（契约 §10.1）：带 `attempt_at` 的是**定点修正**（#6），
+        只改既有那一次重做；其余走**屏幕重做**（#5），自己问模型、自己判定。
+        形态由**键**分辨，不由「试一下」分辨——两者对同一个键的合法性判断不同。
+        """
         body = _parse_body(raw_body)
+        if "attempt_at" in body:
+            return self.amend.handle(pid, body)
+
         answer = _screen_form(body)
 
         card = self.catalog.load_card(pid)  # id 非法 → 400；没有这张卡 → 404
