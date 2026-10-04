@@ -1,12 +1,16 @@
-"""掌握与冷却的**只读读数**（契约 §4）。
+"""掌握与冷却：**读数 + 状态机的唯一一份实现**（契约 §4、§12）。
 
 口径继承 `proto/slice.py` 与 `proto/test_mastery.py`（冻结的实测证据），代码不继承。
-这里只有读数，没有写：`apply_attempt` 那套状态机归写端点（#5）。
+读（`cooldown_until` / `is_cooling` / `default_list_status` …）与写（`apply_attempt`）
+都在这一处：两套规则分开写，迟早会各判各的。
 
 两条最容易写错、原型里各踩过一次的地方：
   · 冷却的基准是「上次重做」，**从未重做过的以录入时间起算**（CONTEXT「默认打印清单」）；
   · 比较时刻必须**先归一化到 UTC**再比——卡里的 created_at 是 +08:00，重做时刻是 UTC，
     直接比字符串会把 06:31Z 排在 09:00Z 后面。
+
+写那一半还多一条顺序硬规则：**冷却必须在更新 `last_attempt_at` 之前算**。顺序反了，
+当天判对就会被算成脱离冷却、白拿一次掌握计数（`apply_attempt` 的 docstring 有详述）。
 """
 
 from __future__ import annotations
@@ -19,6 +23,11 @@ MASTERY_STREAK = 2  # 掌握 = 连续 2 次判对，且两次都已脱离冷却
 TYPE_CN = {"choice": "选择", "fillin": "填空", "solution": "解答"}
 MASTERY_CN = {"in_pool": "在池", "graduated": "毕业"}
 VERDICT_CN = {"correct": "对", "wrong": "错", "unreadable": "看不清"}
+VERDICTS = ("correct", "wrong", "unreadable")
+CHANNEL_SCREEN = "screen"  # 屏幕重做
+CHANNEL_PAPER = "paper"    # 纸上重做
+CHANNELS = (CHANNEL_SCREEN, CHANNEL_PAPER)
+SOURCE_AUTO = "auto"
 CHANNEL_CN = {"paper": "纸上重做", "screen": "屏幕重做"}
 # 「这条判定是谁给的」。**机器可以读的取值只有这两个**（编排裁决 D2：沿用 proto 的
 # auto/human）；中文渲染另给一份，界面照它显示，不要把中文写回 source 字段。
@@ -92,3 +101,107 @@ def default_list_status(card: dict, at: datetime | None = None) -> tuple[bool, s
     if cooling:
         return False, "cooling"
     return True, None
+
+
+# ------------------------------------------------------------------ 状态机的写
+
+def apply_attempt(card: dict, verdict: str, *, confidence=None, source: str = SOURCE_AUTO,
+                  error_causes=None, at=None, channel: str = CHANNEL_SCREEN,
+                  judge_note: str | None = None, provider: str | None = None,
+                  model: str | None = None) -> dict:
+    """把一次重做写进题卡，并按既定规则更新掌握与冷却。**这套规则只有这一份实现。**
+
+      · 判错 → 无条件清零并立刻回池（毕业取消）；冷却只挡「计入正确」，不挡这一条。
+      · 判对 → 只有距上次重做 ≥ 冷却期（7 天）才计入连续正确；冷却期内的重做只是热身。
+      · 看不清 → 记下这次重做，但既不推进也不清零（低置信度一律落向这里，绝不落向对）。
+      · 连续 2 次**计入**的正确 → 掌握 → 毕业（退出默认打印清单）。
+
+    三条容易写错的地方，前两条各有一条测试钉住：
+
+      · **冷却必须在更新 `last_attempt_at` 之前算**。冷却基准是「上次重做／录入时间」，
+        一旦先把 `last_attempt_at` 写成「现在」，再算冷却就永远落在冷却期里——
+        于是当天判对也被算成热身/（反过来）白拿一次掌握计数。原型踩过这个坑。
+      · `at` 必须可以外部给，且**先归一化到 UTC**：纸上重做是几天里做的，
+        标记可能晚几天才做；卡里 `created_at` 是 `+08:00`、重做时刻是 UTC。
+      · `error_causes` 单个字符串要包成单元素列表——`list("计算失误")` 会拆成单字。
+
+    `judge_note` 是**判定那一步**的说明（为什么落成这个三值），与 `note`（掌握这一步的
+    解释）分开记：界面读 `note`，审计读 `judge_note`（ADR 0007：不许静默）。
+
+    返回本次重做之后的掌握读数（契约 §10.1 的 `mastery` 主体）。
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(f"判定取值非法：{verdict!r}（只能是 {' / '.join(VERDICTS)}）")
+    if source not in SOURCE:
+        raise ValueError(f"来源取值非法：{source!r}（只能是 {' / '.join(SOURCE)}）")
+    if channel not in CHANNELS:
+        raise ValueError(f"通道取值非法：{channel!r}（只能是 {' / '.join(CHANNELS)}）")
+
+    m = card.setdefault("mastery", {"state": "in_pool", "streak": 0, "last_attempt_at": None})
+    if at is None:
+        moment = datetime.now(timezone.utc)
+    elif isinstance(at, datetime):
+        moment = at
+    else:
+        moment = parse_dt(at)
+    if moment is None:
+        raise ValueError(f"重做时刻解析不了：{at!r}（要 ISO 8601 或 datetime）")
+    moment = moment.astimezone(timezone.utc)
+
+    # ⚠ 冷却的基准取的是**写之前**的状态。这两行必须排在
+    # `m["last_attempt_at"] = …` 前面（见 docstring）。
+    prev_base = last_attempt_at(card) or parse_dt(card.get("created_at"))
+    cooling = bool(prev_base and moment < prev_base + timedelta(days=COOLDOWN_DAYS))
+    # 同一天里「录入在下午、标记在当天」会让差值为负——读数该是 0 天，不是 -1 天
+    gap_days = max(0, int((moment - prev_base).total_seconds() // 86400)) if prev_base else None
+
+    causes = [error_causes] if isinstance(error_causes, str) else list(error_causes or [])
+    attempt = {
+        "at": moment.isoformat(timespec="seconds"),   # 定点修正靠它定位，不靠「最近一次」
+        "channel": channel,
+        "verdict": verdict,
+        "source": source,
+        "confidence": confidence,
+        "provider": provider,
+        "model": model,
+        "error_causes": causes,
+        "note": None,
+    }
+    if judge_note:
+        attempt["judge_note"] = judge_note
+    card.setdefault("attempts", []).append(attempt)
+    m["last_attempt_at"] = attempt["at"]
+
+    base = {
+        "verdict": verdict, "credited": False, "streak": int(m.get("streak") or 0),
+        "state": m.get("state") or "in_pool", "cooling": cooling, "gap_days": gap_days,
+        "confidence": confidence, "source": source, "note": None,
+    }
+
+    if verdict == "wrong":
+        m["streak"] = 0
+        m["state"] = "in_pool"
+        m.pop("mastered_at", None)
+        base.update(streak=0, state="in_pool",
+                    note="判错：清零回池（毕业若存在则取消）")
+    elif verdict == "correct":
+        if cooling:
+            base["note"] = (f"判对但仍在冷却期（距上次重做 {gap_days} 天）："
+                            "只热身，不计入掌握")
+        else:
+            m["streak"] = int(m.get("streak") or 0) + 1
+            base.update(credited=True, streak=m["streak"])
+            if m["streak"] >= MASTERY_STREAK:
+                m["state"] = "graduated"
+                m["mastered_at"] = attempt["at"]
+                base.update(state="graduated",
+                            note="判对且脱离冷却：连续正确达标 → 掌握 → 毕业，"
+                                 "退出默认打印清单")
+            else:
+                base["note"] = f"判对且脱离冷却：连续正确 {m['streak']}/{MASTERY_STREAK}"
+    else:
+        base["note"] = "看不清：已记录这次重做，但既不推进也不清零"
+
+    # 一次重做只有一句给界面看的原话（契约 §10.1：attempt.note 与 mastery.note 是同一句）
+    attempt["note"] = base["note"]
+    return base
