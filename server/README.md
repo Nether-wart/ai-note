@@ -75,8 +75,8 @@ python3 -m pytest server/tests -q
 `server.http.Api.handle(method, target, body, content_type)`，
 另有一条真起 socket 的冒烟测试（PUT/POST 的 body 读取、上传、扫描、413 都在真 socket 上
 验过一遍，端口用 `port=0` 让系统挑，不占固定端口）。纯逻辑（冷却／排序／可判性／警告码／
-对外地址解析／状态机）用**假时钟 + 构造记录**喂进去测，判定角色走注入的 stub——
-不联网、不花钱、不画图、不写真 `runs/`。
+对外地址解析／状态机／页与切分对账）用**假时钟 + 构造记录／构造的块列表**喂进去测，
+判定角色走注入的 stub——不联网、不花钱、不画图、不写真 `runs/`。
 
 ## 模块的角色（下游一眼要看到的两件事）
 
@@ -94,6 +94,8 @@ python3 -m pytest server/tests -q
 | `warnings.py` | 会喊的检查（ADR 0007 第 6 条）：逐卡自检 + 索引级检查（串题、id 不一致） |
 | `records.py` | **Problem 记录的唯一构造函数**：列表与详情由它产出，详情是它的超集 |
 | `catalog.py` | 一个数据目录的访问：索引、一题、数据目录形状、对外地址拼法（`public_url`） |
+| `pages.py` | **页的唯一实现**（B1 / #9）：页文件读写、`page_binding`（旧卡缺绑定 = 提示 vs 页↔卡对不上账 = 警告）、`rebind`（重切按位置重合保留绑定，**匹配只有这一处**）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id） |
+| `segmentation.py` | **切分与对账**（B2 / #10）：模型候选块的解析与校验（拒块逐条给理由）、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。纯逻辑：不联网、不画图、不写题卡。页级对账码表见契约 §8 |
 | `publicbase.py` | **对外可达地址的唯一实现**：显式优先、否则按绑定之后的 `host:port` 推导；推出来的地址打不开就喊（ADR 0007 第 5 条） |
 | `inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、手动扫描、multipart 解析；切分（#10）的接缝在这里，没接上就报 `segmentation_not_implemented` |
 | `static/upload.html` | 手机上传页（单文件） |
@@ -128,6 +130,11 @@ python3 -m pytest server/tests -q
   `POST /api/inbox` 的响应里 `pipeline.segmentation.available` 是 `false`、
   `pages[].blocks` 是 `null`（**不是 `[]`**）、`committed` 是 `false`——
   没有块列表、没有红笔统计、没有「已入库」。`inbox.py` 里的 `segmenter` 就是 #10 接上来的口子。
+  **#10 落的是这一层的纯逻辑核心**（`server/segmentation.py`：候选块解析与校验、三条对账判据、
+  重切三态对照），**没有**把 `segmenter` 接上：接上它需要「模型调用失败 → 502
+  `model_unavailable`、不留下半截块」这条错误契约，而 `inbox.run_pipeline` 现在直接调用
+  `segmenter(...)`（异常会落到 `http.py` 的兜底 500，与编排裁决 D1 冲突）。
+  模型客户端（#12 抽的 `server/model_client.py`）落地时一并接，别在这里编块列表。
 - **纸上重做的形态**（`channel:"paper"`）还没实现，仍是 400；`POST` 到 `/api/page*`
   仍是「预留、还没实现」的 404（页文件的形状已由 #9 定下，四个动作归 #10/#12/#14）。
   定点修正（`attempt_at`）已随 #6 落地。

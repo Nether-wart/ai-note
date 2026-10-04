@@ -603,6 +603,34 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `unexpected_file_type` | `warning` | 后缀不在已知照片后缀里 | `<原名>` 的后缀不是已知的照片后缀（…）→ 收下了，但请确认这是照片 |
 | `inbox_created` | `hint` | 扫描时收件目录原来不存在、刚建了一个 | 收件目录原来不存在，刚建了一个：`<路径>` |
 
+**页级对账码表（B2 / #10 落地）**——出现在页资源的对账结论里（`server/segmentation.py`
+的 `reconcile` 与 `classify_resegment` 返回 `{code, level, message}`，形状与上面两张表一致）。
+`level` **显式发出来**：`warning` = 真矛盾；`hint` = 「我这一条没查全 / 我排除了什么」。
+把「按设计如此」报成 `warning` 会训练人忽略体检（`proto/server.py:1046-1047`），那比漏报更糟。
+
+| `code` | `level` | 触发 |
+|---|---|---|
+| `question_number_gap` | `warning` | 模型报出的题号不连续（有 17、19 却没有 18）。**最便宜也最强的漏题探测器** |
+| `question_number_duplicate` | `warning` | 两块报同一个题号（多半是切重了） |
+| `question_number_missing` | `hint` | 有块没报出可用的整数题号 → 题号连续性这一条**查不全**（已知弱点，见模块 docstring），不许当成通过 |
+| `block_overlap` | `warning` | 同页两个块的边界相交（贴边不算，交集面积为 0） |
+| `block_without_box` | `warning` | 块的 `bbox_norm` 缺/退化 → 重叠与覆盖率判据**对它没查**（与 `pages.rebind` 同一个码、同一件事） |
+| `block_not_an_object` | `warning` | 块列表里混进了不是对象的项（与 `pages.rebind` 同一个码） |
+| `block_removed_with_card` | `warning` | 旧块在新切分里找不到位置重合的块，却绑着卡片（`pages.rebind`；#9 已落地） |
+| `page_ink_uncovered` | `warning` | 大片墨迹（≥ `COVERED_MIN`/`UNCOVERED_MIN_PX` 门槛）没被任何块覆盖 |
+| `page_ink_draft_excluded` | `hint` | 按「整页草稿式手写」排除了墨迹（**启发式**）；排除了哪些在 `checks.coverage.excluded` 里 |
+| `page_ink_invalid` | `warning` | 墨迹区域读不出来（`bbox_norm` 缺/退化、`px` 不是非负数）→ 覆盖率对它没查 |
+| `coverage_not_checked` | `hint` | 没有墨迹统计可喂 → 覆盖率这一条**没查**（`checked: false`），不冒充通过 |
+| `block_candidate_rejected` | `warning` | 模型报的候选块被拒（`bbox_norm` 读不出来）→ **少了一块**，别当成「这一页就这么多题」 |
+| `block_box_clamped` | `warning` | 模型报的框越出页面，裁到页内（原始值写进 `message`） |
+| `page_segmentation_unparsed` | `warning` | 模型输出解析不出块列表 → 这是「切分没跑成」，**不是**「这一页没有题」 |
+| `resegment_card_human_work` | `warning` | 重切碰到人动过的卡（审核过的字段／人工掩膜／重做历史）→ 只给对照，不改写它 |
+| `resegment_candidate_has_binding` | `hint` | 候选块上带着绑定 → 重切不认它，但要说出来 |
+
+**「替换」不是一个可以自动产生的状态**：`classify_resegment` 的 `summary.replaced`
+恒为 0——配上的块继承旧绑定（保留），配不上的块本来就没有绑定（新增），
+没有第三条路径能让「同一个位置换一张卡」成为重切的自动结果（有会红的测试钉住）。
+
 **跳过码表（出现在 `skipped` 里，不是 `warnings`）**——这一档比警告重：**记录根本没建出来**。
 
 | `code` | 触发 | `message` |
@@ -808,7 +836,8 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 |---|---|
 | `server/pages.py` | 页文件的读写，以及两处**唯一实现**：`page_binding(catalog, card)`（这张卡有没有页绑定，`card_warnings` 与 #15 的审计都消费它）、`rebind(old, new)`（重切时按位置重合保留绑定） |
 | `server/pages.py: allocate_card_id` / `assign_card_ids` | 题卡 id **首次入库时分配**：形状沿用 `p-<YYYYMMDD>-<6hex>`，日期是**入库日**（不是拍照日）；候选由**块的身份**（`<页 id>#<块 id>`）决定、唯一性由已在库的 id 集合保证 → 一页多块各得一个互不相同的 id（#9 验收 3） |
-| `server/pages.py: rebind` | 重切对账的匹配：位置重合度 = **IoU**，具名常量 `MATCH_IOU = 0.5`（口径的最终裁决在 #10）。一对一贪心；配上的新块继承旧块的 `card_id` 与 `keep`（人动过的两样）；配不上的 `card_id = null`（分配在入库那一刻）。**只给事实、不写盘不写题卡**；对照事实在并排的 `matches` 里，不写进块 |
+| `server/pages.py: rebind` | 重切对账的匹配：位置重合度 = **IoU ≥ `MATCH_IOU`（0.5）** 或 **重叠系数 ≥ `MATCH_CONTAIN`（0.8）**（口径的最终裁决在 #10，理由写在那两个常量旁边与 `rebind` 的 docstring 里）。一对一贪心；配上的新块继承旧块的 `card_id` 与 `keep`（人动过的两样）；配不上的 `card_id = null`（分配在入库那一刻）。**只给事实、不写盘不写题卡**；对照事实在并排的 `matches` 里（`matched_from`/`iou`/`contain`），不写进块 |
+| `server/segmentation.py`（B2 / #10 新增） | **切分与对账**：`SEGMENT_SYSTEM`（抽取角色出候选块的提示词）、`parse_candidate_blocks`（模型输出 → 统一形状的块，**拒块逐条给理由**）、三条确定性判据（`check_question_numbers` / `check_overlaps` / `check_coverage`）、`reconcile`（汇总成一条结构化结论）、`classify_resegment`（把 `rebind` 的事实映射成新增／保留对照，**不写题卡不写盘**）。纯逻辑、不联网、不碰图（`ink` 由图像统计层给）。**不加 HTTP 端点**：v0 的只读立场不变 |
 | `python3 -m server.backfill --data <dir>` | 存量卡 → 页文件的迁移，**默认预演（只读）**，`--apply` 才写；幂等（跑两次不改一个字节、不动题卡） |
 
 **#9 自己不加任何 HTTP 端点**：本节那四个页动作归 #10/#12/#14/#15，HTTP 形状仍是预留。
@@ -933,6 +962,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（B3 / #11） | §12 模块角色加 `server/ink.py`；§10.2.1 预留的 `ink` 键点明由 `ink.page_block_reports` 产出 | 工单 #11 验收 2「体检与筛选读的是同一个常量」。规格原文说「那**一个**阈值」，但源码里是**两颗**回答不同问题的常量（像素级 `sat >= 60` 见 `proto/slice.py:849`/`:921`，框级 `in_color > 20` 见 `:888`）——收成一颗是错的。真正的重复是 `60` 在体检与擦除里各写了一遍。**先写进 issue #11 的评论再动手**（BRIEF 硬规则 3）。本版**不改任何响应形状**：`ink` 是数据文件里的键，不是端点字段 |
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
 | B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
+| 本版（B2 / #10） | §8 加「页级对账码表」16 条（含 `hint`/`warning` 两级，并写明 `replaced` 恒为 0 是结构性的）；§10.2.2 更新 `rebind` 的口径（IoU ≥ 0.5 **或** 重叠系数 ≥ 0.8）并加 `server/segmentation.py`；§12 加该模块的角色 | 工单 #10 验收 1–4。**先写进 issue #10 的评论再动手**（BRIEF 硬规则 3）。要点：三条判据都要**返回结构化结论**而不是打印（ADR 0007 第 6 条）；#9 留给 #10 的是 `MATCH_IOU` 的**口径裁决**——纯 IoU 会把「同一个块被重切细化了边界」判成旧块消失，从而孤立一张已审核的卡，所以补一条包含判据；重切三态里「替换」不允许作为自动结果出现。`inbox.py` 的 `segmenter` 接缝**本版没接**：接它需要「模型失败 → 502」的错误契约，而 `run_pipeline` 现在会让异常落到兜底 500 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
@@ -945,6 +975,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、`POST /api/inbox/scan` 的手动扫描、`multipart/form-data` 解析。**切分（#10）的接缝**在这里：可注入 `segmenter`，不注入就报 `segmentation_not_implemented`、`blocks` 给 `null`——不许编块列表 |
 | `server/static/upload.html` | 手机上传页：**一个文件**，无构建步骤、不引任何外部资源。改它不用碰 Python |
 | `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
+| `server/segmentation.py` | **切分与对账的唯一实现**（B2 / #10）：模型候选块的解析与校验、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。它**消费** `pages.rebind`，不重写匹配；对账码表见 §8 的「页级对账码表」 |
 | `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出 |
 
 ## 12.1 测试接缝
