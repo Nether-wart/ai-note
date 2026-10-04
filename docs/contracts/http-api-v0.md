@@ -636,6 +636,33 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 恒为 0——配上的块继承旧绑定（保留），配不上的块本来就没有绑定（新增），
 没有第三条路径能让「同一个位置换一张卡」成为重切的自动结果（有会红的测试钉住）。
 
+**收入决策码表（B4 / #12 落地）**——出现在 `run_intake` 与 `plan_decisions` 的
+`warnings` 里（页级警告的 `id` 为 `null`，卡/块级警告的 `id` 填**块 id**）。
+
+| `code` | `level` | 触发 |
+|---|---|---|
+| `intake_page_image_missing` | `warning` | 整页照片不在 → 这一页**每一块**的红笔统计都做不了，全部待定。**不许当成「没有红笔」** |
+| `intake_page_image_unreadable` | `warning` | 整页照片读不了（不是 PNG／损坏）→ 同上：全部待定 |
+| `intake_block_ink_unknown` | `warning` | 某一块没有可用的红笔统计（块没有 `bbox_px`、或整页统计没跑到它）→ 该块待定 |
+| `intake_ink_semantics_conflict` | `warning` | 统计说「有红笔」（`colored_px` 有值）但模型说这一块**看不到红笔**（`none`）→ 两层对不上，按「判不准 → 收」处理并把像素数写进 `message` |
+| `intake_semantics_fallback` | `hint` | 这一块有红笔但**语义这一条没查到**：没问模型（预演／没注入抽取角色）、答案丢了、答案不是可读对象、或模型给的语义**不在枚举里** → 按兜底规则落「收」，`message` 说清是哪一种 |
+| `intake_semantics_unparsed` | `warning` | 模型答了话但抠不出可用语义（`parsed: false`）→ 按「判不准 → 收」处理。**这是一次回答，不是调用失败**（调用失败是 §9 的 `model_unavailable`，且不留任何决策）。级别跟 #5 的 `judge_output_unparsed` 对齐：答非所问是**真异常** |
+| `intake_human_decision_preserved` | `hint` | 这一块人去留已定过（`source: "human"`）→ 自动决策不覆盖它，`message` 说明保留了哪一条 |
+| `intake_block_unknown` | `warning` | 一键补收点名要动的块 id 在这一页上找不到 → 那几块**没被动过**（说出来，别让人以为补收成功了） |
+
+**级别按 §8 的两级纪律**：`warning` = 真矛盾（统计说没红笔却调不出语义、模型答非所问、
+点了不存在的块 id）；`hint` = 「我这一条没查全」（没问模型、枚举外取值、人定过的被跳过）。
+把「没查到」报成 `warning` 会训练人忽略体检（`proto/server.py:1046-1047`）——那比漏报更糟。
+
+顺带记账：#5 的 `judge_output_unparsed`（`level: "warning"`，`server/attempt.py:102`，
+「模型答非所问」那一档）此前没进任何码表，本版一并登记——同一个形状的两处不该一处有一处没有。
+
+**「另有 M 道没有红笔痕迹、未入库」这句话由服务给**（与 §6.1 第 5 条同一条规矩）：
+`not_kept` 报告里 `message` 是服务写好的整句，`by_rule` 逐条列出**可枚举**的理由
+（`rule` / `count` / `ids` / `message`），`one_click.entry` 给出**一键补收的可调用入口**。
+M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 spec #2「已知的漏收」那几条
+（老师只写分数不写订正／学生用蓝笔订正／红笔勾表示做对）唯一的补救面。
+
 **跳过码表（出现在 `skipped` 里，不是 `warnings`）**——这一档比警告重：**记录根本没建出来**。
 
 | `code` | 触发 | `message` |
@@ -681,7 +708,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | 小节 | 状态 |
 |---|---|
 | §10.1 `POST /api/attempt/<pid>` | **已实现**：屏幕重做（#5）与定点修正（#6）；`channel:"paper"`（人工确认）仍是预留 |
-| §10.2 `/api/page*` | 形状已落定（#9）；四个动作未实现（#10 #12 #14） |
+| §10.2 `/api/page*` | 形状已落定（#9）；页文件的块已长出 `question_no`（#10）／`ink`（#11）／`decision`（#12）。四个 HTTP 动作仍未实现（归 #14/#15 接线） |
 | §10.3 收件目录与手机上传页 | **已实现**（#13） |
 
 ### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
@@ -827,7 +854,21 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
       "bbox_norm": [0.02, 0.12, 0.76, 0.28],        // 规范基准：整页归一化 xywh
       "bbox_px": [3, 20, 541, 79],                  // 只作交叉验证：整页像素 xyxy
       "card_id": "p-20261004-41c86b",              // 绑定；null = 还没入库
-      "keep": true                                   // 去留：true 收 / false 丢弃 / null 待定
+      "keep": true,                                  // 去留：true 收 / false 丢弃 / null 待定
+      "ink": {                                       // #11 的 ink_statistics 原样；null = 统计读不出来
+        "area": 4108, "colored_px": 210, "colored_ratio": 0.05,
+        "dark_px": 1100, "dark_ratio": 0.27
+      },
+      "decision": {                                  // #12：为什么收／为什么没收（审计面）
+        "keep": true,                                // 与块的 keep 同一份结论（冗余存一份，读一条就够）
+        "rule": "error_trace",                       // 命中的规则码，见下面那张表
+        "source": "model",                           // model｜fallback｜statistics｜human
+        "semantics": "correction",                   // 模型回答的语义；没人判过为 null
+        "reason": "红笔是订正（改错）（表示这道题错了）→ 收：有表示「错」的痕迹",
+        "confidence": 0.93, "provider": "deepseek", "model": "deepseek-flash",
+        "run_id": "20261004-190000-000-redpen-semantics.json",
+        "at": "2026-10-04T19:00:00+08:00"
+      }
     }
   ]
 }
@@ -841,7 +882,29 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `bbox_px` | `[x0, y0, x1, y1]`（**xyxy**），整页像素 | `crop_problem(pad=0.015)` 加 1.5% pad 又裁到页边界的结果（`proto/slice.py:544-555`） |
 
 回填时 `bbox_px` **照抄盘上的原值**，不用 `bbox_norm` 重算。
-下游扩展键**先占名字**（B1 不写）：`question_no`（#10）、`ink`（#11 红笔统计）、`type`（#14）。
+下游扩展键**先占名字**：`question_no`（#10 落地）、`ink`（#11 定义、#12 写入）、
+`decision`（#12 新增）、`type`（#14）。
+
+**`keep` 与 `decision` 是一对**（#12 验收 3）：`keep` 只说去留，`decision` 说**为什么**。
+`decision` 的每个块都要有（`rule` + `reason` + `source` + `semantics`），因为「切分结果与
+收入决策一旦只存在于界面的内存里，『漏了一题』就永远查不出来」（spec #2）——
+决策可审计是这条规则的唯一落点。**人补收/丢弃过的块（`source: "human"`）重跑自动决策时
+原样保留**（人动过的部分不许被抹掉，与 D10 同源）。
+
+`rule` 的取值（stable，改它＝改历史读数）：
+
+| `rule` | 触发 | `keep` |
+|---|---|---|
+| `error_trace` | 语义是叉／圈错／订正（表示这道题错了） | `true` |
+| `tick_only` | 红笔**只是**一个对勾（表示做对了）——唯一的不收例外 | `false` |
+| `uncertain_defaults_to_keep` | 判不准：分数、圈题号、看不清、枚举外的值、没拿到语义 | `true` |
+| `no_red_ink` | 统计说这块没有红笔（`colored_px <= ink.COLOR_MIN_PIXELS`） | `false` |
+| `ink_unknown` | 统计读不出来（块没有可用 `bbox_px`／整页照片不在或读不了） | `null`（待定） |
+| `human_include` / `human_drop` | 人补收／人丢弃（`source: "human"`） | `true` / `false` |
+
+「判不准 → 收」是**决策**不是兜底：漏收一道错题它永远不在库里，误收一道对题审核时
+删掉几秒（代价不对称）。所以「没有红笔」与「读不出来」必须分成两档——`ink_unknown`
+的 `null` 不是「宁可不收」，它是「我还不知道」，并且**每页都必须把它报出来**（§8 码表）。
 
 **题卡上的 `source.{page_image,bbox_norm,bbox_px,original_file}` 保留不动**：
 绑定关系只记在页文件里（spec #2 原话），所以「这张卡有没有页绑定」是从页文件推出来的，
@@ -855,6 +918,10 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `server/pages.py: allocate_card_id` / `assign_card_ids` | 题卡 id **首次入库时分配**：形状沿用 `p-<YYYYMMDD>-<6hex>`，日期是**入库日**（不是拍照日）；候选由**块的身份**（`<页 id>#<块 id>`）决定、唯一性由已在库的 id 集合保证 → 一页多块各得一个互不相同的 id（#9 验收 3） |
 | `server/pages.py: rebind` | 重切对账的匹配：位置重合度 = **IoU ≥ `MATCH_IOU`（0.5）** 或 **重叠系数 ≥ `MATCH_CONTAIN`（0.8）**（口径的最终裁决在 #10，理由写在那两个常量旁边与 `rebind` 的 docstring 里）。一对一贪心；配上的新块继承旧块的 `card_id` 与 `keep`（人动过的两样）；配不上的 `card_id = null`（分配在入库那一刻）。**只给事实、不写盘不写题卡**；对照事实在并排的 `matches` 里（`matched_from`/`iou`/`contain`），不写进块 |
 | `server/segmentation.py`（B2 / #10 新增） | **切分与对账**：`SEGMENT_SYSTEM`（抽取角色出候选块的提示词）、`parse_candidate_blocks`（模型输出 → 统一形状的块，**拒块逐条给理由**）、三条确定性判据（`check_question_numbers` / `check_overlaps` / `check_coverage`）、`reconcile`（汇总成一条结构化结论）、`classify_resegment`（把 `rebind` 的事实映射成新增／保留对照，**不写题卡不写盘**）。纯逻辑、不联网、不碰图（`ink` 由图像统计层给）。**不加 HTTP 端点**：v0 的只读立场不变 |
+| `server/intake.py`（B4 / #12 新增） | **收入决策的唯一实现**：`decide_block`（痕迹语义 → 收／不收／待定，规则码见 §10.2.1）、`plan_decisions`（逐块写 `keep`+`ink`+`decision`，并报出「另有 M 道没有红笔痕迹、未入库」的枚举报告）、`include_blocks`／`set_keep_by_human`（一键补收／人改去留）、`run_intake`（读页 → 统计 → 问模型 → 写回的驱动）。统计消费 `ink.page_block_reports`（#11），页文件读写消费 `pages`（#9）——都不重写 |
+| `server/intake_client.py`（B4 / #12 新增） | **抽取角色看红笔语义的接缝**：`SEMANTICS_SYSTEM`、`semantics_messages`（整页照片 + 块的归一化边界 + 红笔像素数）、`parse_semantics`（原文 → 语义，**从不抛异常**）、`image_data_url`（超 1600 长边才缩放重编码）。调用管道在 `model_client`；留档 tag `redpen-semantics`，**图片不入档** |
+| `server/model_client.py`（B4 / #12 抽出） | **与角色无关的模型调用底座**：`default_transport`（标准库 HTTP）、`extract_json`、`ModelUnavailable`（把「没能问成」与「一次回答」分开）、`save_run`（`runs/` 留档）。判定角色（`server/judge_client.py`，#5）与抽取角色（`intake_client.py`）共用这一条管道；**提示词与消息形状按角色分家** |
+| `python3 -m server.intake --page <页 id> [--apply] [--include\|--include-block <id>]`（B4 / #12 新增） | 一页的收入决策：**默认预演**（不写盘、**不问模型**），`--apply` 才问模型并写回；`--include` 是「一键补收」的命令形态。输出是 §2 的信封（与将来的 HTTP 端点同一形状）。**不加 HTTP 端点**：v0 的只读立场不变 |
 | `python3 -m server.backfill --data <dir>` | 存量卡 → 页文件的迁移，**默认预演（只读）**，`--apply` 才写；幂等（跑两次不改一个字节、不动题卡） |
 
 **#9 自己不加任何 HTTP 端点**：本节那四个页动作归 #10/#12/#14/#15，HTTP 形状仍是预留。
@@ -979,6 +1046,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（B3 / #11） | §12 模块角色加 `server/ink.py`；§10.2.1 预留的 `ink` 键点明由 `ink.page_block_reports` 产出 | 工单 #11 验收 2「体检与筛选读的是同一个常量」。规格原文说「那**一个**阈值」，但源码里是**两颗**回答不同问题的常量（像素级 `sat >= 60` 见 `proto/slice.py:849`/`:921`，框级 `in_color > 20` 见 `:888`）——收成一颗是错的。真正的重复是 `60` 在体检与擦除里各写了一遍。**先写进 issue #11 的评论再动手**（BRIEF 硬规则 3）。本版**不改任何响应形状**：`ink` 是数据文件里的键，不是端点字段 |
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
 | B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
+| 本版（B4 / #12） | §10 状态表补「块已长出 `question_no`/`ink`/`decision`」；§10.2.1 块形状加 `ink`（#11 产出、#12 写入）与 `decision`（新增），并给 `rule` 的七个取值一张表；§8 加「收入决策码表」8 条（含 `hint` 级）；§10.2.2 与 §12 加 `server/intake.py`／`intake_client.py`／`model_client.py` 与 `python3 -m server.intake` | 工单 #12 验收 1/2/3。**先写进 issue #12 的评论再动手**（BRIEF 硬规则 3）。要点：`keep` 只说去留、`decision` 说为什么（决策只存内存＝漏题永远查不出来）；「判不准 → 收」是决策不是兜底（代价不对称），而「统计读不出来」是**待定**（`null`）不是「不收」；人补收/丢弃过的不许被重跑抹掉。**不加 HTTP 端点**：形状归 #14/#15，本版只给服务层入口与 CLI |
 | 本版（B2 / #10） | §8 加「页级对账码表」16 条（含 `hint`/`warning` 两级，并写明 `replaced` 恒为 0 是结构性的）；§10.2.2 更新 `rebind` 的口径（IoU ≥ 0.5 **或** 重叠系数 ≥ 0.8）并加 `server/segmentation.py`；§12 加该模块的角色 | 工单 #10 验收 1–4。**先写进 issue #10 的评论再动手**（BRIEF 硬规则 3）。要点：三条判据都要**返回结构化结论**而不是打印（ADR 0007 第 6 条）；#9 留给 #10 的是 `MATCH_IOU` 的**口径裁决**——纯 IoU 会把「同一个块被重切细化了边界」判成旧块消失，从而孤立一张已审核的卡，所以补一条包含判据；重切三态里「替换」不允许作为自动结果出现。`inbox.py` 的 `segmenter` 接缝**本版没接**：接它需要「模型失败 → 502」的错误契约，而 `run_pipeline` 现在会让异常落到兜底 500 |
 | 本版（B2 / #10 收尾） | §8 的页级对账码表**改回 §2 的 `Warning` 形状**（`{code, message, id, level}`，页级 `id` 为 `null`、卡级填卡 id；`rebind` 交回的事实由出口补级别，表里没有的码按 `warning` 报） | 上一条预告写的 `{code, level, message}` 与 §2「形状一致」自相矛盾，实测也确实漏了：`pages.rebind` 手搓的三条码（`block_without_box`/`block_not_an_object`/`block_removed_with_card`）**没有 `level`**，而 `classify_resegment` 原样透传——于是页级对账的出口会漏出「没有 level 的警告」，下游只能靠猜（正是 §2 要防的）。同时发现 `classify_resegment` 在调 `rebind` 前用 `isinstance(b, dict)` 静默 filter 掉块列表里的非对象项（`rebind` 明明会报 `block_not_an_object`）——与 `proto/server.py:320-321`、`:933-936` 同一种写法。两条都有会红的测试钉住；记账见 issue #10 的评论 |
 | 本版（D10 / #6） | §10.1 的「**掌握只能重算**」改成「**按 payload 是否改判据分流**」：改判（`verdict` 与现值不同）仍必须重放重算；只改错因（没给 `verdict` 或与现值相同）**不重算**，卡上 `mastery` 与既有 `attempts[i].note` 逐字保留。`mastery` 的「被改那一次的读数」由 `mastery.peek_step` **只读地**给（与重放共用同一份冷却门，故两条路径逐字一致，幂等不受影响）。§12 的 `mastery.py`／`amend.py` 两行跟上 | 独立验证者在 #6 上找到的边界：**只改 `error_causes`** 时，若卡上存的 `mastery` 不是历史的重放固定点，`recompute_mastery` 会把它重放改写——一张「已毕业、连对 5 次」的卡因一次纯标注编辑被**静默重置回池**，连 `attempts[i].note` 也被重写。理由三条：无关编辑不该销毁人动过的状态（spec #2 同一原则）、不许静默（ADR 0007 第 6 条）、漂移该由审计报出来（#15）而不是被顺手改掉。**修法是分流，不是取消重放**（#6 验收 1 一条都不许取消） |
@@ -996,6 +1064,9 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
 | `server/segmentation.py` | **切分与对账的唯一实现**（B2 / #10）：模型候选块的解析与校验、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。它**消费** `pages.rebind`，不重写匹配；对账码表见 §8 的「页级对账码表」 |
 | `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出 |
+| `server/model_client.py` | **与角色无关的模型调用底座**（B4 / #12 抽出）：`default_transport`（标准库 HTTP，`server/` 零第三方依赖）、`extract_json`、`ModelUnavailable`、`save_run`（`runs/<stamp>-<tag>.json`，图片一律不入档）。#5 的判定角色与 #12 的抽取角色共用这一条管道——**留两份 HTTP 客户端就是两份重试/留档/失败分类** |
+| `server/intake.py` | **收入决策的唯一实现**（B4 / #12）：`decide_block`（规则表：错痕迹→收／纯对勾→不收／判不准→收／没有红笔→不入库／统计读不出来→待定）、`plan_decisions`（写 `keep`+`ink`+`decision`，报出「另有 M 道…未入库」的可枚举报告）、`include_blocks`（一键补收）、`run_intake`。它**消费** `ink`（统计）与 `pages`（页文件），自己既不数像素也不造页结构 |
+| `server/intake_client.py` | **抽取角色的接缝**（B4 / #12）：红笔语义的提示词与消息形状（**要看图**，与判定角色的纯文本相反）、`parse_semantics`（答不出语义是「判不准」不是调用失败）、`image_data_url`。留档 tag `redpen-semantics`；改提示词必须重跑抽取角色的考卷 |
 
 ## 12.1 测试接缝
 
