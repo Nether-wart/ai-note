@@ -49,8 +49,9 @@ from __future__ import annotations
 import json
 
 from . import judge_client, pages
+from .warnings import _warn as _contract_warn
 
-# 对账结论的码表（形状与契约 §8 的 `Warning` 一致：`{code, level, message}`）。
+# 对账结论的码表（形状与契约 §2 的 `Warning` 一致：`{code, message, id, level}`）。
 # 级别只有服务能定：真矛盾 → warning；「我这一条没查全」→ hint（编排裁决 D1/D3、
 # 契约 §2）。把「按设计如此 / 查不到」报成 warning 会训练人忽略体检
 # （`proto/server.py:1046-1047`），那比漏报更糟。
@@ -71,9 +72,43 @@ RESEGMENT_CARD_HUMAN_WORK = "resegment_card_human_work"    # warning：这块绑
 RESEGMENT_CANDIDATE_BOUND = "resegment_candidate_has_binding"  # hint：候选块不该带绑定
 
 
-def _warn(code: str, message: str, level: str = "warning") -> dict:
-    """一条对账警告。`level` 由服务给（契约 §2：界面不许自行升降级）。"""
-    return {"code": code, "level": level, "message": message}
+# 出口一律走 `server/warnings.py: _warn`（BRIEF 硬规则 7）——**警告的形状只有那一处实现**：
+# `{code, message, id, level}`，`level` 总是显式发出来（契约 §2），页级的 `id` 为 `None`
+# （契约：「索引级（没有具体卡片）的为 null」）。手搓 dict 漏掉 `level` 正是规则 7 要防的事。
+BLOCK_REMOVED_WITH_CARD = "block_removed_with_card"    # warning：消失的块绑着卡片（来自 rebind）
+
+# `pages.rebind` 交回来的是**事实**（码 + 消息），它不管级别；级别由页级对账的出口定，
+# 逐条对齐契约 §8 的「页级对账码表」。表里没有的码**按最响的那一级**报（warning）——
+# 安静地降成 hint 正是这套检查要防的事。
+REBIND_WARNING_LEVELS = {
+    BLOCK_NOT_AN_OBJECT: "warning",
+    BLOCK_WITHOUT_BOX: "warning",
+    BLOCK_REMOVED_WITH_CARD: "warning",
+}
+
+
+def _warn(code: str, message: str, level: str = "warning", *,
+          card_id: str | None = None) -> dict:
+    """页级对账的一条警告。
+
+    **形状的唯一实现在 `server/warnings.py`**（BRIEF 硬规则 7：构造警告一律走它，
+    不许手搓 dict）——本函数只多回答一个问题：「这一条挂在哪张卡上」。
+    `level` 总是显式发出来（契约 §2），页级警告的 `id` 为 `None`
+    （契约：「索引级的为 null」）。
+    """
+    return _contract_warn(code, message, card_id, level)
+
+
+def _reemit(fact: dict) -> dict:
+    """`pages.rebind` 的事实 → 契约 §2 的 `Warning`（补上它没有的 `level`）。
+
+    `rebind` 事实里的 `id` 是**块 id**，不是卡片 id，所以不搬进 `Warning.id`
+    （契约把 `id` 定义为「属于哪张卡」）：块 id 已在 `message` 里点名，
+    机器可读的那一份在 `matches` / `removed` / `blocks` 里。
+    """
+    code = fact.get("code")
+    return _warn(code, fact.get("message", ""),
+                 REBIND_WARNING_LEVELS.get(code, "warning"))
 
 
 # ---------------------------------------------------------------- 切分那一半（模型出候选块）
@@ -439,8 +474,8 @@ def reconcile(blocks, ink=None, *, covered_min: float = COVERED_MIN,
     返回 `{checks, warnings, summary}`：
 
     - `checks`：三条判据各自的**事实**（明细都在这里，界面可以展开看）；
-    - `warnings`：`{code, level, message}` 列表（形状同契约 §8 的 `Warning`）——
-      `warning` 是真矛盾，`hint` 是「我这一条没查全 / 我排除了什么」；
+    - `warnings`：`Warning[]`（形状同契约 §2：`{code, message, id, level}`；页级警告
+      `id` 为 `null`）——`warning` 是真矛盾，`hint` 是「我这一条没查全 / 我排除了什么」；
     - `summary`：`{blocks, alarms, checks_run, checks_skipped, ok, complete}`。
       `ok` 只覆盖**查过的**那部分；`complete` 说清有没有判据在瞎着——
       这两件事分开，是因为「检查通过」与「检查失败」必须长得不一样（见模块 docstring）。
@@ -590,13 +625,20 @@ def classify_resegment(page, new_blocks, *, cards=None) -> dict:
 
     `cards` 可选（`{id: 卡}` 或一串卡）：给了才能判断「这张卡人动过没有」。
     不给 = 这一条没查，报告里 `human_work_checked` 为 `False`（不冒充查过）。
+
+    块列表里混进来的**非对象项**不在本函数里被 filter 掉：原样交给 `rebind`，
+    由它报 `block_not_an_object`（那里是这一份判定的唯一实现）。
     """
-    old_blocks = [b for b in (page.get("blocks") or []) if isinstance(b, dict)]
-    candidates = [b for b in (new_blocks or []) if isinstance(b, dict)]
+    raw_old = list(page.get("blocks") or [])
+    raw_new = list(new_blocks or [])
+    # 两份原始列表**原样交给 `rebind`**：里面混着的非对象项由它显式报出来
+    # （`block_not_an_object`）。这里先 filter 一遍看着更干净，但那是「安静地少一块」——
+    # 本工单要消灭的正是这种写法（原型的 `proto/server.py:320-321`、`:933-936`）。
+    candidates = [b for b in raw_new if isinstance(b, dict)]
     cards_by_id = _cards_by_id(cards)
 
-    report = pages.rebind(old_blocks, candidates)
-    warnings = list(report["warnings"])
+    report = pages.rebind(raw_old, raw_new)
+    warnings = [_reemit(fact) for fact in report["warnings"]]
 
     blocks = list(report["blocks"])
     matches: list[dict] = []
@@ -626,6 +668,7 @@ def classify_resegment(page, new_blocks, *, cards=None) -> dict:
                 RESEGMENT_CARD_HUMAN_WORK,
                 f"块 {block.get('id')!r} 对应的卡片 {block.get('card_id')} 有"
                 f"{'、'.join(signals)} → 这次重切只给对照，不会改写它；请人工确认",
+                card_id=block.get("card_id"),
             ))
 
     for gone in report["removed"]:
@@ -638,6 +681,7 @@ def classify_resegment(page, new_blocks, *, cards=None) -> dict:
             RESEGMENT_CARD_HUMAN_WORK,
             f"消失的块 {gone.get('id')!r} 对应的卡片 {gone['card_id']} 有"
             f"{'、'.join(signals)} → 它的绑定不会被自动转移，请人工确认",
+            card_id=gone["card_id"],
         ))
 
     states = [m["state"] for m in matches]

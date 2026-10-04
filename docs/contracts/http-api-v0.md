@@ -604,9 +604,14 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `inbox_created` | `hint` | 扫描时收件目录原来不存在、刚建了一个 | 收件目录原来不存在，刚建了一个：`<路径>` |
 
 **页级对账码表（B2 / #10 落地）**——出现在页资源的对账结论里（`server/segmentation.py`
-的 `reconcile` 与 `classify_resegment` 返回 `{code, level, message}`，形状与上面两张表一致）。
+的 `reconcile`、`classify_resegment` 与 `parse_candidate_blocks` 返回的就是 §2 那个 `Warning`：
+`{code, message, id, level}`）。页级警告（这一条不对应某一题）的 `id` 为 `null`；
+卡级警告（`resegment_card_human_work`）的 `id` 填**那张卡的 id**，界面不必去 grep 消息。
+构造只有一处实现（`server/warnings.py: _warn`）——手搓 dict 漏掉 `level` 是踩过的坑。
 `level` **显式发出来**：`warning` = 真矛盾；`hint` = 「我这一条没查全 / 我排除了什么」。
 把「按设计如此」报成 `warning` 会训练人忽略体检（`proto/server.py:1046-1047`），那比漏报更糟。
+`pages.rebind` 交回来的是**事实**（码 + 消息，没有级别）：出口按本表补级别，
+表里没有的码按**最响**的那一级（`warning`）报，不许安静降级。
 
 | `code` | `level` | 触发 |
 |---|---|---|
@@ -963,6 +968,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
 | B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
 | 本版（B2 / #10） | §8 加「页级对账码表」16 条（含 `hint`/`warning` 两级，并写明 `replaced` 恒为 0 是结构性的）；§10.2.2 更新 `rebind` 的口径（IoU ≥ 0.5 **或** 重叠系数 ≥ 0.8）并加 `server/segmentation.py`；§12 加该模块的角色 | 工单 #10 验收 1–4。**先写进 issue #10 的评论再动手**（BRIEF 硬规则 3）。要点：三条判据都要**返回结构化结论**而不是打印（ADR 0007 第 6 条）；#9 留给 #10 的是 `MATCH_IOU` 的**口径裁决**——纯 IoU 会把「同一个块被重切细化了边界」判成旧块消失，从而孤立一张已审核的卡，所以补一条包含判据；重切三态里「替换」不允许作为自动结果出现。`inbox.py` 的 `segmenter` 接缝**本版没接**：接它需要「模型失败 → 502」的错误契约，而 `run_pipeline` 现在会让异常落到兜底 500 |
+| 本版（B2 / #10 收尾） | §8 的页级对账码表**改回 §2 的 `Warning` 形状**（`{code, message, id, level}`，页级 `id` 为 `null`、卡级填卡 id；`rebind` 交回的事实由出口补级别，表里没有的码按 `warning` 报） | 上一条预告写的 `{code, level, message}` 与 §2「形状一致」自相矛盾，实测也确实漏了：`pages.rebind` 手搓的三条码（`block_without_box`/`block_not_an_object`/`block_removed_with_card`）**没有 `level`**，而 `classify_resegment` 原样透传——于是页级对账的出口会漏出「没有 level 的警告」，下游只能靠猜（正是 §2 要防的）。同时发现 `classify_resegment` 在调 `rebind` 前用 `isinstance(b, dict)` 静默 filter 掉块列表里的非对象项（`rebind` 明明会报 `block_not_an_object`）——与 `proto/server.py:320-321`、`:933-936` 同一种写法。两条都有会红的测试钉住；记账见 issue #10 的评论 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 

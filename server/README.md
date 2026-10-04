@@ -95,7 +95,7 @@ python3 -m pytest server/tests -q
 | `records.py` | **Problem 记录的唯一构造函数**：列表与详情由它产出，详情是它的超集 |
 | `catalog.py` | 一个数据目录的访问：索引、一题、数据目录形状、对外地址拼法（`public_url`） |
 | `pages.py` | **页的唯一实现**（B1 / #9）：页文件读写、`page_binding`（旧卡缺绑定 = 提示 vs 页↔卡对不上账 = 警告）、`rebind`（重切按位置重合保留绑定，**匹配只有这一处**）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id） |
-| `segmentation.py` | **切分与对账**（B2 / #10）：模型候选块的解析与校验（拒块逐条给理由）、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。纯逻辑：不联网、不画图、不写题卡。页级对账码表见契约 §8 |
+| `segmentation.py` | **切分与对账**（B2 / #10）：模型候选块的解析与校验（拒块逐条给理由）、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。纯逻辑：不联网、不画图、不写题卡。警告一律是契约 §2 的 `Warning`（`{code, message, id, level}`，构造走 `warnings._warn` 那一处）；页级对账码表见契约 §8 |
 | `publicbase.py` | **对外可达地址的唯一实现**：显式优先、否则按绑定之后的 `host:port` 推导；推出来的地址打不开就喊（ADR 0007 第 5 条） |
 | `inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、手动扫描、multipart 解析；切分（#10）的接缝在这里，没接上就报 `segmentation_not_implemented` |
 | `static/upload.html` | 手机上传页（单文件） |

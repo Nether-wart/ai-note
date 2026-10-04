@@ -618,3 +618,96 @@ def test_garbage_from_the_model_is_a_structured_failure_not_a_crash():
         assert result["parsed"] is False
         assert result["blocks"] == []
         assert result["message"], "要说清为什么没解析出东西"
+
+
+# ------------------------------------------- 出口形状：契约 §2 的 Warning 一个键都不许少
+#
+# 起因（本人接手时查出来的缺口，不是推测）：`pages.rebind` 交回来的**事实**是它自己
+# 手搓的字典（没有 `level`），`classify_resegment` 原样 `list(...)` 收下，于是页级对账的
+# 出口会漏出「没有 level 的警告」——契约 §2 明说 `level` **总是显式发出来**（下游只能靠猜
+# 就是这条要防的），§8 的页级对账码表也逐条给了级别。`id` 同理（索引级为 null）。
+# 出口只有三个：`reconcile` / `classify_resegment` / `parse_candidate_blocks`。
+
+
+def _assert_warning_shape(warnings, where: str):
+    for w in warnings:
+        assert set(w) >= {"code", "level", "message", "id"}, f"{where}：少键 {w}"
+        assert w["level"] in {"warning", "hint"}, f"{where}：级别只有两级 {w}"
+        assert isinstance(w["message"], str) and w["message"].strip(), f"{where}：空消息 {w}"
+
+
+def test_reconcile_warnings_all_carry_the_contract_shape():
+    """三条判据全响 + 没给墨迹：出口每一条都必须是 `{code, level, message, id}`。"""
+    blocks = [blk("b1", (0.0, 0.0, 1.0, 0.3), question_no=17),
+              blk("b2", (0.0, 0.2, 0.5, 0.3), question_no=19),
+              blk("b3", None), "oops"]
+
+    report = segmentation.reconcile(blocks, [ink(px=9000), {"bbox_norm": None, "px": 1}])
+
+    _assert_warning_shape(report["warnings"], "reconcile")
+    assert {w["level"] for w in report["warnings"]} == {"warning", "hint"}, \
+        "「真矛盾」与「我这一条没查全」两级都要在——级别不是清一色的默认值"
+
+
+def test_classify_resegment_passes_rebind_facts_through_as_full_warnings():
+    """重切对账的出口也要有自己的 `level`：`rebind` 给的事实不是契约形状。
+
+    这一条是缺口本身：坏框（`block_without_box`）与「消失的块带着卡片」
+    （`block_removed_with_card`）都由 `pages.rebind` 产生，原样透传时**没有 level**。
+    """
+    old = page([blk("b1", (0.0, 0.0, 1.0, 0.3), card_id="p-20261004-aaa111", keep=True),
+                blk("b2", None, card_id="p-20261004-bbb222")])
+    new = [blk("n1", (0.0, 0.0, 1.0, 0.3)), blk("n2", None), "oops"]
+
+    report = segmentation.classify_resegment(old, new, cards=[
+        card("p-20261004-aaa111", reviewed=True)])
+
+    _assert_warning_shape(report["warnings"], "classify_resegment")
+    levels = {w["code"]: w["level"] for w in report["warnings"]}
+    assert levels[segmentation.RESEGMENT_CARD_HUMAN_WORK] == "warning"
+    assert {segmentation.BLOCK_WITHOUT_BOX, segmentation.BLOCK_NOT_AN_OBJECT,
+            segmentation.BLOCK_REMOVED_WITH_CARD} <= set(levels), \
+        "rebind 的三个码都要到出口上，一个都不许在路上丢"
+    assert all(levels[c] == "warning" for c in (
+        segmentation.BLOCK_WITHOUT_BOX, segmentation.BLOCK_NOT_AN_OBJECT,
+        segmentation.BLOCK_REMOVED_WITH_CARD)), "块数据有毛病是真矛盾，不是提示"
+
+
+def test_the_card_a_warning_is_about_is_named_in_id_not_only_in_the_message():
+    """`id` 是机器可读的那一栏：警告挂在哪张卡上，界面不该去 grep 消息。
+
+    页级（没有具体卡片）的警告 `id` 为 `None`——契约 §2 的「索引级为 null」同款。
+    """
+    old = page([blk("b1", (0.0, 0.0, 1.0, 0.3), card_id="p-20261004-aaa111", keep=True)])
+    new = [blk("n1", (0.0, 0.0, 1.0, 0.3))]
+
+    report = segmentation.classify_resegment(old, new, cards=[
+        card("p-20261004-aaa111", attempts=[{"at": "2026-01-01T00:00:00+00:00"}])])
+
+    (loud,) = [w for w in report["warnings"]
+               if w["code"] == segmentation.RESEGMENT_CARD_HUMAN_WORK]
+    assert loud["id"] == "p-20261004-aaa111"
+
+    page_level = segmentation.reconcile([blk("b1", (0.0, 0.0, 0.5, 0.5), question_no=1)])
+    assert [w["id"] for w in page_level["warnings"]] == [None], \
+        "页级的警告没有具体卡片：id 显式为 null，不是缺键"
+
+
+def test_parse_candidate_blocks_warnings_all_carry_the_contract_shape():
+    """解析那一半的出口同理：拒块、裁框、解析失败，每条都有 code/level/message/id。"""
+    text = json.dumps({"blocks": [
+        {"question_no": 17, "bbox_norm": [0.1, 0.8, 0.9, 0.4]},
+        {"question_no": 18, "bbox_norm": "读不出来"},
+    ]}, ensure_ascii=False)
+
+    result = segmentation.parse_candidate_blocks(text)
+
+    _assert_warning_shape(result["warnings"], "parse_candidate_blocks")
+    assert [w["code"] for w in result["warnings"]] == [
+        segmentation.BLOCK_CANDIDATE_REJECTED, segmentation.BLOCK_BOX_CLAMPED] or \
+        [w["code"] for w in result["warnings"]] == [
+        segmentation.BLOCK_BOX_CLAMPED, segmentation.BLOCK_CANDIDATE_REJECTED]
+
+    garbage = segmentation.parse_candidate_blocks("抱歉，我看不清")
+    _assert_warning_shape(garbage["warnings"], "parse_candidate_blocks(失败)")
+    assert garbage["warnings"][0]["level"] == "warning", "「切分没跑成」是真矛盾"
