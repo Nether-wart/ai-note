@@ -9,7 +9,10 @@
   3. 同一次修改重复提交**幂等**（不追加记录、不改状态）；
   4. `attempt_at` 不存在时**明确失败**，绝不落到最近一次；
   5. 改判保留原判定（`overrode`），来源变 `human`（spec #1 US 17、US 28）；
-  6. 定位歧义（同一秒两次重做）也**明确失败**，不静默挑一个。
+  6. 定位歧义（同一秒两次重做）也**明确失败**，不静默挑一个；
+  7. **按 payload 是否改判据分流**（编排裁决 D10）：verdict 未变（只改错因）时**不重放**，
+     掌握与既有 `note` 逐字保留——哪怕卡上存的状态不是重放的固定点（人动过／旧版本写的）；
+     判据真变了（改判）才重放重算，验收 1 不许被取消。
 
 只测外部行为（HTTP 接缝）：一个修正进去，卡与索引的读数出来。模型一次都不调。
 """
@@ -191,6 +194,36 @@ def test_amending_an_attempt_that_is_not_the_last_one_replays_the_rest(api_for):
     assert get_json(api, "/api/index")[1]["data"]["problems"][0]["graduated"] is True
 
 
+def test_changing_the_verdict_still_replays_even_when_the_stored_mastery_is_off(api_for):
+    """D10 的另一半：判据**真变了**（改判）→ 照旧重放重算，#6 验收 1 不许被取消。
+
+    同一张「卡上状态不是重放固定点」的卡（毕业/连对 5，历史里只有一次判错），
+    只把 payload 从「纯标注」换成「改判」，掌握就必须被重放的结果改写：
+    毕业/5 → 在池/1，那一次的 `note` 也随之重写。分流看的是**判据变没变**，
+    不是「卡自不自洽」——自洽的卡反而两种路径同结果，证不了这件事。
+    """
+    at = NOW - 8 * DAY  # 距录入 22 天，早已脱离冷却
+    original = rec(at, "wrong", confidence=0.3, note="旧版本写下的原话")
+    card = card_with([original],
+                     mastery={"state": "graduated", "streak": 5, "last_attempt_at": original["at"]},
+                     created_at=NOW - 30 * DAY)
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": original["at"], "verdict": "correct"})
+
+    assert status == 200, body
+    saved = card_on_disk(api)
+    assert saved["mastery"]["state"] == "in_pool", "改判照旧重放：漂移的卡级状态被重放改写"
+    assert saved["mastery"]["streak"] == 1
+    assert saved["attempts"][0]["note"] == "判对且脱离冷却：连续正确 1/2", \
+        "改判时那一次的 note 由重放重写（D10 只保留「没改判据」那一条路径的 note）"
+    readout = body["data"]["mastery"]
+    assert (readout["cooling"], readout["credited"], readout["gap_days"]) == (False, True, 22)
+    assert readout["streak"] == 1 and readout["state"] == "in_pool"
+    assert get_json(api, "/api/index")[1]["data"]["problems"][0]["graduated"] is False
+
+
 # ---------------------------------------------------------------- 验收 2：只改错因
 
 def test_changing_only_the_error_causes_leaves_mastery_untouched(api_for):
@@ -220,6 +253,39 @@ def test_changing_only_the_error_causes_leaves_mastery_untouched(api_for):
          before["attempts"][0]["confidence"], before["attempts"][0]["provider"],
          before["attempts"][0]["model"]), "补记错因不是改判"
     assert "overrode" not in saved["attempts"][0], "没改判就不该出现原判定"
+
+
+def test_annotating_the_error_causes_keeps_a_hand_made_mastery_verbatim(api_for):
+    """D10 的最小复现：**卡上存的掌握不是重放固定点时，纯标注也不许把它重放改写**。
+
+    独立验证者在 #6 上找到的边界：一次判错的历史 + 一张「已毕业、连对 5 次」的卡
+    （状态是人动过的、或旧版本写的）。只补一个错因不该把这张卡静默重置回池，
+    也不该顺手重写那一次的 `note`——判据一个字都没变，就没有任何理由重放。
+    """
+    at = NOW - 2 * DAY
+    original = rec(at, "wrong", confidence=0.3, note="人动过的那句话")
+    made_by_hand = {"state": "graduated", "streak": 5, "last_attempt_at": original["at"]}
+    card = card_with([original], mastery=dict(made_by_hand), created_at=NOW - 30 * DAY)
+    _, api = api_for_one(api_for, card)
+    before = card_on_disk(api)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": original["at"], "error_causes": ["计算失误"]})
+
+    assert status == 200, body
+    assert body["data"]["attempt"]["error_causes"] == ["计算失误"], "错因照改"
+    saved = card_on_disk(api)
+    assert saved["mastery"] == made_by_hand, "判据没变：掌握逐字保留（不是重放的结果）"
+    assert saved["attempts"][0]["note"] == before["attempts"][0]["note"] == "人动过的那句话", \
+        "判据没变：那一次的 note 不许被重写"
+    # 逐字保留的最强形式：这张卡除了 `error_causes`，别的字段一个字节都不许动
+    # （重放会顺手归一化 `at`、重写 `note`、改 `mastery`——都在这一条上现形）。
+    only_causes_changed = json.loads(json.dumps(before))
+    only_causes_changed["attempts"][0]["error_causes"] = ["计算失误"]
+    assert saved == only_causes_changed, "纯标注只许改 error_causes"
+    assert body["data"]["attempt"]["note"] == "人动过的那句话", "响应里也是同一句原话"
+    # 卡级终态照旧毕业 → 仍然退出默认打印清单（不再「被一次纯标注静默重置回池」）
+    assert get_json(api, "/api/index")[1]["data"]["problems"][0]["graduated"] is True
 
 
 def test_a_single_error_cause_string_is_one_cause_not_its_characters(api_for):
