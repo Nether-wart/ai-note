@@ -134,3 +134,22 @@ def get_json(api, target: str):
     """打一个 GET，返回 `(status, 解析后的信封)`。所有测试都从这一个接缝看服务。"""
     response = api.handle("GET", target)
     return response.status, json.loads(response.body)
+
+
+def multipart_body(files, *, field: str = "file", boundary: str = "----AiNoteTestBoundary"):
+    """自造一个 multipart/form-data body（形状与浏览器 FormData 一致）。
+
+    `files` 是 `[(文件名, 字节)]` 或 `[(文件名, 字节, 声明的 Content-Type)]`。
+    返回 `(body, content_type)`——上传测试不许碰真照片，一律自己造字节。
+    """
+    out = bytearray()
+    for item in files:
+        name, blob = item[0], item[1]
+        declared = item[2] if len(item) > 2 else "image/png"
+        out += f"--{boundary}\r\n".encode()
+        out += f'Content-Disposition: form-data; name="{field}"; filename="{name}"\r\n'.encode()
+        if declared:
+            out += f"Content-Type: {declared}\r\n".encode()
+        out += b"\r\n" + blob + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"

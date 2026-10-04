@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>收件目录 · 上传</title>
+<!--
+  手机上传页：后端托管的一个**单文件**页面（ADR 0007 第 2 条：后端不渲染页面，
+  但托管静态资源）。无构建步骤、不依赖 Docusaurus 产物、不装应用、**不引任何外部资源**
+  ——手机在局域网里可能连不上外网，这个页面必须离线可用。
+  所有请求都发给同源的 /api/inbox。
+-->
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+         margin: 0; padding: 16px 16px 48px; max-width: 640px; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p.sub { color: #666; margin: 0 0 16px; }
+  fieldset { border: 1px solid #bbb; border-radius: 10px; margin: 0 0 14px; padding: 12px; }
+  legend { padding: 0 6px; color: #444; }
+  label.file { display: block; padding: 14px; border: 1px dashed #999; border-radius: 8px;
+               text-align: center; margin: 8px 0; }
+  input[type=file] { display: block; width: 100%; margin: 6px 0; font-size: 15px; }
+  button { width: 100%; padding: 14px; font-size: 17px; border-radius: 8px;
+           border: 0; background: #1b6ef3; color: #fff; }
+  button:disabled { opacity: .5; }
+  .box { border-radius: 8px; padding: 10px 12px; margin: 10px 0; white-space: pre-wrap;
+         word-break: break-word; }
+  .warn { background: #fff4d6; border-left: 4px solid #e0a800; }
+  .err  { background: #ffe3e3; border-left: 4px solid #d33; }
+  .ok   { background: #e7f6ec; border-left: 4px solid #2a9d54; }
+  .dim  { background: #f2f2f2; border-left: 4px solid #aaa; color: #444; }
+  code { font-size: 13px; word-break: break-all; }
+  ul { padding-left: 20px; margin: 6px 0; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>往收件目录放一个文件</h1>
+<p class="sub">拍照或选图 → 上传 → 立刻看结果。三条录入路（电脑拖拽 · 手机上传 · 同步盘目录）
+之后走同一条管道。</p>
+
+<fieldset>
+  <legend>手机：拍照 / 相册</legend>
+  <input id="camera" type="file" accept="image/*" capture="environment">
+</fieldset>
+
+<fieldset>
+  <legend>电脑：一个文件夹 = 多页</legend>
+  <input id="folder" type="file" webkitdirectory directory multiple>
+</fieldset>
+
+<button id="send" type="button">上传</button>
+<p class="sub" id="picked">还没选文件</p>
+
+<div id="result"></div>
+
+<script>
+"use strict";
+
+var camera = document.getElementById("camera");
+var folder = document.getElementById("folder");
+var send = document.getElementById("send");
+var picked = document.getElementById("picked");
+var result = document.getElementById("result");
+
+function chosen() {
+  var files = [];
+  if (folder.files && folder.files.length) { files = files.concat(Array.prototype.slice.call(folder.files)); }
+  if (camera.files && camera.files.length) { files = files.concat(Array.prototype.slice.call(camera.files)); }
+  return files;
+}
+
+function refreshPicked() {
+  var files = chosen();
+  picked.textContent = files.length
+    ? "选了 " + files.length + " 个文件：" + files.map(function (f) { return f.name; }).join("、")
+    : "还没选文件";
+}
+
+camera.addEventListener("change", refreshPicked);
+folder.addEventListener("change", refreshPicked);
+
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) { node.className = cls; }
+  if (text !== undefined) { node.textContent = text; }
+  return node;
+}
+
+function box(cls, title, lines) {
+  var node = el("div", "box " + cls);
+  node.appendChild(el("strong", null, title));
+  (lines || []).forEach(function (line) { node.appendChild(el("div", null, line)); });
+  return node;
+}
+
+// 警告照服务给的**原话**显示（契约 §2：界面照原话显示，不改写、不吞掉）。
+function renderWarnings(env) {
+  (env.warnings || []).forEach(function (w) {
+    result.appendChild(box("warn", (w.level === "hint" ? "提示" : "警告") + "：" + w.code,
+                           [w.message]));
+  });
+  (env.skipped || []).forEach(function (s) {
+    result.appendChild(box("err", "跳过了：" + s.code, [s.message]));
+  });
+}
+
+function render(env, status) {
+  result.textContent = "";
+  if (!env.ok) {
+    var e = env.error || {};
+    result.appendChild(box("err", "上传失败（HTTP " + status + "）：" + (e.code || "?"),
+                           [e.message || "", e.hint || "",
+                            e.details ? JSON.stringify(e.details) : ""]));
+    renderWarnings(env);
+    return;
+  }
+
+  var data = env.data || {};
+  var got = data.received || [];
+  result.appendChild(box("ok", "收进收件目录：" + got.length + " 个文件",
+    got.map(function (f) {
+      return f.name + " → " + f.stored_as + "（" + f.bytes + " 字节"
+        + (f.already_present ? "，目录里原来就有这张" : "") + "）";
+    })));
+
+  var grouping = data.grouping || {};
+  result.appendChild(box("dim", "分组：" + (grouping.kind || "?"), [grouping.note || ""]));
+
+  var pipe = data.pipeline || {};
+  var seg = pipe.segmentation || {};
+  // 切分没就绪时**必须**喊出来，绝不用一个假块列表让界面看起来能跑（派发简报的硬要求）。
+  result.appendChild(box(seg.available ? "ok" : "warn", "切分", [
+    seg.message || "切分可用"
+  ]));
+  var pages = pipe.pages || [];
+  if (pages.length && pages[0] && pages[0].blocks) {
+    pages.forEach(function (page) {
+      var list = el("ul");
+      (page.blocks || []).forEach(function (b) { list.appendChild(el("li", null, JSON.stringify(b))); });
+      result.appendChild(el("div", "box ok", "第 " + (page.page_index + 1) + " 页的块：" + list.textContent));
+    });
+  } else {
+    result.appendChild(box("dim", "块列表：没有", [
+      "pipeline.pages[].blocks 是 null —— 这不是「切出来 0 块」，是「还没切」。"
+    ]));
+  }
+
+  var commit = pipe.commit || {};
+  result.appendChild(box(pipe.committed ? "ok" : "dim",
+    "入库：" + (pipe.committed ? "已生成题卡" : "没有生成任何题卡"),
+    [commit.message || ""]));
+
+  result.appendChild(box("dim", "收件目录", [data.inbox && data.inbox.dir ? data.inbox.dir : ""]));
+  renderWarnings(env);
+}
+
+send.addEventListener("click", function () {
+  var files = chosen();
+  if (!files.length) {
+    result.textContent = "";
+    result.appendChild(box("err", "还没选文件", ["先拍一张，或选一个文件夹。"]));
+    return;
+  }
+  var fd = new FormData();
+  files.forEach(function (f) { fd.append("file", f, f.name); });
+  send.disabled = true;
+  result.textContent = "";
+  result.appendChild(box("dim", "正在上传 " + files.length + " 个文件…", []));
+  fetch("/api/inbox", { method: "POST", body: fd })
+    .then(function (r) { return r.json().then(function (env) { render(env, r.status); }); })
+    .catch(function (err) {
+      result.textContent = "";
+      result.appendChild(box("err", "请求没发出去", [String(err)]));
+    })
+    .then(function () { send.disabled = false; });
+});
+</script>
+</body>
+</html>

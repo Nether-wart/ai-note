@@ -1,6 +1,6 @@
 """HTTP 层：路由 + 信封（契约 §2）。
 
-路由逻辑本身是一个纯函数 `Api.handle(method, target) -> Response`，
+路由逻辑本身是一个纯函数 `Api.handle(method, target, body, content_type) -> Response`，
 不碰 socket——测试直接调它，不起服务、不占端口；真起 socket 的端到端
 另有一条冒烟测试（见 test_server_smoke.py）。
 """
@@ -13,17 +13,19 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import assets
+from . import assets, inbox as inbox_mod
 from .catalog import Catalog
 from .errors import ApiError, bad_request, method_not_allowed, not_found
 
-# v0 只有只读端点。这些命名空间是**预留**的：给一个含糊的 404，
-# 会让人以为是打错了字，而不是「这个端点还没实现」。
+# 还没实现的命名空间是**预留**的：给一个含糊的 404，会让人以为是打错了字，
+# 而不是「这个端点还没实现」。`/api/inbox`（#13）已实现，所以从这里除名。
 RESERVED = {
     "/api/attempt/": "POST /api/attempt/<pid>（作答进 → 判定出 → 回写）归 #5",
     "/api/page": "页资源（建 / 改 / 重切 / 入库）归 #9 #10 #12 #14",
-    "/api/inbox": "往收件目录放一个文件归 #13",
 }
+
+# 手机上传页是后端托管的**静态资源**（ADR 0007 第 2 条：托管文件不是渲染页面）。
+UPLOAD_PAGE = Path(__file__).resolve().parent / "static" / "upload.html"
 
 
 @dataclass
@@ -61,20 +63,29 @@ def json_response(
 
 class Api:
     def __init__(self, data_dir: Path | str, clock=None,
-                 public_base: str | None = None) -> None:
-        self.catalog = Catalog(data_dir, clock=clock, public_base=public_base)
+                 public_base: str | None = None, *, inbox: Path | str | None = None,
+                 bind_host: str | None = None, max_upload_bytes: int | None = None,
+                 segmenter=None) -> None:
+        self.catalog = Catalog(data_dir, clock=clock, public_base=public_base,
+                               inbox=inbox, bind_host=bind_host)
+        # 上传上限是**可注入**的：测试不必真造一个 32MB 的 body 去验 413。
+        self.max_upload_bytes = inbox_mod.MAX_UPLOAD_BYTES if max_upload_bytes is None \
+            else max_upload_bytes
+        # 切分（#10）还没实现。这是一个**接缝**：注入一个 `(path) -> blocks` 就能接上，
+        # 不注入就必须显式报「切分不可用」——绝不返回假的块列表。
+        self.segmenter = segmenter
 
-    def handle(self, method: str, target: str) -> Response:
+    def handle(self, method: str, target: str, body: bytes = b"",
+               content_type: str = "", declared_length: int | None = None) -> Response:
         raw_path, _, query = target.partition("?")
         # 先解码再路由：`%2e%2e%2f` 这类编码必须落进 id 校验，而不是绕过它。
         path = urllib.parse.unquote(raw_path)
         try:
             if method == "OPTIONS":
                 response = self._options()
-            elif method == "GET":
-                response = self._get(path, urllib.parse.parse_qs(query))
             else:
-                raise method_not_allowed(method, ["GET", "OPTIONS"])
+                response = self._route(method, path, urllib.parse.parse_qs(query), body,
+                                       content_type, declared_length)
         except ApiError as exc:
             response = json_response(exc.status, error=exc.payload())
         except Exception as exc:  # 不允许用 500 表达「输入不对」，但真出错要说清
@@ -92,35 +103,62 @@ class Api:
         response.headers.setdefault("Access-Control-Allow-Origin", "*")
         return response
 
+    @staticmethod
+    def _require(method: str, *allowed: str) -> None:
+        """每条路由自己声明允许哪些方法。`POST` 只属于 `/api/inbox*`（#13）。
+
+        `OPTIONS` 永远允许（预检），所以 `allowed` 从必填的方法开始数。
+        """
+        if method not in allowed:
+            raise method_not_allowed(method, [*allowed, "OPTIONS"])
+
     def _options(self) -> Response:
         return Response(
             204,
             b"",
             "text/plain; charset=utf-8",
             headers={
-                "Allow": "GET, OPTIONS",
+                "Allow": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
                 "Access-Control-Max-Age": "600",
             },
         )
 
-    def _get(self, path: str, query: dict) -> Response:
+    def _route(self, method: str, path: str, query: dict, body: bytes,
+               content_type: str, declared_length: int | None) -> Response:
+        # 手机上传页：后端托管的静态资源，不是渲染出来的页面（ADR 0007 第 2 条）。
+        if path == "/upload":
+            self._require(method, "GET")
+            return self._upload_page()
+
         if path == "/api/index":
+            self._require(method, "GET")
             data, warnings, skipped = self.catalog.index()
             return json_response(200, data=data, warnings=warnings, skipped=skipped)
 
+        # 收件目录：录入的唯一入口（ADR 0007 第 4 条）。先判大小，再读 body 的活
+        # 由 `app.py` 干（它才知道 Content-Length）。
+        if path == "/api/inbox":
+            self._require(method, "POST")
+            return self._inbox_upload(body, content_type, declared_length)
+
+        # 目录监视失效时的**手动等价入口**（`inotify` 在同步盘上不可靠，ADR 0007 待验证项）。
+        if path == "/api/inbox/scan":
+            self._require(method, "POST")
+            return self._inbox_scan()
+
         # 图片路由要排在读一题前面：`/api/problem/<pid>/image/<kind>`
-        # `.*`（而不是 `.+`）：空 pid / 空 kind 要落到下面那两条 400 上，
-        # 而不是掉进「没有这条路由」的 404——客户端少给一段路径不是路由写错了。
-        match = re.fullmatch(r"/api/problem/(?P<pid>.*?)/image/(?P<kind>.*)", path)
+        match = re.fullmatch(r"/api/problem/(?P<pid>.+?)/image/(?P<kind>.+)", path)
         if match:
+            self._require(method, "GET")
             return self._image(match.group("pid"), match.group("kind"))
 
         # pid 用 `.+` 而不是 `[^/]+`：带斜杠的非法 id 要被 **400** 抓住，
         # 而不是掉进一个含糊的路由 404（契约 §5.1）。
-        match = re.fullmatch(r"/api/problem/(?P<pid>.*)", path)
+        match = re.fullmatch(r"/api/problem/(?P<pid>.+)", path)
         if match:
+            self._require(method, "GET")
             return json_response(200, data=self.catalog.problem_detail(match.group("pid")))
 
         for prefix, note in RESERVED.items():
@@ -131,6 +169,48 @@ class Api:
                 )
 
         raise not_found(f"没有这条路由：{path}", hint="GET /api/index 看看索引")
+
+    # ------------------------------------------------------------ 上传页
+
+    def _upload_page(self) -> Response:
+        try:
+            page = UPLOAD_PAGE.read_bytes()
+        except OSError as exc:
+            # 页面读不了也不能给一个裸 500——错误仍然是 JSON 信封（契约 §2）。
+            raise ApiError(
+                500, "internal_error",
+                f"上传页文件读不了：{exc.__class__.__name__}: {exc}",
+                hint=f"仓库里应该有 {UPLOAD_PAGE}；它随 server/ 一起发布",
+                details={"what": "upload_page", "path": str(UPLOAD_PAGE)},
+            ) from exc
+        return Response(
+            200, page, "text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store", "Content-Length": str(len(page))},
+        )
+
+    # ------------------------------------------------------------ 收件目录
+
+    def _too_large(self, size: int) -> ApiError:
+        return ApiError(
+            413, "payload_too_large",
+            f"这次上传有 {size} 字节，超过上限 {self.max_upload_bytes} 字节",
+            hint="一张照片不该这么大；手机原图通常是 2–8MB。要放大上限请改 MAX_UPLOAD_BYTES",
+            details={"param": "body", "value": size, "max": self.max_upload_bytes},
+        )
+
+    def _inbox_upload(self, body: bytes, content_type: str,
+                      declared_length: int | None) -> Response:
+        size = declared_length if declared_length is not None else len(body)
+        if size > self.max_upload_bytes:
+            raise self._too_large(size)
+        data, warnings, skipped = inbox_mod.accept(
+            self.catalog.inbox, body, content_type, self.segmenter
+        )
+        return json_response(200, data=data, warnings=warnings, skipped=skipped)
+
+    def _inbox_scan(self) -> Response:
+        data, warnings, skipped = inbox_mod.scan(self.catalog.inbox, self.segmenter)
+        return json_response(200, data=data, warnings=warnings, skipped=skipped)
 
     # ---------------------------------------------------------------- 图片
 
