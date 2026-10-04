@@ -268,6 +268,7 @@ def test_the_self_check_says_so_when_it_could_not_run(tmp_path):
     done = run_node([lonely / "tests" / "selftest.mjs"], cwd=tmp_path)
     assert done.returncode == 2, f"没有渲染依赖时不该报 0/1：\n{done.stdout}\n{done.stderr}"
     assert "这次没跑完（环境）" in done.stdout
+    assert "这是环境缺依赖" in done.stdout
     assert "不是**界面不变量失败" in done.stdout
     assert "界面自检通过" not in done.stdout
 
@@ -315,10 +316,15 @@ def test_a_self_check_that_writes_dies_in_a_read_only_environment(tmp_path):
         data_dir.chmod(0o755)
 
 
+@needs_render
 def test_the_self_check_gives_a_true_verdict_where_the_legacy_one_cannot(tmp_path):
     """同一件事的正面：`data/` 根本不存在时，我们的自检照样给出真结论。
 
     替身在这一步报的是 `FileNotFoundError`（环境缺文件）——原型的老毛病。
+
+    这一趟跑的是**真渲染**的自检，所以要 `site/node_modules`（和上面三条同一道闸门）。
+    缺依赖时它故意退 2 并说「这是环境缺依赖，不是界面不变量失败」——那条约定由
+    `test_the_self_check_says_so_when_it_could_not_run` 钉住；这里不放松断言。
     """
     empty = tmp_path / "no-data-here"
     empty.mkdir()
