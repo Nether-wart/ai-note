@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {checkQuestionImage} from './invariants.mjs';
+import {checkAnswerBox, checkQuestionImage} from './invariants.mjs';
 
 // ---------------------------------------------------------------- 夹具
 
@@ -77,4 +77,89 @@ test('不变量 1 坏输入：kind 属性说自己是 clean、URL 对得上，�
   const html = cleanQuestionHtml().replace('data-image-kind="clean"', 'data-image-kind="original"');
   const violations = checkQuestionImage({html, pid, apiBase: API});
   assert.ok(codes(violations).includes('question_image_kind_mismatch'), JSON.stringify(violations));
+});
+
+// ------------------------------------------- 不变量 2：解答题不得给出作答框
+
+const CHOICE_PROBLEM = {
+  id: pid,
+  type: 'choice',
+  options: [{label: 'A', text: '甲'}, {label: 'B', text: '乙'}],
+  auto_judge: {eligible: true, reason: null, reason_text: null},
+};
+const FILLIN_PROBLEM = {
+  id: pid,
+  type: 'fillin',
+  options: [],
+  auto_judge: {eligible: true, reason: null, reason_text: null},
+};
+const SOLUTION_PROBLEM = {
+  id: pid,
+  type: 'solution',
+  options: [],
+  auto_judge: {
+    eligible: false,
+    reason: 'solution_type',
+    reason_text: '解答题只能人工确认：过程题在屏幕上敲不出过程',
+  },
+};
+
+const card = (mode, body) =>
+  `<article class="ai-note-card" data-current-pid="${pid}" data-answer-mode="${mode}">` +
+  `<img src="${CLEAN}" data-image-kind="clean"/>${body}</article>`;
+
+const CHOICE_BODY =
+  '<form data-answer-form="choice"><fieldset data-answer-input="choice">' +
+  '<label><input type="radio" name="answer" value="A"/> A. 甲</label>' +
+  '<label><input type="radio" name="answer" value="B"/> B. 乙</label></fieldset>' +
+  '<button type="submit" data-submit-attempt="true">提交作答</button></form>';
+const FILLIN_BOX_BODY =
+  '<form data-answer-form="fillin"><label data-answer-input="fillin">填空：' +
+  '<input type="text" autocomplete="off"/></label>' +
+  '<button type="submit" data-submit-attempt="true">提交作答</button></form>';
+const BLOCKED_BODY =
+  '<div class="ai-note-banner" role="alert" data-answer-blocked="solution_type">' +
+  '<strong>这道题不给作答框。</strong><p>解答题只能人工确认：过程题在屏幕上敲不出过程</p></div>';
+
+test('不变量 2 好输入：选择题给选项、填空题给一个空、解答题不给框 → 一条都不报', () => {
+  assert.deepEqual(codes(checkAnswerBox({html: card('choice', CHOICE_BODY), problem: CHOICE_PROBLEM})), []);
+  assert.deepEqual(codes(checkAnswerBox({html: card('fillin', FILLIN_BOX_BODY), problem: FILLIN_PROBLEM})), []);
+  assert.deepEqual(codes(checkAnswerBox({html: card('none', BLOCKED_BODY), problem: SOLUTION_PROBLEM})), []);
+});
+
+test('不变量 2 坏输入：解答题出现了作答框 → 必须报警', () => {
+  const html = card('fillin', FILLIN_BOX_BODY);
+  const violations = checkAnswerBox({html, problem: SOLUTION_PROBLEM});
+  assert.ok(codes(violations).includes('solution_has_answer_box'), JSON.stringify(violations));
+});
+
+test('不变量 2 坏输入：解答题的框只要有一个 <input> 就算（哪怕没有 form 包着）→ 报警', () => {
+  const html = card('none', '<p>过程：<input type="text" autocomplete="off"/></p>');
+  assert.ok(codes(checkAnswerBox({html, problem: SOLUTION_PROBLEM})).includes('solution_has_answer_box'));
+});
+
+test('不变量 2 坏输入：解答题给了 <textarea> 也算作答框 → 报警', () => {
+  const html = card('none', '<textarea name="answer"></textarea>');
+  assert.ok(codes(checkAnswerBox({html, problem: SOLUTION_PROBLEM})).includes('solution_has_answer_box'));
+});
+
+test('不变量 2 坏输入：未审核／无标准答案的题有作答框 → 报警（理由不是解答题也要报）', () => {
+  const unreviewed = {...FILLIN_PROBLEM, auto_judge: {eligible: false, reason: 'unreviewed', reason_text: '还没审核'}};
+  const violations = checkAnswerBox({html: card('fillin', FILLIN_BOX_BODY), problem: unreviewed});
+  assert.ok(codes(violations).includes('blocked_question_has_answer_box'), JSON.stringify(violations));
+});
+
+test('不变量 2 坏输入：该有框的题没有框（题面渲染出来了、作答区丢了）→ 报警', () => {
+  assert.ok(codes(checkAnswerBox({html: card('choice', '<div data-transcript="true">题干</div>'), problem: CHOICE_PROBLEM}))
+    .includes('answer_box_missing'));
+});
+
+test('不变量 2 坏输入：选择题的选项丢了（题型枚举静默退回默认值的同族）→ 报警', () => {
+  const html = card('choice', '<form data-answer-form="choice"><button type="submit">提交</button></form>');
+  assert.ok(codes(checkAnswerBox({html, problem: CHOICE_PROBLEM})).includes('choice_options_missing'));
+});
+
+test('不变量 2 坏输入：data-answer-mode 与判据读数不符 → 报警（组件宣称的和做的不一样）', () => {
+  const violations = checkAnswerBox({html: card('choice', FILLIN_BOX_BODY), problem: SOLUTION_PROBLEM});
+  assert.ok(codes(violations).includes('answer_mode_mismatch'), JSON.stringify(violations));
 });
