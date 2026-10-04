@@ -1,0 +1,14 @@
+{
+  "standard_answer": "x=2√3/3",
+  "note": "人手写的固定考卷：专挑根式有理化的符号与分母陷阱。模型自出的题会偏向它自己擅长的方向，这份不会。",
+  "cases": [
+    { "answer": "x=4√3/6", "equivalent": true },
+    { "answer": "x=2/√3", "equivalent": true },
+    { "answer": "x=√(4/3)", "equivalent": true },
+    { "answer": "x=√12/3", "equivalent": true },
+    { "answer": "x=-2√3/3", "equivalent": false },
+    { "answer": "x=2√3", "equivalent": false },
+    { "answer": "x=3√3/2", "equivalent": false },
+    { "answer": "x=√3/3", "equivalent": false }
+  ]
+}

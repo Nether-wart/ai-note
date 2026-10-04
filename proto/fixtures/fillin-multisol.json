@@ -1,0 +1,5 @@
+{
+  "id": "fixture-fillin-multisol",
+  "note": "硬骨头三：多解。漏掉一个解的答案必须被判为不等价，否则你会带着半对的知识毕业。",
+  "standard_answer": { "value": "x=±2" }
+}

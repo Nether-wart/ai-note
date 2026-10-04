@@ -1,0 +1,15 @@
+{
+  "standard_answer": "(1,2)",
+  "note": "人手写的固定考卷：区间题的全部难点在端点开闭，而端点差别在字符串上只差一个字符。",
+  "cases": [
+    { "answer": "1<x<2", "equivalent": true },
+    { "answer": "x∈(1,2)", "equivalent": true },
+    { "answer": "{x | 1<x<2}", "equivalent": true },
+    { "answer": "(1,2)", "equivalent": true },
+    { "answer": "[1,2]", "equivalent": false },
+    { "answer": "(1,2]", "equivalent": false },
+    { "answer": "[1,2)", "equivalent": false },
+    { "answer": "(0,2)", "equivalent": false },
+    { "answer": "(1,3)", "equivalent": false }
+  ]
+}
