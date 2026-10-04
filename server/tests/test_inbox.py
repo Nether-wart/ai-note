@@ -123,3 +123,177 @@ def test_one_photo_lands_in_the_inbox_dir_and_the_pipeline_says_what_it_did_not_
     assert [w["code"] for w in env["warnings"]] == ["segmentation_not_implemented"]
     assert env["warnings"][0]["message"] == seg["message"]
     assert env["skipped"] == []
+
+
+def test_a_folder_of_photos_is_pages_in_upload_order(tmp_path):
+    """ADR 0007 第 4 条：电脑上「一个文件夹 = 多页（批量）」。
+
+    页的顺序就是上传的顺序——切分与页文件（#9/#10）拿它当页序。
+    """
+    api = build_api(tmp_path)
+    photos = [(f"page-{i}.jpg", b"\xff\xd8JPEG" + bytes([i]) * 10) for i in range(1, 4)]
+    status, env = post(api, "/api/inbox", *multipart_body(photos))
+
+    assert status == 200
+    assert env["data"]["grouping"]["kind"] == "multi_page"
+    assert env["data"]["grouping"]["count"] == 3
+    assert [f["page_index"] for f in env["data"]["received"]] == [0, 1, 2]
+    assert [f["name"] for f in env["data"]["received"]] == \
+        ["page-1.jpg", "page-2.jpg", "page-3.jpg"]
+    assert env["data"]["inbox"]["files"] == 3
+    assert [p["page_index"] for p in env["data"]["pipeline"]["pages"]] == [0, 1, 2]
+    assert len(list((tmp_path / "data" / "inbox").iterdir())) == 3
+
+
+def test_the_same_photo_twice_does_not_pile_up_in_the_inbox(tmp_path):
+    """同步盘会把同一张照片再同步一遍；文件名取内容哈希，所以重复上传不堆两份。"""
+    api = build_api(tmp_path)
+    first = post(api, "/api/inbox", *multipart_body([("a.png", PNG_1X1)]))[1]
+    second = post(api, "/api/inbox", *multipart_body([("副本.png", PNG_1X1)]))[1]
+
+    assert second["data"]["received"][0]["stored_as"] == \
+        first["data"]["received"][0]["stored_as"]
+    assert second["data"]["received"][0]["already_present"] is True
+    assert second["data"]["inbox"]["files"] == 1
+    assert "already_in_inbox" in [w["code"] for w in second["warnings"]]
+
+
+def test_a_weird_suffix_is_taken_but_announced(tmp_path):
+    """同步盘里什么都会掉进来。不收是武断的，不说是不许的（ADR 0007 第 6 条）。"""
+    api = build_api(tmp_path)
+    status, env = post(api, "/api/inbox", *multipart_body([("scan.txt", b"not a photo")]))
+
+    assert status == 200
+    assert env["data"]["received"][0]["stored_as"].endswith(".txt")
+    assert env["data"]["received"][0]["content_type"] == "application/octet-stream"
+    assert "unexpected_file_type" in [w["code"] for w in env["warnings"]]
+
+
+def test_a_traversal_filename_cannot_escape_the_inbox(tmp_path):
+    """服务将来要经 Tailscale 暴露给手机（契约 §7.3），文件名是别人给的输入。"""
+    api = build_api(tmp_path)
+    status, env = post(api, "/api/inbox",
+                       *multipart_body([("../../../evil.png", PNG_1X1)]))
+
+    assert status == 200
+    assert env["data"]["received"][0]["name"] == "evil.png"
+    assert not (tmp_path / "evil.png").exists()
+    assert not (tmp_path / "data" / "data").exists()
+
+
+# --------------------------------------------------------------- 失败形状
+
+
+def test_a_body_without_a_file_part_is_a_400_that_names_the_parameter(tmp_path):
+    """输入错不许用 404 或 500 表达，`details` 要点名是哪个参数（契约 §9）。"""
+    api = build_api(tmp_path)
+    body, ctype = multipart_body([("x.png", PNG_1X1)], field="photo")
+    status, env = post(api, "/api/inbox", body, ctype)
+
+    assert status == 400
+    assert env["ok"] is False
+    assert env["error"]["code"] == "bad_request"
+    assert env["error"]["reason"] == "bad_request"
+    assert env["error"]["details"]["param"] == "file"
+    assert env["error"]["details"]["allowed"] == ["file"]
+    assert env["error"]["hint"]
+
+
+def test_a_non_multipart_body_is_a_400_not_a_500(tmp_path):
+    api = build_api(tmp_path)
+    status, env = post(api, "/api/inbox", b"raw bytes", "image/png")
+
+    assert status == 400
+    assert env["error"]["details"]["allowed"] == ["multipart/form-data"]
+
+
+def test_an_oversized_upload_is_refused_with_413_and_is_not_written(tmp_path):
+    """不能把「一张 2GB 的 body」读进内存再说对不起；上限是可注入的，测试不造大文件。"""
+    api = build_api(tmp_path, max_upload_bytes=16)
+    status, env = post(api, "/api/inbox", *multipart_body([("big.png", b"x" * 64)]))
+
+    assert status == 413
+    assert env["error"]["code"] == "payload_too_large"
+    assert env["error"]["details"]["max"] == 16
+    assert not (tmp_path / "data" / "inbox").exists()
+
+
+def test_an_empty_part_is_skipped_and_said_so(tmp_path):
+    """`skipped` 比警告重：那一张**没有**收进收件目录，不能只靠一句警告带过（契约 §2）。"""
+    api = build_api(tmp_path)
+    status, env = post(api, "/api/inbox",
+                       *multipart_body([("empty.png", b""), ("ok.png", PNG_1X1)]))
+
+    assert status == 200
+    assert [f["name"] for f in env["data"]["received"]] == ["ok.png"]
+    assert [s["code"] for s in env["skipped"]] == ["inbox_part_empty"]
+    assert "empty.png" in env["skipped"][0]["message"]
+    assert env["data"]["inbox"]["files"] == 1
+
+
+def test_the_inbox_endpoints_only_answer_post(tmp_path):
+    api = build_api(tmp_path)
+    for target in ("/api/inbox", "/api/inbox/scan"):
+        r = api.handle("GET", target)
+        assert r.status == 405
+        assert json.loads(r.body)["error"]["details"]["allowed"] == ["POST", "OPTIONS"]
+
+
+# ------------------------------------------- 目录监视失效时的手动等价入口
+
+
+def test_scan_finds_photos_dropped_into_the_directory_and_says_what_it_did_not_do(tmp_path):
+    """第三路录入：同步盘把照片落进收件目录，而 **inotify 在某些挂载上不灵**
+    （ADR 0007 待验证项）。所以「扫一遍」必须是显式入口，且它不许假装处理过。
+    """
+    api = build_api(tmp_path)
+    inbox_dir = tmp_path / "data" / "inbox"
+    inbox_dir.mkdir(parents=True)
+    (inbox_dir / "synced-1.png").write_bytes(PNG_1X1)
+    (inbox_dir / "synced-2.jpg").write_bytes(b"\xff\xd8JPEGDATA")
+
+    status, env = post(api, "/api/inbox/scan")
+
+    assert status == 200 and env["ok"] is True
+    assert env["data"]["inbox"] == {"dir": str(inbox_dir), "exists": True,
+                                    "created": False, "files": 2}
+    assert env["data"]["watch"]["implemented"] is False
+    assert "手动等价入口" in env["data"]["watch"]["message"]
+    found = env["data"]["found"]
+    assert [f["name"] for f in found] == ["synced-1.png", "synced-2.jpg"]
+    assert [f["status"] for f in found] == ["unprocessed", "unprocessed"]
+    assert {f["reason"] for f in found} == {"segmentation_not_implemented"}
+    # 「找到了」不等于「处理了」：没走完管道要说出来，且没有假块列表
+    assert [p["blocks"] for p in env["data"]["pipeline"]["pages"]] == [None, None]
+    assert env["data"]["pipeline"]["committed"] is False
+    assert [w["code"] for w in env["warnings"]] == ["segmentation_not_implemented"]
+
+
+def test_scan_on_a_missing_directory_creates_it_and_says_so(tmp_path):
+    """「收件目录不存在」不该是一个含糊的空响应，也不该是一个错误。"""
+    api = build_api(tmp_path)
+    status, env = post(api, "/api/inbox/scan")
+
+    assert status == 200
+    assert env["data"]["inbox"]["created"] is True
+    assert env["data"]["found"] == []
+    assert [w["code"] for w in env["warnings"]] == ["inbox_created"]
+
+
+def test_an_injected_segmenter_is_the_seam_the_blocks_come_through(tmp_path):
+    """切分（#10）接上来的口子就在这里。这个测试用假切分器证明接缝是真的、
+    不是装饰——接上之后块列表**真的**从管道里出来，而入库仍然明说没做。
+    """
+    blocks = [{"index": 1, "bbox_norm": [0.0, 0.1, 1.0, 0.3], "ink_px": 12}]
+    api = build_api(tmp_path, segmenter=lambda path: [dict(b, page=path.name) for b in blocks])
+    body, ctype = multipart_body([("p.png", PNG_1X1)])
+    status, env = post(api, "/api/inbox", body, ctype)
+
+    assert status == 200
+    page = env["data"]["pipeline"]["pages"][0]
+    assert page["blocks"][0]["index"] == 1
+    assert env["data"]["pipeline"]["segmentation"]["available"] is True
+    assert "segmentation_not_implemented" not in [w["code"] for w in env["warnings"]]
+    # 块出来了，但**没有**入库——`committed` 与 commit 那段话仍然说实话
+    assert env["data"]["pipeline"]["committed"] is False
+    assert env["data"]["pipeline"]["commit"]["reason"] == "not_implemented"

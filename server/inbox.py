@@ -142,7 +142,9 @@ def run_pipeline(inbox: Inbox, pages: list[dict], segmenter) -> tuple[dict, list
         out_pages.append({"page_index": page["page_index"],
                           "stored_as": page["stored_as"], "blocks": blocks})
     warnings = []
-    if not status["available"]:
+    # 只有**真有页要处理**时才喊「切分不可用」。空扫一遍还喊，会训练人忽略警告
+    # （原型里那条纪律：把按设计如此的事报成问题，比漏报更糟——`proto/server.py:1046`）。
+    if not status["available"] and out_pages:
         warnings.append({"code": "segmentation_not_implemented",
                          "message": status["message"], "id": None, "level": "warning"})
     pipeline = {
@@ -272,17 +274,17 @@ def scan(inbox: Inbox, segmenter) -> tuple[dict, list, list]:
     found: list[dict] = []
     for path in inbox.files():
         if path.name.startswith("."):
-            continue  # 写到一半的临时文件不算一页
-        blocked = (not status["available"]) or True  # 入库归 #9/#15，现在一律没走完管道
+            continue  # 写到一半的临时文件（`.xxx.part`）不算一页
+        # `status` 说的是「这条记录走到哪一步了」：切分没就绪 → 没切；切分就绪但
+        # 入库（归 #9/#15）没做 → 切了但没入库。两种情况都不许假装走完了。
         found.append({
             "name": path.name,
             "bytes": path.stat().st_size,
             "sha256": hash_file(path),
             "content_type": content_type_of(path.name),
-            "status": "unprocessed",
+            "status": "unprocessed" if not status["available"] else "segmented",
             "reason": "segmentation_not_implemented" if not status["available"]
                       else "commit_not_implemented",
-            "blocked": blocked,
         })
 
     pages = [{"page_index": i, "stored_as": item["name"]} for i, item in enumerate(found)]
