@@ -16,9 +16,6 @@ node_modules/
 .docusaurus/
 site/build/
 
-# 里程碑二真实渲染验收留下的证据（HTML/PNG 转储）。留着方便复核，但不进仓库。
-.verify/
-
 # 调用留档（含提示词与用量，可能夹带题目内容）
 runs/
 
@@ -30,6 +27,9 @@ data/assets/
 data/problems/
 data/batches/
 data/index.json
+# 收件目录（#13）：照片从手机／同步盘落进来的地方。**它必须是私人的**——
+# 用户在那里放的就是刚拍的手写作业，`git status` 里出现它们比漏收一张更糟。
+data/inbox/
 
 # 仓库外记录：公开文档里被摘除的具体题目内容、学生的错答与订正过程。
 # docs/acceptance-log.md 是公开版，全本在这里。

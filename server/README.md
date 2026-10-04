@@ -31,8 +31,12 @@ curl -X POST http://127.0.0.1:8765/api/inbox/scan
 | `--data` | 仓库根的 `data/`（可用 `AI_NOTE_DATA` 覆盖） | 数据目录。题卡／资产／索引只读 |
 | `--host` | `127.0.0.1` | **默认只监听本机**（ADR 0003）。要让手机连上来用 `0.0.0.0`，同时**必须**给 `--public-base` |
 | `--port` | `8765` | `0` = 让系统挑一个空闲端口（测试用） |
-| `--public-base` | 按**绑定之后**的 `host:port` 推导 | **对外可达地址**（上传页链接、页锚点）。不许从 `--host` 猜（ADR 0007 第 5 条记着这处债）。读在 `GET /api/index` 的 `data.server.public_base` / `upload_url`；推出来的地址别的设备打不开时索引里会出现 `public_base_not_reachable` 警告 |
-| `--inbox` | **数据目录**下面的 `inbox/`（跟着 `--data` 走） | 收件目录（「往这里放一个文件」就是录入）。不监视——手动等价入口是 `POST /api/inbox/scan` |
+| `--public-base`（`AI_NOTE_PUBLIC_BASE`） | 按**绑定之后**的 `host:port` 推导 | **对外可达地址**（上传页链接、页锚点）。不许从 `--host` 猜（ADR 0007 第 5 条记着这处债）。读在 `GET /api/index` 的 `data.server.public_base` / `upload_url`；推出来的地址别的设备打不开时，启动日志与索引里都会出现 `public_base_not_reachable` 警告 |
+| `--inbox`（`AI_NOTE_INBOX`） | **数据目录**下面的 `inbox/`（跟着 `--data` 走） | 收件目录（「往这里放一个文件」就是录入）。不监视——手动等价入口是 `POST /api/inbox/scan` |
+
+> 这几个环境变量由 **shell** 给（`AI_NOTE_PUBLIC_BASE=... python3 -m server.app`，
+> 或 systemd 的 `Environment=`）。`server/` **不读 `.env.local`**——所以不要把它们写进
+> 那个文件然后指望生效（原型 `proto/slice.py` 会自己读，新后端不会）。
 
 ## 端点
 
