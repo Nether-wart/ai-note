@@ -334,9 +334,21 @@ def page_binding(catalog, card: dict) -> dict:
                     f"页文件 {path} 在，但里面没有任何块绑定这张卡 → 页↔卡对不上账")
 
 
-# 「位置重合度」的判据 spec 没给公式（spec-2 笔记 §C 待确认）：先钉 0.5，口径的最终
-# 裁决在 #10——改这一个常量即可，匹配逻辑只有这一处。
+# 「位置重合度」的判据 spec 没给公式（spec-2 笔记 §C 待确认），口径的**最终裁决在 #10**。
+# 裁决结论（理由逐条写在 `rebind` 的 docstring 里）：
+#
+#   · 主判据仍是 **IoU**，阈值 **0.5** 不变。IoU 对称、对「凭空长大」与「凭空缩小」
+#     一样敏感，而且 #9 已经用**手算的几何**把它钉在了两条边界上（完全重合 → 1.0；
+#     部分重叠 0.2857 → 不是同一块）。这条边界本工单不动。
+#   · 但纯 IoU 会**系统性漏掉**「同一个块、边界被重切细化了」：新框整个落在旧框里时
+#     IoU = 新面积 / 旧面积，缩到一半以下就判成「旧的消失 + 新的出现」，
+#     于是把一张可能已审核的卡孤立掉——正是 spec #2 最怕的那类失败
+#     （「人动过的卡片不允许被一次重切抹掉」）。
+#   · 所以补一条**包含**判据：重叠系数（交 / 较小那块）≥ `MATCH_CONTAIN` 也算同一个块。
+#     它只放宽「一个框整个在另一个框里」这一种形状，「部分重叠但谁也不包含谁」不受影响
+#     （#9 钉住的 0.2857 那例的重叠系数是 0.5 < 0.8，仍然不配——那条测试保持绿）。
 MATCH_IOU = 0.5
+MATCH_CONTAIN = 0.8
 # 匹配上的块要从旧块继承的键 = **人动过**的那些：绑定与去留（#14 验收 2）。
 # 几何（bbox_*）当然用新的；题号与红笔统计是切分/统计的产物，重新算，不继承。
 PRESERVED_KEYS = ("card_id", "keep")
@@ -350,6 +362,16 @@ def _xywh(box):
     if w <= 0 or h <= 0:
         return None
     return x, y, w, h
+
+
+def usable_box(box) -> bool:
+    """这个框读得出来吗——**框的形状判据只有这一处**。
+
+    `#10` 的对账（重叠、覆盖率）要能区分「两个框不相交」与「这个框根本读不出来」：
+    `iou()` 对两种情况都返回 `0.0`（不猜），所以调用方必须先用这个函数把坏框挑出来
+    显式报掉（ADR 0007 第 6 条不许静默），而不是让它们混进「没有重叠」里。
+    """
+    return _xywh(box) is not None
 
 
 def iou(a, b) -> float:
@@ -368,28 +390,69 @@ def iou(a, b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
+def overlap_coefficient(a, b) -> float:
+    """重叠系数 = 交 / **较小那块**的面积（也叫包含度）。读不出来 → `0.0`。
+
+    与 `iou` 的分工：`iou` 惩罚面积变化（包含关系下 IoU = 小/大），
+    `overlap_coefficient` 只问「小的是不是整个在大块里」。重切把同一个块的边界
+    细化（把上一题的手写解答从框里剔出去）时，后者才认得出是同一个块——
+    判据的裁决理由在 `MATCH_IOU / MATCH_CONTAIN` 那段注释与 `rebind` 的 docstring 里。
+    """
+    ra, rb = _xywh(a), _xywh(b)
+    if ra is None or rb is None:
+        return 0.0
+    ax, ay, aw, ah = ra
+    bx, by, bw, bh = rb
+    ix = min(ax + aw, bx + bw) - max(ax, bx)
+    iy = min(ay + ah, by + bh) - max(ay, by)
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    smaller = min(aw * ah, bw * bh)
+    return (ix * iy) / smaller if smaller > 0 else 0.0
+
+
+def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
+           contain_threshold: float = MATCH_CONTAIN) -> dict:
     """重切对账的**唯一**匹配逻辑：按位置重合度把新旧块配上，配上就**保留原有绑定**。
 
-    - 一对一**贪心**：所有 IoU ≥ 阈值的新旧块对按 IoU 从大到小排序，依次配对
+    - 一对一**贪心**：所有够格的（新, 旧）块对按「配得有多好」从大到小排序，依次配对
       （同分时按块序定序）。确定性、可测：同样的输入永远同样的输出。
     - 配上的新块继承旧块的 `PRESERVED_KEYS`——所以**重切不会给已审核、已重做过的
       卡片改名**，也不会把人定过的去留抹掉（spec #2 的目标句）。
-    - 配不上的新块 `card_id` 为 `None`：**分配新 id 发生在入库那一刻**
-      （`assign_card_ids`），不在重切里。
+    - 配不上的新块 `card_id` 为 `None`（**分配新 id 发生在入库那一刻**，
+      `assign_card_ids`），除非调用方在候选块上塞了一个绑定——那种块**不认**它，
+      由 #10 的对账显式报出来（候选块不该带绑定）。
     - 没被任何新块配上的旧块进 `removed`；**带着卡片的必须喊**——「人动过的卡片
       不允许被一次重切抹掉」（spec #2）。
 
+    **口径的最终裁决（#10）**：够格 = `iou >= iou_threshold`（0.5）
+    **或** `overlap_coefficient >= contain_threshold`（0.8）。
+
+    为什么是这两条：匹配要回答的是「重切之后这个新块还是不是原来那个块」，
+    它的目的是**保住人动过的绑定**，不是衡量检测质量。IoU 对称、对面积变化敏感，
+    是主判据；但它有一个系统性盲点——新框整个落在旧框里时 IoU = 新/旧，
+    重切把上一题的手写解答从框里剔出去（**这正是重切该做的事**）就会把 IoU 打到
+    0.5 以下，于是「同一个块」被判成「旧的消失 + 新的出现」，一张可能已审核的卡
+    就此被孤立。包含判据补的正是这一种形状：小框整个在大框里 = 同一个块被细化。
+    它不放宽「部分重叠但谁也不包含谁」——`#9` 用手算几何钉住的 0.2857 那例
+    重叠系数只有 0.5，仍然不配（`server/tests/test_pages.py` 那条测试保持绿）。
+
+    代价（写在明处）：位置是这里唯一的信息，所以「一道新题恰好整个落在旧框里」
+    会被当成同一个块。它不会安静——那一页若真有重叠，`#10` 的 `block_overlap`
+    判据会另外喊；而对照里这一块显示「保留」，人在界面上能看见并改绑。
+    反过来（把同一个块当成新块）要赔上一张卡的绑定，代价不对称，所以偏前者。
+
     本函数**不写盘、不写题卡**，只给事实：`matches`（与 `blocks` 同序的逐块对照，
-    给出 `matched_from` 与 `iou`）与 `removed`。界面上「新增／替换／保留」怎么措辞
-    由 #10 定（它在这些事实上做三态映射）。
+    给出 `matched_from`、`iou` 与 `contain`）与 `removed`。界面上「新增／替换／保留」
+    怎么措辞由 #10 定（它在这些事实上做三态映射，见 `server/segmentation.py`）。
 
     对照事实**放在 `matches` 里、不放进块**：块会长成页文件的一行，而
     `matched_from` 下一次重切就过期了——把过期事实写进存档文件，正是这个项目
     最怕的那种「安静的谎」。
 
-    ⚠ 已知弱点：匹配的判据只有**位置**。块被大幅拖动（IoU < 阈值）会被算成
-    「旧的消失 + 新的出现」而不是「同一个块被移动」——所以消失的块带着卡片时会喊。
+    ⚠ 已知弱点：匹配的判据只有**位置**。块被大幅拖动（重合度跌到两条阈值以下）
+    会被算成「旧的消失 + 新的出现」而不是「同一个块被移动」——所以消失的块
+    带着卡片时会喊。
     """
     warnings: list[dict] = []
 
@@ -422,34 +485,42 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
     for slot, old_index in enumerate(matchable):
         for new_index, new in enumerate(new_list):
             score = iou(old_list[old_index].get("bbox_norm"), new.get("bbox_norm"))
-            if score >= iou_threshold:
-                pairs.append((score, slot, new_index))
+            contain = overlap_coefficient(old_list[old_index].get("bbox_norm"),
+                                          new.get("bbox_norm"))
+            if score >= iou_threshold or contain >= contain_threshold:
+                # 排序用「配得有多好」= 两条判据里更强的那条（IoU 与包含度同量纲、都是 0~1）
+                pairs.append((max(score, contain), slot, new_index))
     pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
 
     matched_old: set[int] = set()
-    matched_new: dict[int, tuple[dict, float]] = {}
-    for score, slot, new_index in pairs:
+    matched_new: dict[int, tuple[dict, float, float]] = {}
+    for _, slot, new_index in pairs:
         old_index = matchable[slot]
         if old_index in matched_old or new_index in matched_new:
             continue
         matched_old.add(old_index)
-        matched_new[new_index] = (old_list[old_index], score)
+        old = old_list[old_index]
+        matched_new[new_index] = (old,
+                                  iou(old.get("bbox_norm"), new_list[new_index].get("bbox_norm")),
+                                  overlap_coefficient(old.get("bbox_norm"),
+                                                      new_list[new_index].get("bbox_norm")))
 
     blocks: list[dict] = []
     matches: list[dict] = []
     for new_index, new in enumerate(new_list):
         block = {**new}
         if new_index in matched_new:
-            old, score = matched_new[new_index]
+            old, score, contain = matched_new[new_index]
             for key in PRESERVED_KEYS:
                 block[key] = old.get(key)
             matches.append({"block_id": block.get("id"),
-                            "matched_from": old.get("id"), "iou": score})
+                            "matched_from": old.get("id"), "iou": score,
+                            "contain": contain})
         else:
             for key in PRESERVED_KEYS:
                 block.setdefault(key, None)
             matches.append({"block_id": block.get("id"),
-                            "matched_from": None, "iou": None})
+                            "matched_from": None, "iou": None, "contain": None})
         blocks.append(block)
 
     removed: list[dict] = []
