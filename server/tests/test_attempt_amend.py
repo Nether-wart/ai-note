@@ -291,3 +291,212 @@ def test_a_second_different_verdict_keeps_the_original_original(api_for):
     assert attempt["verdict"] == "unreadable"
     assert attempt["overrode"]["verdict"] == "correct"
     assert attempt["overrode"]["confidence"] == 0.95
+
+
+# ---------------------------------------------------------------- 验收 4：定位失败
+
+def test_an_unknown_attempt_at_fails_loudly_instead_of_touching_the_latest(api_for):
+    """验收 4：`attempt_at` 不存在 → 明确失败（结构化信封），**不落到最近一次**。
+
+    卡一个字节都不许改：拿最近一次顶上就是「静默落到别的题上」那类事故的同一族。
+    """
+    latest = rec(NOW - 1 * DAY, "correct", confidence=0.95)
+    card = card_with([rec(NOW - 8 * DAY, "wrong", confidence=0.2), latest],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": latest["at"]})
+    _, api = api_for_one(api_for, card)
+    before = (api.catalog.problems_dir / f"{PID}.json").read_bytes()
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": "2026-01-01T00:00:00+00:00", "verdict": "wrong"})
+
+    assert status == 404, body
+    assert body["ok"] is False
+    error = body["error"]
+    assert error["code"] == "not_found"
+    assert error["reason"] == "attempt_not_found"
+    assert "没有" in error["message"], "要有一句给人看的中文原话"
+    assert error["details"]["id"] == PID
+    assert error["details"]["attempt_at"] == "2026-01-01T00:00:00+00:00"
+    assert error["details"]["available"] == [rec(NOW - 8 * DAY, "wrong")["at"], latest["at"]], \
+        "把这道题**实际有哪些**重做时刻说出来（不许静默）"
+    assert isinstance(body["warnings"], list) and body["warnings"], \
+        "失败也带该卡的自检警告（契约 §10.1）"
+    # 级别只有服务能定，界面不许自行降级（契约 §2）。警告通道有两级（warning 与 hint），
+    # 所以这里断言「每项都有级别、取值合法」，而不是「一律 warning」。
+    assert all(w["level"] in ("warning", "hint") for w in body["warnings"])
+    assert (api.catalog.problems_dir / f"{PID}.json").read_bytes() == before, "卡一个字节都不改"
+
+
+def test_a_near_miss_timestamp_is_not_snapped_to_the_nearest_attempt(api_for):
+    """差一秒也是「没有那一次」——绝不按「最接近」匹配。"""
+    only = rec(NOW - 8 * DAY, "unreadable", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+    near_miss = (NOW - 8 * DAY + timedelta(seconds=1)).isoformat(timespec="seconds")
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": near_miss, "verdict": "correct"})
+
+    assert status == 404
+    assert body["error"]["reason"] == "attempt_not_found"
+    assert card_on_disk(api)["attempts"][0]["verdict"] == "unreadable"
+
+
+def test_an_unknown_attempt_at_on_a_card_with_no_history_says_so(api_for):
+    """从来没有重做过的卡：`available` 是空的，hint 也要说清「还没有任何重做记录」。"""
+    card = card_with([], mastery={"state": "in_pool", "streak": 0, "last_attempt_at": None})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": NOW.isoformat(timespec="seconds"), "verdict": "wrong"})
+
+    assert status == 404
+    assert body["error"]["details"]["available"] == []
+    assert "还没有任何重做记录" in body["error"]["hint"]
+
+
+def test_a_malformed_attempt_at_is_a_400_naming_the_parameter(api_for):
+    only = rec(NOW - 8 * DAY, "unreadable", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    for bad in ("昨天下午", "", "   ", 3, None):
+        status, body = post_json(api, f"/api/attempt/{PID}",
+                                 {"attempt_at": bad, "verdict": "wrong"})
+        assert status == 400, (bad, body)
+        assert body["error"]["code"] == "bad_request"
+        assert body["error"]["details"]["param"] == "attempt_at"
+
+
+def test_two_attempts_in_the_same_second_are_ambiguous_not_silently_picked(api_for):
+    """`attempt_at` 定位不到唯一一次时也要明确失败（409），不许静默挑一个。"""
+    same = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    duplicate = rec(NOW - 8 * DAY, "correct", confidence=0.9)
+    card = card_with([same, duplicate],
+                     mastery={"state": "in_pool", "streak": 0, "last_attempt_at": same["at"]})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": same["at"], "verdict": "correct"})
+
+    assert status == 409, body
+    assert body["error"]["code"] == "ambiguous_attempt_at"
+    assert body["error"]["reason"] == "ambiguous_attempt_at"
+    assert body["error"]["details"]["candidates"] == [0, 1]
+    assert card_on_disk(api)["attempts"][0]["verdict"] == "wrong", "歧义时什么都不改"
+
+
+# ---------------------------------------------------------------- 形态与取值校验
+
+def test_the_client_still_cannot_write_the_audit_fields(api_for):
+    """`source`/`confidence`/`provider`/`model`/`overrode` 只有服务能写（400）。"""
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    for field, value in (("source", "human"), ("confidence", 1.0), ("provider", "deepseek"),
+                         ("model", "deepseek-flash"), ("overrode", {}), ("channel", "paper"),
+                         ("at", only["at"]), ("answer", "A")):
+        status, body = post_json(api, f"/api/attempt/{PID}",
+                                 {"attempt_at": only["at"], "verdict": "correct", field: value})
+        assert status == 400, (field, status, body)
+        assert body["error"]["details"]["param"] == "body"
+        assert field in json.dumps(body["error"]["details"], ensure_ascii=False)
+
+    assert card_on_disk(api)["attempts"][0]["verdict"] == "wrong", "一个字都不许写进去"
+
+
+def test_a_bad_verdict_names_the_parameter_and_the_allowed_values(api_for):
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": only["at"], "verdict": "maybe"})
+
+    assert status == 400
+    details = body["error"]["details"]
+    assert details["param"] == "verdict"
+    assert details["value"] == "maybe"
+    assert details["allowed"] == ["correct", "wrong", "unreadable"]
+
+
+def test_an_amendment_that_changes_nothing_is_a_400_not_a_silent_success(api_for):
+    """只给 `attempt_at` ＝什么都没得改：门口就喊，不假装成功。"""
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}", {"attempt_at": only["at"]})
+
+    assert status == 400
+    assert body["error"]["details"]["param"] == "body"
+
+
+def test_an_unknown_key_in_the_amendment_form_is_a_400(api_for):
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": only["at"], "error_causes": [], "note": "我自己写的"})
+
+    assert status == 400
+    assert body["error"]["details"]["param"] == "body"
+    assert "note" in json.dumps(body["error"]["details"], ensure_ascii=False)
+
+
+def test_a_bad_error_causes_shape_is_a_400_naming_the_parameter(api_for):
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only], mastery={"state": "in_pool", "streak": 0,
+                                      "last_attempt_at": only["at"]})
+    _, api = api_for_one(api_for, card)
+
+    for bad in (3, {"a": 1}, [""], ["计算失误", 7], None):
+        status, body = post_json(api, f"/api/attempt/{PID}",
+                                 {"attempt_at": only["at"], "error_causes": bad})
+        assert status == 400, (bad, status, body)
+        assert body["error"]["details"]["param"] == "error_causes"
+
+
+# ---------------------------------------------------------------- 定点修正不碰判定
+
+def test_an_amendment_never_calls_the_judge_and_never_needs_autojudge(api_for):
+    """改判是**人**给的判定：不问模型，也不看这道题能不能自动判定（#6 落点接缝）。"""
+    only = rec(NOW - 8 * DAY, "wrong", confidence=0.2)
+    card = card_with([only],
+                     mastery={"state": "in_pool", "streak": 0, "last_attempt_at": only["at"]},
+                     **{"problem.type": "solution", "standard_answer.value": "",
+                        "review.status": "unreviewed"})
+    stub, api = api_for_one(api_for, card)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": only["at"], "verdict": "correct"})
+
+    assert status == 200, body
+    assert stub.calls == [], "定点修正一次模型都不该问（不联网、不花钱）"
+    assert body["data"]["run_id"] is None
+    assert body["data"]["attempt"]["verdict"] == "correct"
+
+
+def test_the_index_is_rebuilt_after_an_amendment(api_for):
+    """契约 §10.1：定点修正之后照旧重建派生索引（v0 = 立刻现算）。"""
+    original = rec(NOW - 8 * DAY, "correct", confidence=0.95)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": original["at"], "verdict": "wrong"})
+    assert body["data"]["index_rebuilt_at"] == NOW.isoformat(timespec="seconds")
+
+    problem = get_json(api, "/api/index")[1]["data"]["problems"][0]
+    assert problem["attempts"] == 1, "不追加记录"
+    assert problem["last_verdict"] == "wrong"
+    assert problem["streak"] == 0 and problem["graduated"] is False
