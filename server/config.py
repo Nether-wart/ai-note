@@ -1,9 +1,11 @@
 """配置装载：**坏配置起不来**，而不是每个请求里再验一遍（#5 派发简报第 7 条）。
 
-两件事在这里定：
+三件事在这里定：
 
   · **provider 白名单**（`dashscope` / `deepseek`，都在境内，见 `.env.local.example`）。
     白名单外的 provider 是坏配置 → 装载时 `ValueError`，服务拒绝启动。
+  · **角色表**：`extract`（切分与红笔语义）与 `judge`（等价比对）各自解析成一份
+    `RoleConfig`；解析逻辑只有 `load_role_config` 一处，别的角色一律走它。
   · **判定阈值**校验一次（复用 `server.judge.validate_threshold`，它是公开的）：
     NaN／无穷／越界会静默绕开置信度闸门，正是这套设计唯一禁止的错。
     「校验过了」与「拿去比的值」必须是同一个东西，所以装载返回的就是校验后的 float。
@@ -36,45 +38,79 @@ PROVIDERS = {
     },
 }
 
-# 角色默认。judge 角色只做**纯文本**等价比对，用正式版即可（proto/slice.py:68-71）。
+# 角色默认。judge 角色只做**纯文本**等价比对，用正式版即可（proto/slice.py:68-71）；
+# extract 角色要看图与模型对账（切分 #10、红笔语义 #12），换模型必须重跑它的考卷。
 ROLE_DEFAULTS = {
     "extract": {"provider": "deepseek", "model": "deepseek-flash"},
     "judge": {"provider": "deepseek", "model": "deepseek-flash"},
 }
 
 JUDGE_ROLE = "judge"
+EXTRACT_ROLE = "extract"
 
 
 @dataclass(frozen=True)
-class JudgeConfig:
+class RoleConfig:
+    """一个模型角色的**身份**：谁、哪家、哪个地址、哪把钥匙。
+
+    阈值不在里面——置信度闸门是**判定角色**独有的事（`server/judge.py`），
+    抽取角色（看红笔痕迹判语义、切分）没有阈值可设。
+    """
     role: str
     provider: str
     base_url: str
     model: str
     key_env: str
-    threshold: float
 
 
-def load_judge_config(env: Mapping | None = None) -> JudgeConfig:
-    """把 judge 角色解析成一份配置。坏配置当场喊（`ValueError`）。"""
+@dataclass(frozen=True)
+class JudgeConfig(RoleConfig):
+    """判定角色的配置 = 身份 + 置信度阈值（阈值只作用于「对」，见 `server/judge.py`）。"""
+    threshold: float = judge.CONFIDENCE_THRESHOLD
+
+
+def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
+    """把**任意**角色名解析成一份配置，坏配置当场喊（`ValueError`）。
+
+    环境变量按角色加前缀：`JUDGE_PROVIDER` / `JUDGE_MODEL`、`EXTRACT_PROVIDER` /
+    `EXTRACT_MODEL`（口径继承 proto，那张角色表在 `proto/slice.py:52-96`）。
+    """
     env = env if env is not None else os.environ
-    default = ROLE_DEFAULTS[JUDGE_ROLE]
-    provider = (env.get("JUDGE_PROVIDER") or default["provider"]).strip()
+    if role not in ROLE_DEFAULTS:
+        raise ValueError(
+            f"没有这个模型角色：{role!r}；可选：{', '.join(sorted(ROLE_DEFAULTS))}"
+        )
+    default = ROLE_DEFAULTS[role]
+    prefix = role.upper()
+    provider = (env.get(f"{prefix}_PROVIDER") or default["provider"]).strip()
     if provider not in PROVIDERS:
         raise ValueError(
-            f"JUDGE_PROVIDER 指向的 provider 不在白名单里：{provider!r}；"
+            f"{prefix}_PROVIDER 指向的 provider 不在白名单里：{provider!r}；"
             f"可选：{', '.join(PROVIDERS)}"
         )
     preset = PROVIDERS[provider]
     # 只换了 provider 而没指定模型时，落到那家 provider 的预设默认，而不是角色原来的模型
     fallback = default["model"] if provider == default["provider"] else preset["default_model"]
-    model = (env.get("JUDGE_MODEL") or "").strip() or fallback
-    return JudgeConfig(
-        role=JUDGE_ROLE,
+    model = (env.get(f"{prefix}_MODEL") or "").strip() or fallback
+    return RoleConfig(
+        role=role,
         provider=provider,
         base_url=preset["base_url"],
         model=model,
         key_env=preset["key_env"],
+    )
+
+
+def load_judge_config(env: Mapping | None = None) -> JudgeConfig:
+    """把 judge 角色解析成一份配置（身份走上面那一份解析，外加一次阈值校验）。"""
+    env = env if env is not None else os.environ
+    base = load_role_config(JUDGE_ROLE, env)
+    return JudgeConfig(
+        role=base.role,
+        provider=base.provider,
+        base_url=base.base_url,
+        model=base.model,
+        key_env=base.key_env,
         threshold=_load_threshold(env),
     )
 

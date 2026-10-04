@@ -24,6 +24,44 @@ def test_defaults_come_from_the_role_table():
     assert cfg.threshold == judge.CONFIDENCE_THRESHOLD
 
 
+def test_the_extract_role_resolves_through_the_same_one_loader():
+    """角色解析只有一处（`load_role_config`）：抽取角色走它，判定角色也走它。
+
+    抽取角色**没有阈值**——置信度闸门是判定角色独有的事（`server/judge.py`），
+    给抽取角色配一个阈值等于发明一个没人用的旋钮。
+    """
+    extract = config.load_role_config(config.EXTRACT_ROLE, {})
+
+    assert extract.role == "extract"
+    assert (extract.provider, extract.model) == ("deepseek", "deepseek-flash")
+    assert extract.key_env == "DEEPSEEK_API_KEY"
+    assert not hasattr(extract, "threshold")
+
+    judge_cfg = config.load_judge_config({})
+    assert (judge_cfg.provider, judge_cfg.model) == (extract.provider, extract.model), \
+        "两份配置的身份字段来自同一张角色表——不是两套默认值"
+
+
+def test_the_extract_role_has_its_own_provider_and_model_env_vars():
+    cfg = config.load_role_config("extract", {"EXTRACT_PROVIDER": "dashscope",
+                                              "EXTRACT_MODEL": "qwen-vl-max"})
+
+    assert (cfg.provider, cfg.model) == ("dashscope", "qwen-vl-max")
+    assert cfg.key_env == "DASHSCOPE_API_KEY"
+
+
+def test_an_unknown_role_and_a_whitelisted_provider_error_both_shout():
+    with pytest.raises(ValueError) as excinfo:
+        config.load_role_config("summarize", {})
+    assert "summarize" in str(excinfo.value)
+    assert "extract" in str(excinfo.value) and "judge" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        config.load_role_config("extract", {"EXTRACT_PROVIDER": "openai"})
+    assert "EXTRACT_PROVIDER" in str(excinfo.value)
+    assert "openai" in str(excinfo.value)
+
+
 def test_provider_outside_the_whitelist_is_a_load_time_error():
     with pytest.raises(ValueError) as excinfo:
         config.load_judge_config({"JUDGE_PROVIDER": "openai"})
