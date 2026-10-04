@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import email
 import email.policy
 import hashlib
 import re
@@ -199,21 +198,22 @@ def parse_multipart(body: bytes, content_type: str) -> list[dict]:
 
 def accept(inbox: Inbox, body: bytes, content_type: str, segmenter) -> tuple[dict, list, list]:
     """`POST /api/inbox` 的全部逻辑。返回 `(data, warnings, skipped)`。"""
-    parts = [p for p in parse_multipart(body, content_type) if p["field"] == "file"]
-    if not parts:
-        fields = sorted({p["field"] or "?" for p in parse_multipart(body, content_type)})
+    all_parts = parse_multipart(body, content_type)
+    files = [p for p in all_parts if p["field"] == "file"]
+    if not files:
         raise bad_request(
             "这次上传里没有一个名叫 file 的文件",
             hint="multipart 里每个文件都应该是 name=\"file\"；"
                  "手机上传页与 curl -F file=@照片.png 都会这么发",
-            param="file", value=fields, allowed=["file"],
+            param="file", value=sorted({p["field"] or "?" for p in all_parts}),
+            allowed=["file"],
         )
 
     inbox.ensure()
     warnings: list[dict] = []
     skipped: list[dict] = []
     received: list[dict] = []
-    for index, part in enumerate(parts):
+    for index, part in enumerate(files):
         if not part["blob"]:
             skipped.append({"code": "inbox_part_empty",
                             "message": f"第 {index + 1} 个 part（{part['name'] or '没有文件名'}）"
