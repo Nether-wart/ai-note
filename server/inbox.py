@@ -51,9 +51,8 @@ VALID_SUFFIX = re.compile(r"\.[a-z0-9]{1,8}\Z")
 class Inbox:
     """一个收件目录。它唯一的写入是「放一个新文件进去」。"""
 
-    def __init__(self, directory: Path | str, *, segmenter=None) -> None:
+    def __init__(self, directory: Path | str) -> None:
         self.dir = Path(directory)
-        self.segmenter = segmenter
 
     def ensure(self) -> bool:
         """确保目录在。返回是否**新建**了它（新建这件事要说出来）。"""
@@ -74,7 +73,7 @@ class Inbox:
         path = self.dir / stored_as
         already = path.is_file()
         if not already:
-            # 先写真名再改名，避免监视到半个文件（目录监视将来接手 #13 的第三路）。
+            # 先写临时名再原子改名：将来接上目录监视时，不会把写到一半的文件当成一页。
             tmp = path.with_name(f".{stored_as}.part")
             tmp.write_bytes(blob)
             tmp.replace(path)
