@@ -17,11 +17,18 @@
  * 方便测试与自检断言；`details` 说清「哪儿、看到了什么」。
  */
 
+import {answerMode} from '../src/lib/redo.js';
+
 /** 违规码表。测试与自检都对着这些码断言，别改字面量。 */
 export const CODES = Object.freeze({
   questionImageNotClean: 'question_image_not_clean',
   questionImageMissing: 'question_image_missing',
   questionImageKindMismatch: 'question_image_kind_mismatch',
+  solutionHasAnswerBox: 'solution_has_answer_box',
+  blockedQuestionHasAnswerBox: 'blocked_question_has_answer_box',
+  answerBoxMissing: 'answer_box_missing',
+  choiceOptionsMissing: 'choice_options_missing',
+  answerModeMismatch: 'answer_mode_mismatch',
 });
 
 const IMAGE_URL_ATTRIBUTES = {
@@ -151,6 +158,78 @@ export function checkQuestionImage({html, pid, apiBase = ''}) {
           {found: fragment, api_base: apiBaseSuffix}),
       );
     }
+  }
+
+  return violations;
+}
+
+// ------------------------------------------- 不变量 2：解答题不得给出作答框
+
+const ANSWER_AFFORDANCES = ['input', 'textarea', 'select'];
+
+/**
+ * 验收 2（spec #1 第 31 条）：**过程题在屏幕上敲不出过程**，所以解答题不给作答框；
+ * 未审核／无标准答案的题同理（服务端的 `auto_judge` 三个理由，唯一实现在 `autojudge.py`）。
+ *
+ * 判据**不自己再判一遍**能不能自动判定：它问 `redo.js` 的 `answerMode`——那是界面
+ * 消费服务读数的唯一入口（契约 §6：「这套判断只有这一份实现」）。
+ *
+ * 两个方向都查：**不该有的框不许有**，**该有的框不许丢**。只查前一个方向的话，
+ * 一个把作答区整个渲染丢掉的组件会安静地通过。
+ */
+export function checkAnswerBox({html, problem}) {
+  const violations = [];
+  const expected = answerMode(problem);
+  const tags = parseTags(html);
+
+  const article = tags.find((tag) => tag.name === 'article' && 'data-current-pid' in tag.attrs);
+  const declared = article ? (article.attrs['data-answer-mode'] ?? null) : null;
+  const form = tags.some((tag) => tag.name === 'form' && 'data-answer-form' in tag.attrs);
+  const inputs = tags.filter((tag) => ANSWER_AFFORDANCES.includes(tag.name));
+  const radios = inputs.filter((tag) => tag.name === 'input' && tag.attrs.type === 'radio');
+  const hasBox = form || inputs.length > 0;
+
+  if (expected.mode === 'none' && hasBox) {
+    const isSolution = problem?.type === 'solution' || expected.reason === 'solution_type';
+    violations.push(
+      violate(
+        isSolution ? CODES.solutionHasAnswerBox : CODES.blockedQuestionHasAnswerBox,
+        isSolution
+          ? '解答题给出了作答框：过程题在屏幕上敲不出过程，这道题只能人工确认（纸上重做）。'
+          : `这道题不能自动判定（${expected.reason}），却给出了作答框。`,
+        {
+          reason: expected.reason,
+          type: problem?.type ?? null,
+          found: form ? 'form[data-answer-form]' : inputs[0].name,
+          blocked_text: expected.reason_text,
+        },
+      ),
+    );
+  }
+
+  if (expected.mode === 'choice') {
+    if (!hasBox) {
+      violations.push(violate(CODES.answerBoxMissing, '选择题的作答区没了：题面渲染出来了，选项却没渲染。',
+        {expected: 'choice'}));
+    } else if (radios.length === 0) {
+      violations.push(
+        violate(CODES.choiceOptionsMissing,
+          '选择题一个选项都没有：要么索引里的 options 丢了，要么题型枚举静默退回了默认值。',
+          {expected: 'choice', inputs: inputs.length}),
+      );
+    }
+  }
+
+  if (expected.mode === 'fillin' && !hasBox) {
+    violations.push(violate(CODES.answerBoxMissing, '填空题该有一个作答框，页面上却没有。', {expected: 'fillin'}));
+  }
+
+  if (declared !== null && declared !== expected.mode) {
+    violations.push(
+      violate(CODES.answerModeMismatch,
+        `页面自称的作答模式是 '${declared}'，判据算出来的是 '${expected.mode}'：组件宣称的和做的不一样。`,
+        {declared, expected: expected.mode, reason: expected.reason}),
+    );
   }
 
   return violations;
