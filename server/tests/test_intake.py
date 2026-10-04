@@ -470,3 +470,223 @@ def test_a_block_without_a_decision_can_still_be_included_by_name():
     assert decision["rule"] == intake.RULE_HUMAN_INCLUDE
     assert decision["semantics"] is None
     assert "没判过" in decision["reason"] or "未判过" in decision["reason"]
+
+
+# ---------------------------------------------------------------- 驱动：读页 → 统计 → 问模型 → 写回
+
+
+def make_pages_dir(tmp_path, page_id="41c86bcfc007", *, blocks, photo="red", image_name=None):
+    """造一个数据目录：`<data>/pages/<id>.json` + 与它并列的整页照片。"""
+    from server.catalog import Catalog
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True, exist_ok=True)
+    (data / "problems").mkdir(parents=True, exist_ok=True)
+    page = page_of(blocks, page_id)
+    if image_name:
+        page["image"] = image_name
+    path = data / "pages" / f"{page_id}.json"
+    path.write_text(json.dumps(page, ensure_ascii=False, indent=2), encoding="utf-8")
+    if photo == "red":
+        width, height = 40, 20
+        pixels = [(255, 255, 255)] * (width * height)
+        for y in range(2, 8):          # 上半：红笔块
+            for x in range(2, 18):
+                pixels[y * width + x] = (220, 30, 30)
+        for y in range(12, 18):        # 下半：只有印刷体/黑笔
+            for x in range(2, 38):
+                pixels[y * width + x] = (20, 20, 20)
+        ink.write_png(data / "pages" / page["image"], ink.InkImage(width, height, pixels))
+    elif photo == "junk":
+        (data / "pages" / page["image"]).write_bytes(b"not a png at all")
+    return Catalog(data), path
+
+
+class FakeSemantics:
+    """假的抽取角色：记下被问了什么，按块 id 吐预先排好的语义。"""
+
+    def __init__(self, answers=None, *, raises=None):
+        self.answers = answers or {}
+        self.raises = raises or {}
+        self.calls: list[dict] = []
+
+    def __call__(self, block, stats, image_path):
+        self.calls.append({"block_id": block.get("id"), "colored_px": stats.get("colored_px"),
+                           "image": str(image_path)})
+        if block.get("id") in self.raises:
+            from server.model_client import ModelUnavailable
+            raise ModelUnavailable(self.raises[block["id"]])
+        return answer(self.answers.get(block.get("id")))
+
+
+def red_block(block_id="b1", bbox_px=(2, 2, 18, 8)):
+    return blk(block_id, bbox_px=bbox_px)
+
+
+def plain_block(block_id="b2", bbox_px=(2, 12, 38, 18)):
+    return blk(block_id, bbox_px=bbox_px)
+
+
+def test_intake_asks_the_model_only_about_blocks_that_have_red_ink(tmp_path):
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block(), plain_block()])
+    fake = FakeSemantics({"b1": "correction"})
+
+    report = intake.run_intake(catalog, "41c86bcfc007", semantics=fake, at=AT, apply=True)
+
+    assert [call["block_id"] for call in fake.calls] == ["b1"], \
+        "没有红笔的块不问模型（0 与「读不出来」另有两档，问模型是浪费）"
+    assert fake.calls[0]["colored_px"] > ink.COLOR_MIN_PIXELS, "问之前统计已经算好了"
+    assert [b["keep"] for b in report["page"]["blocks"]] == [True, False]
+
+
+def test_the_decision_is_written_into_the_page_file_so_it_can_be_audited(tmp_path):
+    """spec #2：决策只存在界面的内存里 = 「漏了一题」永远查不出来。"""
+    from server import pages
+
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block(), plain_block()])
+    intake.run_intake(catalog, "41c86bcfc007", semantics=FakeSemantics({"b1": "cross"}),
+                      at=AT, apply=True)
+
+    on_disk, error = pages.read_page(catalog, "41c86bcfc007")
+    assert error is None
+    red, plain = on_disk["blocks"]
+    assert red["keep"] is True and red["decision"]["rule"] == intake.RULE_ERROR_TRACE
+    assert red["decision"]["semantics"] == "cross"
+    assert red["decision"]["at"] == AT.isoformat(timespec="seconds")
+    assert red["ink"]["colored_px"] > 0
+    assert plain["keep"] is False and plain["decision"]["rule"] == intake.RULE_NO_RED_INK
+
+
+def test_preview_writes_nothing_and_asks_nobody(tmp_path):
+    """预演（默认）：算统计、报事实，**不问模型、不写盘**。"""
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block(), plain_block()])
+    before = path.read_bytes()
+    fake = FakeSemantics({"b1": "correction"})
+
+    report = intake.run_intake(catalog, "41c86bcfc007", semantics=fake, at=AT, apply=False)
+
+    assert fake.calls == [], "预演不该花钱调模型"
+    assert path.read_bytes() == before, "预演一个字节都不写"
+    assert report["apply"] is False and report["preview"] is True
+    assert report["not_kept"]["message"] == "另有 1 道没有红笔痕迹、未入库"
+
+
+def test_a_model_failure_leaves_the_page_file_byte_identical(tmp_path):
+    """D1/D9：调用失败 → 明确失败，**不留半截决策**。"""
+    from server.model_client import ModelUnavailable
+
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block("b1"),
+                                                     red_block("b2", (2, 2, 18, 8))])
+    before = path.read_bytes()
+    fake = FakeSemantics({"b1": "cross"}, raises={"b2": "HTTP 502（redpen-semantics）：上游挂了"})
+
+    with pytest.raises(ModelUnavailable) as excinfo:
+        intake.run_intake(catalog, "41c86bcfc007", semantics=fake, at=AT, apply=True)
+
+    assert "上游挂了" in str(excinfo.value)
+    assert path.read_bytes() == before, "拒绝路径不得留下痕迹：第一个块判出来了也不许写"
+    assert [call["block_id"] for call in fake.calls] == ["b1", "b2"]
+
+
+def test_a_page_that_is_not_there_is_a_404_not_a_crash(tmp_path):
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007", semantics=None, at=AT, apply=True)
+
+    assert (excinfo.value.status, excinfo.value.code) == (404, "not_found")
+    assert "41c86bcfc007.json" in excinfo.value.message
+
+
+def test_an_unreadable_page_file_is_a_500_that_names_the_file(tmp_path):
+    """页文件读不了 ≠ 页不存在：前者是矛盾，要说清是哪个文件（口径同 catalog.load_card）。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    (data / "pages" / "41c86bcfc007.json").write_text("{ 这不是 JSON", encoding="utf-8")
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007", semantics=None, at=AT, apply=True)
+
+    assert (excinfo.value.status, excinfo.value.code) == (500, "internal_error")
+    assert "41c86bcfc007.json" in excinfo.value.message
+
+
+def test_a_page_id_that_could_escape_the_pages_dir_is_rejected(tmp_path):
+    """页 id 会变成文件名，所以它必须先过校验——否则写回会打到 `pages/` 外面去。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    (data / "problems").mkdir(parents=True)
+    victim = data / "problems" / "p-20261004-41c86b.json"
+    victim.write_text('{"id": "p-20261004-41c86b"}', encoding="utf-8")
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "../problems/p-20261004-41c86b",
+                          semantics=None, at=AT, apply=True)
+
+    assert (excinfo.value.status, excinfo.value.code) == (400, "bad_request")
+    assert excinfo.value.details.get("param") == "page_id"
+    assert victim.read_text(encoding="utf-8") == '{"id": "p-20261004-41c86b"}', \
+        "拒绝路径不得留下痕迹（这里差点是一次真正的数据破坏）"
+
+
+def test_a_missing_page_photo_makes_every_block_pending_not_dropped(tmp_path):
+    """整页图不在 → 统计做不了 → 每块**待定**，不是「没有红笔」。"""
+    from server.catalog import Catalog
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    page = page_of([red_block("b1"), plain_block("b2")])
+    (data / "pages" / "41c86bcfc007.json").write_text(
+        json.dumps(page, ensure_ascii=False), encoding="utf-8")
+    fake = FakeSemantics({"b1": "cross"})
+
+    report = intake.run_intake(Catalog(data), "41c86bcfc007", semantics=fake, at=AT, apply=True)
+
+    assert [b["keep"] for b in report["page"]["blocks"]] == [None, None]
+    assert fake.calls == []
+    warning = next(w for w in report["warnings"]
+                   if w["code"] == intake.INTAKE_PAGE_IMAGE_MISSING)
+    assert warning["level"] == "warning"
+    assert report["not_kept"]["count"] == 2
+    assert all(item["rule"] == intake.RULE_INK_UNKNOWN
+               for item in report["not_kept"]["by_rule"] if item["count"])
+
+
+def test_an_unreadable_photo_is_shouted_about_and_nothing_is_guessed(tmp_path):
+    catalog, _ = make_pages_dir(tmp_path, blocks=[red_block()], photo="junk")
+    fake = FakeSemantics({"b1": "cross"})
+
+    report = intake.run_intake(catalog, "41c86bcfc007", semantics=fake, at=AT, apply=True)
+
+    assert report["page"]["blocks"][0]["keep"] is None
+    assert fake.calls == []
+    warning = next(w for w in report["warnings"]
+                   if w["code"] == intake.INTAKE_PAGE_IMAGE_UNREADABLE)
+    assert warning["level"] == "warning" and "not a png" not in warning["message"]
+
+
+def test_a_human_decided_block_is_not_asked_about_again(tmp_path):
+    human = {"rule": intake.RULE_HUMAN_INCLUDE, "source": "human", "semantics": None,
+             "reason": "人一键补收", "at": AT.isoformat(timespec="seconds")}
+    catalog, _ = make_pages_dir(tmp_path, blocks=[red_block("b1"), red_block("b2")])
+    page_path = catalog.pages_dir / "41c86bcfc007.json"
+    page = json.loads(page_path.read_text(encoding="utf-8"))
+    page["blocks"][0]["keep"] = True
+    page["blocks"][0]["decision"] = human
+    page_path.write_text(json.dumps(page, ensure_ascii=False), encoding="utf-8")
+    fake = FakeSemantics({"b2": "cross"})
+
+    report = intake.run_intake(catalog, "41c86bcfc007", semantics=fake, at=AT, apply=True)
+
+    assert [call["block_id"] for call in fake.calls] == ["b2"]
+    assert report["page"]["blocks"][0]["decision"] == human

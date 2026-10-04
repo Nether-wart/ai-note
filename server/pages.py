@@ -34,7 +34,18 @@ PAGE_VERSION = 1
 # 与 `catalog.ID_PATTERN` / `assets._NAME_RE` 同一套纵深防御（服务将来要经 Tailscale
 # 暴露给手机，#13），只是这里更松：不要求 12 位十六进制——照片叫 `photo1.png` 也是合法的
 # 一页，不能因为命名习惯把它判成「没有页」。
-_PAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def is_page_id(page_id) -> bool:
+    """这个字符串能不能当页 id（＝页文件名的主干）。**取页 id 的入口必须先问它**。
+
+    为什么单列出来：页 id 会拼进路径（`<data>/pages/<id>.json`），而 #12 的收入决策
+    是第一个从**外面**拿页 id 的入口。`../../problems/p-xxx` 这种 id 会让读打到
+    `pages/` 外面、**写回则可能覆盖一张真题卡**。所以校验与「能不能当文件名」
+    共用同一份判据（`page_hash_from_image` 也读它），不许各处再写一遍。
+    """
+    return isinstance(page_id, str) and bool(PAGE_ID_PATTERN.fullmatch(page_id))
 
 
 def page_hash_from_image(page_image: str | None) -> str | None:
@@ -52,7 +63,7 @@ def page_hash_from_image(page_image: str | None) -> str | None:
         return None
     stem = path.stem
     # `.` / `..` / 隐藏文件（`.foo`）都不是照片名，是路径或历史残渣。
-    if not stem or stem.startswith(".") or not _PAGE_ID_RE.fullmatch(stem):
+    if not stem or stem.startswith(".") or not is_page_id(stem):
         return None
     return stem
 

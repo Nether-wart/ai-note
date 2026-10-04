@@ -64,7 +64,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from . import ink
+from . import errors, ink, pages
+from .errors import ApiError
 from .warnings import _warn
 
 # ---------------------------------------------------------------- 决策的取值（stable）
@@ -594,4 +595,108 @@ def _human_keep(page: dict, block_ids, *, keep: bool, at=None) -> dict:
             "unknown": len(unknown),
         },
         "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------- 驱动：读页 → 统计 → 问模型 → 写回
+
+
+def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False) -> dict:
+    """跑一页的收入决策：**唯一的入口**（#14 的界面与 CLI 都调它）。
+
+    步骤：读页文件 → 读整页照片 → 用 #11 的 `ink.page_block_reports` 逐块算红笔统计
+    → 对**有红笔**的块问模型要语义 → `plan_decisions` 成篇 → `apply` 时 `save_page` 写回。
+
+    - `apply=False`（默认）是**预演**：算统计、报事实、看已有的决策，**不问模型、不写盘**
+      （调模型要花钱，预演不该悄悄花）。
+    - `apply=True` 才问模型并写回。**模型调用失败（`ModelUnavailable`）往上抛，
+      页文件一个字节都不动**（D1/D9：不留半截决策）——写回只发生在全部块都判完之后。
+    - 只问**有红笔**且**尚未被人定过去留**的块：没有红笔的块不需要语义，
+      人补收/丢弃过的块不许被自动决策覆盖（`plan_decisions` 保留它们）。
+
+    失败形状（D1：拒绝一律 JSON 信封，带 `reason`）：
+
+    - 页 id 非法 → **400** `bad_request`（`details.param == "page_id"`）——
+      页 id 会变成文件名，不校验就可能写到 `pages/` 外面去。
+    - 页文件不在 → **404** `not_found`（与 #9 的「旧卡还没回填」不是一回事：
+      这里是人点名要一页，找不到就得说）。
+    - 页文件读不了/不是 JSON 对象 → **500** `internal_error`（口径同 `catalog.load_card`），
+      `message` 里点名是哪个文件。
+
+    返回值在 `plan_decisions` 的报告之上再加 `page_id` / `page_path` / `apply` / `preview` /
+    `asked`（这次问了哪些块）——「我做了什么、没做什么」都要看得见（ADR 0007 第 6 条）。
+    """
+    if not pages.is_page_id(page_id):
+        raise errors.bad_request(
+            f"页 id 非法：{page_id!r}",
+            hint="页 id 就是页文件名的主干，只允许字母、数字、点、下划线与连字符，"
+                 "必须以字母或数字开头，且不许出现 '..'（它会变成路径穿越）",
+            param="page_id",
+            value=page_id,
+        )
+
+    page, read_error = pages.read_page(catalog, page_id)
+    if read_error:
+        raise ApiError(
+            500, "internal_error", read_error,
+            reason="page_file_unreadable",
+            hint="页文件读不了就没法谈收入决策；先修好这个文件（或从照片重建这一页）",
+            details={"what": "page", "id": page_id},
+        )
+    if page is None:
+        raise errors.not_found(
+            f"没有这一页：{page_id}（页文件 {pages.page_path(catalog, page_id)} 不在）",
+            hint="先建页：存量卡用 `python3 -m server.backfill --apply`，"
+                 "新照片走收件目录（#13）",
+            what="page", id=page_id,
+        )
+
+    moment = at or datetime.now()
+    image_path = catalog.pages_dir / str(page.get("image") or "")
+    warnings: list[dict] = []
+    reports: list[dict] = []
+    if not image_path.is_file():
+        warnings.append(_page_warn(
+            INTAKE_PAGE_IMAGE_MISSING,
+            f"整页照片不在（{image_path}）→ 这一页每一块的红笔统计都做不了，"
+            f"全部待定（未入库）：把它当成「没有红笔」就是静默丢题",
+        ))
+    else:
+        try:
+            image = ink.read_png(image_path)
+        except ink.UnsupportedImage as exc:
+            warnings.append(_page_warn(
+                INTAKE_PAGE_IMAGE_UNREADABLE,
+                f"整页照片读不了（{image_path}）：{exc} → 这一页的红笔统计做不了，全部待定（未入库）",
+            ))
+        else:
+            reports = ink.page_block_reports(image, page)
+
+    answers: dict = {}
+    asked: list = []
+    if apply and semantics is not None:
+        stats_by_id = {r.get("id"): r.get("stats") for r in reports if isinstance(r, dict)}
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            previous = block.get("decision")
+            if isinstance(previous, dict) and previous.get("source") == SOURCE_HUMAN:
+                continue    # 人定过的去留不许被自动决策重问/覆盖
+            stats = stats_by_id.get(block.get("id"))
+            if has_red_ink(stats) is not True:
+                continue
+            answers[block["id"]] = semantics(block, stats, image_path)
+            asked.append(block["id"])
+
+    plan = plan_decisions(page, ink_reports=reports, semantics=answers, at=moment)
+    if apply:
+        pages.save_page(catalog, plan["page"], apply=True)
+    return {
+        **plan,
+        "page_id": page_id,
+        "page_path": str(pages.page_path(catalog, page_id)),
+        "apply": bool(apply),
+        "preview": not apply,
+        "asked": asked,
+        "warnings": warnings + plan["warnings"],
     }
