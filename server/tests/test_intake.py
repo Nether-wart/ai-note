@@ -166,3 +166,307 @@ def test_a_page_file_block_round_trips_json_with_the_decision():
     blob = json.dumps({"keep": decision["keep"], "decision": decision}, ensure_ascii=False)
 
     assert json.loads(blob)["decision"]["rule"] == "error_trace"
+
+
+# ---------------------------------------------------------------- 页级：决定 + 记录 + 报告
+
+
+def blk(block_id, *, bbox_px=(0, 0, 10, 10), card_id=None, keep=None, decision=None):
+    """页文件里的一个块（形状照契约 §10.2.1）。"""
+    block = {"id": block_id, "bbox_norm": [0.0, 0.0, 1.0, 1.0],
+             "bbox_px": list(bbox_px) if bbox_px is not None else None,
+             "card_id": card_id, "keep": keep}
+    if decision is not None:
+        block["decision"] = decision
+    return block
+
+
+def page_of(blocks, page_id="41c86bcfc007"):
+    return {"version": 1, "id": page_id, "image": f"{page_id}.png",
+            "created_at": "2026-10-04T14:31:35+08:00",
+            "origin": {"original_file": "2.png", "sheet": None, "page_number": None},
+            "blocks": blocks}
+
+
+def stats(colored_px, area=1000):
+    """#11 的 `ink_statistics` 形状。"""
+    return {"area": area, "colored_px": colored_px,
+            "colored_ratio": colored_px / area, "dark_px": 10, "dark_ratio": 0.01}
+
+
+def reports(*pairs):
+    """`ink.page_block_reports` 的形状：逐块的统计（`stats=None` = 读不出来）。"""
+    return [{"id": block_id, "stats": s, "reason": None if s else "block_bbox_missing",
+             "message": None if s else f"块 {block_id!r} 没有可用的 bbox_px，红笔统计做不了"}
+            for block_id, s in pairs]
+
+
+def answer(semantics, *, parsed=True, confidence=0.9, reason="模型说的一句话",
+           run_id="20261004-190000-000-redpen-semantics.json"):
+    return {"semantics": semantics, "confidence": confidence, "reason": reason,
+            "provider": "deepseek", "model": "deepseek-flash", "run_id": run_id,
+            "parsed": parsed}
+
+
+AT = __import__("datetime").datetime(2026, 10, 4, 19, 0, 0)
+
+
+def test_every_block_gets_keep_ink_and_an_auditable_decision():
+    """验收 3：决策记在页文件里，可审计「为什么收、为什么没收」。"""
+    page = page_of([blk("b1"), blk("b2"), blk("b3", bbox_px=None)])
+
+    plan = intake.plan_decisions(
+        page,
+        ink_reports=reports(("b1", stats(210)), ("b2", stats(3)), ("b3", None)),
+        semantics={"b1": answer("correction")},
+        at=AT,
+    )
+    blocks = plan["page"]["blocks"]
+
+    assert [b["keep"] for b in blocks] == [True, False, None]
+    for block in blocks:
+        decision = block["decision"]
+        assert decision["rule"] in intake.RULES
+        assert decision["source"] in intake.DECISION_SOURCES
+        assert decision["reason"].strip()
+        assert decision["at"] == AT.isoformat(timespec="seconds")
+        assert "ink" in block
+    assert blocks[0]["ink"] == stats(210), "#11 的统计原样写进 ink 键（不改写）"
+    assert blocks[0]["decision"]["semantics"] == "correction"
+    assert blocks[0]["decision"]["provider"] == "deepseek"
+    assert blocks[0]["decision"]["run_id"].endswith("-redpen-semantics.json")
+    assert blocks[2]["ink"] is None, "读不出来就是 None，不是 0（没有红笔另有一档）"
+
+
+def test_the_page_reports_how_many_questions_have_no_red_ink():
+    """验收 1：每页都要报「另有 M 道没有红笔痕迹、未入库」，并且**可枚举**。"""
+    page = page_of([blk("b1"), blk("b2"), blk("b3"), blk("b4")])
+
+    plan = intake.plan_decisions(
+        page,
+        ink_reports=reports(("b1", stats(210)), ("b2", stats(1)),
+                            ("b3", stats(0)), ("b4", stats(9))),
+        semantics={"b1": answer("cross")},
+        at=AT,
+    )
+    not_kept = plan["not_kept"]
+
+    assert not_kept["message"] == "另有 3 道没有红笔痕迹、未入库", \
+        "这一句是服务给的原话（spec #2 与工单 #12 验收 1 都写死了这句）"
+    no_ink = next(b for b in not_kept["by_rule"] if b["rule"] == intake.RULE_NO_RED_INK)
+    assert (no_ink["count"], no_ink["ids"]) == (3, ["b2", "b3", "b4"])
+    assert not_kept["block_ids"] == ["b2", "b3", "b4"], "一键补收要的入参要能直接拿去用"
+    assert not_kept["one_click"]["entry"] == "server.intake.include_blocks"
+    assert plan["counts"]["kept"] == 1 and plan["counts"]["no_red_ink"] == 3
+
+
+def test_the_no_red_ink_sentence_is_printed_even_at_zero():
+    """M=0 时照原话印「另有 0 道…」：它同时是「我检查过」的显式声明。
+
+    与 #7 的 M 同一条口径（REVIEW-BACKLOG 的 UX 观察 4）：零不代表可以不说，
+    它代表「这一页没有因为没红笔而少收的题」。
+    """
+    page = page_of([blk("b1")])
+
+    plan = intake.plan_decisions(page, ink_reports=reports(("b1", stats(210))),
+                                semantics={"b1": answer("cross")}, at=AT)
+
+    assert plan["not_kept"]["message"] == "另有 0 道没有红笔痕迹、未入库"
+    assert plan["not_kept"]["count"] == 0
+
+
+def test_the_breakdown_lists_why_each_not_kept_block_was_not_kept():
+    """D3 的口径：不只一个数字，逐个理由列出道数（界面才解释得清）。"""
+    page = page_of([blk("b1"), blk("b2"), blk("b3")])
+
+    plan = intake.plan_decisions(
+        page, ink_reports=reports(("b1", stats(0)), ("b2", stats(80)), ("b3", None)),
+        semantics={"b2": answer("tick")}, at=AT,
+    )
+    by_rule = {item["rule"]: item for item in plan["not_kept"]["by_rule"]}
+
+    assert by_rule[intake.RULE_NO_RED_INK]["ids"] == ["b1"]
+    assert by_rule[intake.RULE_TICK_ONLY]["ids"] == ["b2"]
+    assert "对勾" in by_rule[intake.RULE_TICK_ONLY]["message"]
+    assert by_rule[intake.RULE_INK_UNKNOWN]["ids"] == ["b3"]
+    assert plan["not_kept"]["count"] == 3, "三种理由都是「未入库」"
+
+
+def test_ink_we_could_not_read_is_pending_and_shouted_about():
+    """「待定」不是安静的一档：它要有一条警告，原话取自 #11 的统计报告。"""
+    page = page_of([blk("b7", bbox_px=None)])
+
+    plan = intake.plan_decisions(page, ink_reports=reports(("b7", None)),
+                                semantics={}, at=AT)
+
+    assert plan["page"]["blocks"][0]["keep"] is None
+    warning = next(w for w in plan["warnings"]
+                   if w["code"] == intake.INTAKE_BLOCK_INK_UNKNOWN)
+    assert warning["level"] == "warning"
+    assert warning["message"] == "块 'b7' 没有可用的 bbox_px，红笔统计做不了"
+    assert warning["id"] is None, "页级警告的 id 为 null（契约 §2）"
+
+
+def test_statistics_and_the_model_disagreeing_is_a_warning():
+    """统计说有红笔、模型说看不到红笔 → 两份证据矛盾，落向收并要人看一眼。"""
+    page = page_of([blk("b1")])
+
+    plan = intake.plan_decisions(page, ink_reports=reports(("b1", stats(210))),
+                                semantics={"b1": answer("none")}, at=AT)
+
+    assert plan["page"]["blocks"][0]["keep"] is True
+    conflict = next(w for w in plan["warnings"]
+                    if w["code"] == intake.INTAKE_INK_SEMANTICS_CONFLICT)
+    assert conflict["level"] == "warning"
+    assert "210" in conflict["message"], "把两边的读数都写出来，人才好判"
+
+
+def test_a_fallback_keep_says_it_did_not_really_judge():
+    """「判不准 → 收」要留痕：是模型判的还是兜底落收的（验收 3）。"""
+    page = page_of([blk("b1"), blk("b2")])
+
+    plan = intake.plan_decisions(
+        page, ink_reports=reports(("b1", stats(210)), ("b2", stats(210))),
+        semantics={"b1": answer(None, parsed=False, reason="模型答了一段散文"),
+                   "b2": answer("可能是勾吧")},
+        at=AT,
+    )
+    decisions = {b["id"]: b["decision"] for b in plan["page"]["blocks"]}
+
+    assert decisions["b1"]["keep"] is True and decisions["b1"]["source"] == "fallback"
+    assert decisions["b2"]["keep"] is True and decisions["b2"]["source"] == "fallback"
+    codes = {w["code"]: w["level"] for w in plan["warnings"]}
+    assert codes[intake.INTAKE_SEMANTICS_UNPARSED] == "warning"
+    assert all(w["code"] in codes for w in plan["warnings"])
+    assert codes[intake.INTAKE_SEMANTICS_FALLBACK] == "hint", \
+        "枚举外的值是「我这一条没查全」，级别比真矛盾轻（#10 的两级纪律）"
+
+
+def test_a_human_decision_is_never_overwritten_by_a_rerun():
+    """spec #2：人动过的部分不允许被一次重跑抹掉（与 D10 同源）。"""
+    human = {"rule": intake.RULE_HUMAN_INCLUDE, "source": "human", "semantics": None,
+             "reason": "人一键补收", "at": AT.isoformat(timespec="seconds")}
+    page = page_of([blk("b1", keep=True, decision=human)])
+
+    plan = intake.plan_decisions(page, ink_reports=reports(("b1", stats(0))),
+                                semantics={}, at=AT)
+
+    block = plan["page"]["blocks"][0]
+    assert block["keep"] is True and block["decision"] == human
+    assert plan["not_kept"]["count"] == 0, "人收进来的不算「未入库」"
+    preserved = next(w for w in plan["warnings"]
+                     if w["code"] == intake.INTAKE_HUMAN_DECISION_PRESERVED)
+    assert preserved["level"] == "hint"
+
+
+def test_the_plan_does_not_mutate_the_page_it_was_given():
+    """纯逻辑：输入原样不动（调用方拿它去写盘或不写，都不会被悄悄改）。"""
+    page = page_of([blk("b1")])
+    before = json.dumps(page, ensure_ascii=False, sort_keys=True)
+
+    intake.plan_decisions(page, ink_reports=reports(("b1", stats(210))),
+                          semantics={"b1": answer("cross")}, at=AT)
+
+    assert json.dumps(page, ensure_ascii=False, sort_keys=True) == before
+
+
+def test_a_block_that_is_not_an_object_is_shouted_about_not_skipped_silently():
+    page = page_of([blk("b1"), "我不是块"])
+
+    plan = intake.plan_decisions(page, ink_reports=reports(("b1", stats(210))),
+                                semantics={"b1": answer("cross")}, at=AT)
+
+    codes = [w["code"] for w in plan["warnings"]]
+    assert "block_not_an_object" in codes, "码沿用 #9/#10 的那一个，不另发明"
+    assert plan["counts"]["blocks"] == 1, "只统计真的块"
+
+
+def test_the_plan_is_deterministic():
+    page = page_of([blk("b1"), blk("b2")])
+    args = dict(ink_reports=reports(("b1", stats(210)), ("b2", stats(0))),
+                semantics={"b1": answer("cross")}, at=AT)
+
+    first = intake.plan_decisions(page, **args)
+    second = intake.plan_decisions(page, **args)
+
+    assert json.dumps(first, ensure_ascii=False, sort_keys=True) == \
+        json.dumps(second, ensure_ascii=False, sort_keys=True)
+
+
+# ---------------------------------------------------------------- 一键补收（验收 1 的入口）
+
+
+def test_one_click_include_takes_every_block_that_is_not_in_the_library():
+    page = page_of([blk("b1", keep=True, card_id="p-20261004-aaa111"),
+                    blk("b2", keep=False), blk("b3", keep=None)])
+
+    result = intake.include_blocks(page, at=AT)
+    blocks = {b["id"]: b for b in result["page"]["blocks"]}
+
+    assert blocks["b1"]["keep"] is True, "已经在库的不动"
+    assert [blocks["b2"]["keep"], blocks["b3"]["keep"]] == [True, True]
+    assert blocks["b3"]["decision"]["rule"] == intake.RULE_HUMAN_INCLUDE
+    assert blocks["b3"]["decision"]["source"] == "human"
+    assert blocks["b3"]["decision"]["at"] == AT.isoformat(timespec="seconds")
+    assert (result["summary"]["included"], result["summary"]["already_kept"]) == (2, 1)
+    assert [item["block_id"] for item in result["included"]] == ["b2", "b3"]
+
+
+def test_include_can_name_the_blocks_it_should_take():
+    page = page_of([blk("b1", keep=False), blk("b2", keep=False)])
+
+    result = intake.include_blocks(page, ["b2"], at=AT)
+    blocks = {b["id"]: b for b in result["page"]["blocks"]}
+
+    assert (blocks["b1"]["keep"], blocks["b2"]["keep"]) == (False, True)
+    assert result["summary"]["included"] == 1
+    assert result["summary"]["already_kept"] == 0
+
+
+def test_naming_a_block_that_does_not_exist_is_reported_not_ignored():
+    page = page_of([blk("b1", keep=False)])
+
+    result = intake.include_blocks(page, ["b1", "b9"], at=AT)
+
+    assert result["unknown"] == ["b9"]
+    assert result["summary"]["unknown"] == 1
+    assert result["summary"]["included"] == 1
+
+
+def test_include_keeps_the_red_pen_readout_so_the_audit_does_not_lose_why():
+    """补收只改**去留**，不改「这块的红笔当初是什么」那条读数。"""
+    old = {"rule": intake.RULE_TICK_ONLY, "source": "model", "semantics": "tick",
+           "confidence": 0.8, "provider": "deepseek", "model": "deepseek-flash",
+           "run_id": "run-1.json", "reason": "只是一个对勾", "at": "2026-10-04T19:00:00"}
+    page = page_of([blk("b1", keep=False, decision=old)])
+
+    result = intake.include_blocks(page, ["b1"], at=AT)
+    decision = result["page"]["blocks"][0]["decision"]
+
+    assert decision["rule"] == intake.RULE_HUMAN_INCLUDE
+    assert decision["semantics"] == "tick", "当初的语义要留着，审核时看得见"
+    assert decision["run_id"] == "run-1.json"
+    assert intake.RULE_TICK_ONLY in decision["reason"], "理由里要写清原来为什么没收"
+
+
+def test_include_records_a_human_drop_the_same_way():
+    page = page_of([blk("b1", keep=True)])
+
+    result = intake.set_keep_by_human(page, ["b1"], keep=False, at=AT)
+    block = result["page"]["blocks"][0]
+
+    assert block["keep"] is False
+    assert block["decision"]["rule"] == intake.RULE_HUMAN_DROP
+    assert block["decision"]["source"] == "human"
+
+
+def test_a_block_without_a_decision_can_still_be_included_by_name():
+    """还没跑过决策的块也能补收（界面上一键补收不该要求先跑一遍自动决策）。"""
+    page = page_of([blk("b1", keep=None)])
+
+    result = intake.include_blocks(page, ["b1"], at=AT)
+    decision = result["page"]["blocks"][0]["decision"]
+
+    assert decision["rule"] == intake.RULE_HUMAN_INCLUDE
+    assert decision["semantics"] is None
+    assert "没判过" in decision["reason"] or "未判过" in decision["reason"]

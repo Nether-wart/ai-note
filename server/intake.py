@@ -62,6 +62,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from . import ink
 from .warnings import _warn
 
@@ -246,3 +248,350 @@ INTAKE_HUMAN_DECISION_PRESERVED = "intake_human_decision_preserved"  # hint
 def _page_warn(code: str, message: str, level: str = "warning") -> dict:
     """页级警告：`id` 为 None（不属于某一张卡），`level` 显式发出来。"""
     return _warn(code, message, None, level)
+
+
+# ---------------------------------------------------------------- 页级：决定 + 记录 + 报告
+
+
+def _iso(moment) -> str:
+    """时间戳一律 `isoformat(timespec="seconds")`（与 `mastery.py` 的 `attempt.at` 同口径）。"""
+    return moment.isoformat(timespec="seconds")
+
+
+def _reports_by_id(ink_reports) -> dict:
+    """#11 的逐块统计报告 → 按块 id 索引。重复的 id 只认第一条（并会被下面的报告喊出来）。"""
+    out: dict = {}
+    for report in ink_reports or []:
+        if isinstance(report, dict):
+            out.setdefault(report.get("id"), report)
+    return out
+
+
+def _composition(decision: dict, answer, stamp: str) -> dict:
+    """规则决策 + 模型身份 → 落进页文件的那一条完整记录（验收 3 的审计面）。
+
+    `confidence`／`provider`／`model`／`run_id` 只在真的问过模型时才有值：
+    没有红笔（统计定的）与人补收（人定的）那几档，这几个字段是 `None`——
+    「没有模型参与」必须看得出来，不许拿一个假的模型身份充数。
+    """
+    answer = answer if isinstance(answer, dict) else {}
+    return {
+        "keep": decision["keep"],
+        "rule": decision["rule"],
+        "source": decision["source"],
+        "semantics": decision["semantics"],
+        "reason": decision["reason"],
+        "confidence": answer.get("confidence"),
+        "provider": answer.get("provider"),
+        "model": answer.get("model"),
+        "run_id": answer.get("run_id"),
+        "at": stamp,
+    }
+
+
+def plan_decisions(page: dict, *, ink_reports, semantics=None, at=None) -> dict:
+    """一页的收入决策：逐块判、逐块记，并报出「另有 M 道没有红笔痕迹、未入库」。
+
+    **纯逻辑**：不调模型（`semantics` 是喂进来的答案）、不写盘、不改传进来的 `page`。
+    调用方（`run_intake`）负责问模型与 `save_page`，界面（#14）负责显示。
+
+    输入：
+
+    - `ink_reports`：**#11 的 `ink.page_block_reports(image, page)` 原样**（逐块统计，
+      `stats=None` = 读不出来）。本模块不数像素、不重算边界。
+    - `semantics`：`{块 id: 答案}`，答案是 `server/intake_client` 的形状
+      （`{semantics, confidence, reason, provider, model, run_id, parsed}`）。
+      有红笔的块才有答案——没有红笔的块不需要问模型（0 与「读不出来」另有两档）。
+
+    返回 `{page, decisions, counts, not_kept, warnings}`：
+
+    - `page`：**新的**页（每块补上 `keep` / `ink` / `decision`），可以直接 `save_page`。
+    - `not_kept`：`{count, by_rule:[{rule,count,ids,message}], message, block_ids, one_click}`。
+      `message` 就是工单验收 1 那句原话「另有 M 道没有红笔痕迹、未入库」（M=0 也照印，
+      与 #7 的 M 同一条口径：零是「我检查过」，不是「可以不说」）；`by_rule` 把每一种
+      不入库的理由逐个列出（D3：不能只有一个数字）；`block_ids` 就是 `include_blocks`
+      要的入参（一键补收）。
+    - `warnings`：一律走 `server/warnings.py: _warn`（`{code,message,id,level}`，页级 `id` 为 null）。
+
+    **人动过的决策原样保留**（`source == "human"`）：一遍重跑不许抹掉人的补收/丢弃
+    （spec #2 的同一原则，见编排裁决 D10）。这一档会发一条 `hint`。
+    """
+    moment = at or datetime.now()
+    stamp = _iso(moment)
+    answers = semantics if isinstance(semantics, dict) else {}
+    reports = _reports_by_id(ink_reports)
+
+    warnings: list[dict] = []
+    blocks: list[dict] = []
+    decisions: list[dict] = []
+    preserved: list[str] = []
+
+    for raw in page.get("blocks") or []:
+        if not isinstance(raw, dict):
+            # 码沿用 #9/#10 的那一个（同一件事：块列表里混进了不是对象的项）
+            warnings.append(_page_warn(
+                "block_not_an_object", f"块列表里混进了不是对象的项：{raw!r} → 这一项没有决策"))
+            continue
+        block = dict(raw)
+        block_id = block.get("id")
+        report = reports.get(block_id)
+        stats = report.get("stats") if isinstance(report, dict) else None
+        block["ink"] = stats
+
+        previous = block.get("decision") if isinstance(block.get("decision"), dict) else None
+        if previous and previous.get("source") == SOURCE_HUMAN:
+            preserved.append(block_id)
+            warnings.append(_page_warn(
+                INTAKE_HUMAN_DECISION_PRESERVED,
+                f"块 {block_id!r} 的去留是人定的（{previous.get('rule')}）→ 重跑自动决策不动它"
+                f"（人动过的部分不允许被一次重跑抹掉）",
+                "hint"))
+            blocks.append(block)
+            decisions.append(_decision_row(block_id, previous))
+            continue
+
+        has = has_red_ink(stats)
+        if has is None:
+            if isinstance(report, dict) and report.get("message"):
+                warnings.append(_page_warn(INTAKE_BLOCK_INK_UNKNOWN, report["message"]))
+            else:
+                warnings.append(_page_warn(
+                    INTAKE_BLOCK_INK_UNKNOWN,
+                    f"块 {block_id!r} 没有红笔统计（整页统计没跑到它）→ 待定，未入库"))
+
+        answer = answers.get(block_id) if has else None
+        decision = decide_block(
+            has_red_ink=has,
+            semantics=(answer or {}).get("semantics") if isinstance(answer, dict) else None,
+        )
+        warnings.extend(_semantics_warnings(block_id, has, answer, decision, stats))
+        block["keep"] = decision["keep"]
+        block["decision"] = _composition(decision, answer, stamp)
+        blocks.append(block)
+        decisions.append(_decision_row(block_id, block["decision"]))
+
+    not_kept = _not_kept_report(blocks)
+    kept = sum(1 for b in blocks if b.get("keep") is True)
+    return {
+        "at": stamp,
+        "page": {**page, "blocks": blocks},
+        "decisions": decisions,
+        "counts": {
+            "blocks": len(blocks),
+            "kept": kept,
+            "dropped": sum(1 for b in blocks if b.get("keep") is False),
+            "pending": sum(1 for b in blocks if b.get("keep") is None),
+            "no_red_ink": sum(1 for b in blocks
+                              if (b.get("decision") or {}).get("rule") == RULE_NO_RED_INK),
+            "human": len(preserved) + sum(1 for b in blocks
+                                          if (b.get("decision") or {}).get("source") == SOURCE_HUMAN),
+        },
+        "not_kept": not_kept,
+        "warnings": warnings,
+    }
+
+
+def _decision_row(block_id, decision: dict) -> dict:
+    """报告里的逐块一行：够界面列出「这一页每一块为什么收/为什么没收」。"""
+    return {
+        "block_id": block_id,
+        "keep": decision.get("keep"),
+        "rule": decision.get("rule"),
+        "source": decision.get("source"),
+        "semantics": decision.get("semantics"),
+        "reason": decision.get("reason"),
+    }
+
+
+def _semantics_warnings(block_id, has, answer, decision: dict, stats=None) -> list[dict]:
+    """语义这一层的响声：没查到（hint）、与统计矛盾（warning）。
+
+    级别按 #10 的两级纪律：`warning` = 真矛盾；`hint` = 「我这一条没查全」。
+    把「没查到」报成 warning 会训练人忽略体检（`proto/server.py:1046-1047`）。
+    """
+    if not has or decision["rule"] not in (RULE_ERROR_TRACE, RULE_TICK_ONLY,
+                                           RULE_UNCERTAIN_KEEP):
+        return []
+    out: list[dict] = []
+    if isinstance(answer, dict) and answer.get("semantics") == SEMANTICS_NONE:
+        colored_px = (stats or {}).get("colored_px")
+        out.append(_page_warn(
+            INTAKE_INK_SEMANTICS_CONFLICT,
+            f"块 {block_id!r}：统计说这块有红笔 {colored_px}px，模型却说看不到红笔"
+            f"（两份证据矛盾）→ 判不准，落向收，请人看一眼",
+        ))
+    if answer is None:
+        out.append(_page_warn(
+            INTAKE_SEMANTICS_FALLBACK,
+            f"块 {block_id!r} 有红笔，但这次没有拿到它的语义（没问模型，或答案丢了）"
+            f"→ 判不准，落向收", "hint"))
+        return out
+    if not isinstance(answer, dict):
+        out.append(_page_warn(
+            INTAKE_SEMANTICS_FALLBACK,
+            f"块 {block_id!r} 的语义不是一个可读的对象（{answer!r}）→ 判不准，落向收", "hint"))
+        return out
+    if not answer.get("parsed", True):
+        out.append(_page_warn(
+            INTAKE_SEMANTICS_UNPARSED,
+            f"块 {block_id!r}：模型的输出解析不出语义（{str(answer.get('reason'))[:200]}）"
+            f"→ 判不准，落向收"))
+    elif answer.get("semantics") not in SEMANTICS_VALUES:
+        out.append(_page_warn(
+            INTAKE_SEMANTICS_FALLBACK,
+            f"块 {block_id!r}：模型给的语义不在枚举里（{answer.get('semantics')!r}）"
+            f"→ 判不准，落向收", "hint"))
+    return out
+
+
+# 「不收」的三种理由各自的句子。**`no_red_ink` 那一句是 spec/工单写死的原话**
+# （「另有 M 道没有红笔痕迹、未入库」），M=0 也照印：零是「我检查过」。
+# 另外两句由服务给，界面照原话显示、不再自己拼（契约 §6.1 第 5 条的同一条口径）。
+_NO_RED_INK_SENTENCE = "另有 {n} 道没有红笔痕迹、未入库"
+_NOT_KEPT_SENTENCES = {
+    RULE_TICK_ONLY: "另有 {n} 道只有红笔对勾（表示做对了）、未入库",
+    RULE_INK_UNKNOWN: "另有 {n} 道因为红笔统计读不出来、未入库（待定，等人看一眼）",
+    RULE_HUMAN_DROP: "另有 {n} 道被人标成不入库",
+}
+# `by_rule` 的顺序：头条那句在最前，其余按规则表的顺序（确定性、可断言）。
+_NOT_KEPT_ORDER = (RULE_NO_RED_INK, RULE_TICK_ONLY, RULE_INK_UNKNOWN, RULE_HUMAN_DROP)
+
+
+def _not_kept_report(blocks: list[dict]) -> dict:
+    """「没入库的题」的枚举报告（验收 1 的前半：列出未入库的题）。
+
+    `count` 是**没入库**的块数（含待定——待定也没入库，只是原因不同）。
+    """
+    buckets: dict[str, list] = {}
+    order: list[str] = []
+    for block in blocks:
+        if block.get("keep") is True:
+            continue
+        rule = (block.get("decision") or {}).get("rule")
+        if rule not in buckets:
+            buckets[rule] = []
+            order.append(rule)
+        buckets[rule].append(block.get("id"))
+
+    by_rule = []
+    for rule in list(_NOT_KEPT_ORDER) + [r for r in order if r not in _NOT_KEPT_ORDER]:
+        ids = buckets.get(rule)
+        if not ids and rule != RULE_NO_RED_INK:
+            continue
+        ids = ids or []
+        sentence = _NOT_KEPT_SENTENCES.get(rule, _NO_RED_INK_SENTENCE)
+        by_rule.append({"rule": rule, "count": len(ids), "ids": ids,
+                        "message": sentence.format(n=len(ids))})
+
+    block_ids = [b.get("id") for b in blocks if b.get("keep") is not True]
+    return {
+        "count": len(block_ids),
+        "by_rule": by_rule,
+        "message": _NO_RED_INK_SENTENCE.format(n=len(buckets.get(RULE_NO_RED_INK) or [])),
+        "block_ids": block_ids,
+        "one_click": {
+            "entry": "server.intake.include_blocks",
+            "how": "include_blocks(page, block_ids) —— 不传 block_ids 就是把上面这些全收进来",
+            "block_ids": block_ids,
+            "cli": "python3 -m server.intake --page <页 id> --include --apply",
+        },
+    }
+
+
+# ---------------------------------------------------------------- 一键补收（验收 1 的后半）
+
+
+def include_blocks(page: dict, block_ids=None, *, at=None) -> dict:
+    """**一键补收**：把没入库的块收进来（工单 #12 验收 1 的那个可调用入口）。
+
+    `block_ids=None` = 把这一页所有没入库的块（`keep is not True`，含待定）收进来；
+    给一串块 id 就只收它们。返回 `{page, included, already_kept, unknown, summary, warnings}`：
+    **点不到的 id 要说出来**（`unknown`），不许静默忽略。
+
+    补收记成 `decision.rule = "human_include"`、`source = "human"`——所以
+    **重跑自动决策不会把它翻回去**（`plan_decisions` 保留人做的决策）。这就是
+    spec 说的「补收入口」在数据上的落点：漏收的那几道一旦被人收进来，就一直是收的。
+    """
+    return _human_keep(page, block_ids, keep=True, at=at)
+
+
+def set_keep_by_human(page: dict, block_ids, *, keep: bool, at=None) -> dict:
+    """人改去留（补收 / 丢弃）：`keep=True` 是补收（走 `include_blocks`），`False` 是丢弃。
+
+    「切换收入／丢弃」是 spec #2 的手动修正最小集合之一（#14 的界面调它）；
+    #12 只需要补收那一条，但两条共用同一份实现——**人的决策只有一处写法**。
+    """
+    if not isinstance(keep, bool):
+        raise ValueError(f"keep 必须是布尔（收／不收），收到 {keep!r}")
+    return _human_keep(page, block_ids, keep=keep, at=at)
+
+
+def _human_keep(page: dict, block_ids, *, keep: bool, at=None) -> dict:
+    moment = at or datetime.now()
+    stamp = _iso(moment)
+    wanted = None if block_ids is None else list(block_ids)
+    remaining = list(wanted) if wanted is not None else None
+
+    warnings: list[dict] = []
+    blocks: list[dict] = []
+    changed: list[dict] = []
+    already: list = []
+    for raw in page.get("blocks") or []:
+        if not isinstance(raw, dict):
+            warnings.append(_page_warn(
+                "block_not_an_object", f"块列表里混进了不是对象的项：{raw!r} → 这一项没动"))
+            continue
+        block = dict(raw)
+        block_id = block.get("id")
+        target = True if wanted is None else (block_id in wanted)
+        if target and remaining is not None and block_id in remaining:
+            remaining.remove(block_id)
+        if not target:
+            blocks.append(block)
+            continue
+        if block.get("keep") is keep:
+            already.append(block_id)
+            blocks.append(block)
+            continue
+        previous = block.get("decision") if isinstance(block.get("decision"), dict) else {}
+        rule = RULE_HUMAN_INCLUDE if keep else RULE_HUMAN_DROP
+        was = previous.get("rule") or "没判过"
+        block["keep"] = keep
+        block["decision"] = {
+            "keep": keep,
+            "rule": rule,
+            "source": SOURCE_HUMAN,
+            "semantics": previous.get("semantics"),
+            "reason": (f"人{'一键补收' if keep else '改判为不入库'}（原来：{was}）"
+                       f"→ {'收' if keep else '不收'}：人的判断优先于自动决策"),
+            "confidence": previous.get("confidence"),
+            "provider": previous.get("provider"),
+            "model": previous.get("model"),
+            "run_id": previous.get("run_id"),
+            "at": stamp,
+        }
+        changed.append({"block_id": block_id, "rule": rule,
+                        "reason": block["decision"]["reason"]})
+        blocks.append(block)
+
+    unknown = list(remaining or [])
+    if unknown:
+        warnings.append(_page_warn(
+            "intake_block_unknown",
+            f"点名要动的块在这一页上找不到：{unknown}（页 {page.get('id')!r} 上没有这些块 id）"))
+    return {
+        "at": stamp,
+        "page": {**page, "blocks": blocks},
+        "included": changed if keep else [],
+        "dropped": [] if keep else changed,
+        "already_kept": already,
+        "unknown": unknown,
+        "summary": {
+            "blocks": len(blocks),
+            "included": len(changed) if keep else 0,
+            "dropped": 0 if keep else len(changed),
+            "already_kept": len(already),
+            "unknown": len(unknown),
+        },
+        "warnings": warnings,
+    }
