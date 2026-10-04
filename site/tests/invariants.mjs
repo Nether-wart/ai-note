@@ -29,6 +29,8 @@ export const CODES = Object.freeze({
   answerBoxMissing: 'answer_box_missing',
   choiceOptionsMissing: 'choice_options_missing',
   answerModeMismatch: 'answer_mode_mismatch',
+  answerTextLeaked: 'answer_text_leaked',
+  answerRevealedBeforeSubmit: 'answer_revealed_before_submit',
 });
 
 const IMAGE_URL_ATTRIBUTES = {
@@ -379,6 +381,75 @@ export function checkNoSideEffects({before, after}) {
           {path, before: was, after: now}),
       );
     }
+  }
+
+  return violations;
+}
+
+// ------------------- 不变量 5：提交之前不许出现任何答案
+
+/**
+ * 这条不变量的**覆盖范围**（spec #1 Testing Decisions 第 2 条自己点名的弱点）：
+ *
+ * > 选择题的标准答案常是单个字母（`A`），逐字判据抓不住它。
+ *
+ * 「`A`」这种单字母在任何一页里都必然出现（选项 `A. 甲` 就含它），逐字查只会全误报。
+ * 所以范围要**显式声明**，不能假装它全保：单字母的那些记进 `skipped`，
+ * 由「提交之前页面上根本没有判定节点」那条结构性判据兜（原型注释同款思路：
+ * `proto/server.py:101-102` 也把「非选择题答案是单个字母」列为可疑）。
+ */
+export function leakCandidates(problem) {
+  const fields = {
+    standard_answer: problem?.standard_answer,
+    correct_solution: problem?.correct_solution,
+    original_answer: problem?.original_answer,
+    correction: problem?.correction,
+  };
+  const checked = [];
+  const skipped = [];
+  for (const [field, raw] of Object.entries(fields)) {
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (text.length >= 2) {
+      checked.push({field, text});
+    } else if (text.length === 1) {
+      skipped.push({field, text, why: '单字母（选择题答案的常态）：逐字判据抓不住，靠「提交前没有判定节点」兜'});
+    } else {
+      skipped.push({field, text, why: '这道题这个字段是空的'});
+    }
+  }
+  return {checked, skipped};
+}
+
+/**
+ * 验收 1 的另一半（spec #1 Testing Decisions 第 3 条）：
+ *
+ *   · **提交之前**页面上不许出现标准答案、正解、原答、订正的**文本**；
+ *   · **提交之前**页面上也不许有判定节点（`data-attempt-result` 一族）——
+ *     这是单字母答案那条的兜底：根本没有节点，就没有可泄露的东西。
+ *   · **提交之后**结果区就该在，所以判据按 `phase` 区分，不然它会变成一条假警报。
+ */
+export function checkNoAnswerLeak({html, problem, phase = 'before_submit'}) {
+  const violations = [];
+  const {checked} = leakCandidates(problem);
+
+  for (const candidate of checked) {
+    if (String(html || '').includes(candidate.text)) {
+      violations.push(
+        violate(CODES.answerTextLeaked,
+          `页面上出现了 ${candidate.field} 的文本：「${candidate.text}」。` +
+            '判定之前把答案摆在做题的人面前，这次重做就没有意义了。',
+          {field: candidate.field, text: candidate.text}),
+      );
+    }
+  }
+
+  if (phase === 'before_submit' && /data-attempt-result|data-verdict/.test(String(html || ''))) {
+    violations.push(
+      violate(CODES.answerRevealedBeforeSubmit,
+        '提交之前页面上就有了判定节点（data-attempt-result / data-verdict）：' +
+          '单字母的标准答案逐字判据抓不住，这条结构性判据是它的兜底。',
+        {phase}),
+    );
   }
 
   return violations;
