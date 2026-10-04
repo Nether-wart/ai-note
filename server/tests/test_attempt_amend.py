@@ -189,3 +189,105 @@ def test_amending_an_attempt_that_is_not_the_last_one_replays_the_rest(api_for):
     assert [a["verdict"] for a in saved["attempts"]] == ["correct", "unreadable", "correct"]
     assert saved["mastery"]["mastered_at"] == a3["at"]
     assert get_json(api, "/api/index")[1]["data"]["problems"][0]["graduated"] is True
+
+
+# ---------------------------------------------------------------- 验收 2：只改错因
+
+def test_changing_only_the_error_causes_leaves_mastery_untouched(api_for):
+    """验收 2：错因是给人看的标注，**不参与状态机**。
+
+    卡里的掌握读数（`streak`/`state`/`last_attempt_at`）与冷却在改前改后必须逐字相同，
+    连判定本身的来源、置信度、模型都不动（那是一次「补记错因」，不是改判）。
+    """
+    at = NOW - 2 * DAY  # 仍在上一次重做的冷却窗口里
+    original = rec(at, "wrong", confidence=0.3)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 0, "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+    before = card_on_disk(api)
+
+    status, body = post_json(api, f"/api/attempt/{PID}",
+                             {"attempt_at": original["at"], "error_causes": ["计算失误", "审题不清"]})
+
+    assert status == 200, body
+    assert body["data"]["attempt"]["error_causes"] == ["计算失误", "审题不清"]
+    saved = card_on_disk(api)
+    assert saved["mastery"] == before["mastery"], "掌握状态一个字都不许变"
+    assert (saved["attempts"][0]["verdict"], saved["attempts"][0]["source"],
+            saved["attempts"][0]["confidence"], saved["attempts"][0]["provider"],
+            saved["attempts"][0]["model"]) == \
+        (before["attempts"][0]["verdict"], before["attempts"][0]["source"],
+         before["attempts"][0]["confidence"], before["attempts"][0]["provider"],
+         before["attempts"][0]["model"]), "补记错因不是改判"
+    assert "overrode" not in saved["attempts"][0], "没改判就不该出现原判定"
+
+
+def test_a_single_error_cause_string_is_one_cause_not_its_characters(api_for):
+    """单个字符串包成单元素列表——`list("计算失误")` 会拆成单字（原型踩过）。"""
+    original = rec(NOW - 8 * DAY, "wrong", confidence=0.3)
+    card = card_with([original], mastery={"state": "in_pool", "streak": 0,
+                                          "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": original["at"], "error_causes": "计算失误"})
+
+    assert body["data"]["attempt"]["error_causes"] == ["计算失误"]
+
+
+def test_an_empty_error_cause_list_clears_the_tags(api_for):
+    """空列表＝把错因清掉，是合法的修改（不是「什么都没改」）。"""
+    original = rec(NOW - 8 * DAY, "wrong", confidence=0.3, error_causes=["概念不清"])
+    card = card_with([original], mastery={"state": "in_pool", "streak": 0,
+                                          "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": original["at"], "error_causes": []})
+
+    assert body["data"]["attempt"]["error_causes"] == []
+
+
+# ---------------------------------------------------------------- 验收 3：幂等
+
+def test_submitting_the_same_amendment_twice_changes_nothing_the_second_time(api_for):
+    """验收 3：同一 payload 提交两次，结果与一次一致。
+
+    证据有两层：① 两次响应的 `data` 逐字相同（假时钟下 `index_rebuilt_at` 也相同）；
+    ② 第二次之后**题卡文件一个字节都没变**——记录不追加、状态不再动。
+    """
+    original = rec(NOW - 8 * DAY, "correct", confidence=0.95)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+    payload = {"attempt_at": original["at"], "verdict": "wrong", "error_causes": ["计算失误"]}
+    path = api.catalog.problems_dir / f"{PID}.json"
+
+    first_status, first = post_json(api, f"/api/attempt/{PID}", payload)
+    after_first = path.read_bytes()
+
+    second_status, second = post_json(api, f"/api/attempt/{PID}", payload)
+
+    assert (second_status, second) == (first_status, first), "第二次与第一次结果一致"
+    assert path.read_bytes() == after_first, "第二次不该再动题卡"
+    saved = card_on_disk(api)
+    assert len(saved["attempts"]) == 1, "不追加记录"
+    assert saved["attempts"][0]["overrode"]["verdict"] == "correct", \
+        "overrode 记的是最初那一次原判定，重复提交不覆盖它"
+
+
+def test_a_second_different_verdict_keeps_the_original_original(api_for):
+    """连着改两次：`overrode` 保留的始终是**最初**（机器给的）那次判定。"""
+    original = rec(NOW - 8 * DAY, "correct", confidence=0.95)
+    card = card_with([original],
+                     mastery={"state": "in_pool", "streak": 1, "last_attempt_at": original["at"]})
+    _, api = api_for_one(api_for, card)
+
+    post_json(api, f"/api/attempt/{PID}", {"attempt_at": original["at"], "verdict": "wrong"})
+    _, body = post_json(api, f"/api/attempt/{PID}",
+                        {"attempt_at": original["at"], "verdict": "unreadable"})
+
+    attempt = body["data"]["attempt"]
+    assert attempt["verdict"] == "unreadable"
+    assert attempt["overrode"]["verdict"] == "correct"
+    assert attempt["overrode"]["confidence"] == 0.95
