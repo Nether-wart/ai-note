@@ -4,8 +4,10 @@
 写进了第二题，于是那张卡带着另一道题的标准答案被标成了「已审核」。
 所以判据不测措辞、只测「该响的响了」。
 
-每个警告是 `{code, message, id}`：`code` 稳定（机器/测试读它），
-`message` 是给人看的原话（界面照原话显示，不改写、不吞掉）。
+每个警告是 `{code, message, id, level}`：`code` 稳定（机器/测试读它），
+`message` 是给人看的原话（界面照原话显示，不改写、不吞掉），
+`level` **显式发出来**（`"warning"`｜`"hint"`）——有默认值却不出现在响应里，
+#9 加 `hint` 级码时就得改判定逻辑、界面也只能靠猜。
 """
 
 from __future__ import annotations
@@ -18,8 +20,8 @@ from .mastery import TYPE_CN
 _CHOICE_LETTER = re.compile(r"[A-Da-d]")
 
 
-def _warn(code: str, message: str, pid: str | None) -> dict:
-    return {"code": code, "message": message, "id": pid}
+def _warn(code: str, message: str, pid: str | None, level: str = "warning") -> dict:
+    return {"code": code, "message": message, "id": pid, "level": level}
 
 
 def card_warnings(card: dict, catalog) -> list[dict]:

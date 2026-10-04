@@ -130,7 +130,7 @@
 | `code` | str | 稳定标识，界面按它决定怎么显示，测试按它断言 |
 | `message` | str | **给人看的完整句子**，不是错误码的复述——界面照原话显示，不改写、不吞掉 |
 | `id` | str \| null | 属于哪张卡；索引级的为 `null` |
-| `level` | `"warning"` \| `"hint"` | 严重度。`"warning"`（默认）= 这里有东西不对，要看；`"hint"` = 提示级（例如「旧卡缺页绑定」，旧数据不该因为新结构变成脏数据）。**级别只有服务能定**，界面不许自行降级 |
+| `level` | `"warning"` \| `"hint"` | 严重度。`"warning"` = 这里有东西不对，要看；`"hint"` = 提示级（例如「旧卡缺页绑定」，旧数据不该因为新结构变成脏数据）。**级别只有服务能定**，界面不许自行降级。这个键**总是显式发出来**（v0 现有的码一律 `"warning"`，`hint` 级的 `page_binding_missing` 归 #9）——有默认值却不出现在响应里，下游只能靠猜 |
 
 **`skipped` 与 `warnings` 的分工（不要混）**：
 
@@ -375,7 +375,8 @@
 | 情况 | HTTP | `error` |
 |---|---|---|
 | 没有这张卡 | 404 | `{code:"not_found", message:"没有这道题：p-xxx", hint:"GET /api/index 看有哪些", details:{what:"problem", id:"p-xxx"}}` |
-| id 非法（含 `/`、`..`、空） | 400 | `{code:"bad_request", message:"题卡 id 非法：'../../etc/passwd'", hint:"id 只允许字母、数字、点、下划线与连字符", details:{param:"pid", value:"../../etc/passwd"}}` |
+| id 非法（含 `/`、`..`、**空**） | 400 | `{code:"bad_request", message:"题卡 id 非法：'../../etc/passwd'", hint:"id 只允许字母、数字、点、下划线与连字符", details:{param:"pid", value:"../../etc/passwd"}}` |
+| id 是空的（`GET /api/problem/`） | 400 | 同上，`message` 是 `题卡 id 非法：''`。**不是 404**：客户端少给一段路径是客户端 bug，404（「没这条路由」）会让人去翻路由表 |
 | 用错方法（POST 到这个只读端点） | 405 | `{code:"method_not_allowed", message:"...", details:{allowed:["GET","OPTIONS"]}}` |
 
 ## 6. 能不能走自动判定：一处实现，三个拒绝理由
@@ -388,7 +389,7 @@
   "reason_text": "解答题只能人工确认：过程题在屏幕上敲不出过程" }
 ```
 
-三个理由，**按这个优先级依次判**（同时成立时取前面的那个，保证同一张卡永远给同一个答案）：
+三个理由，**按这个优先级依次判**（同时成立时取前面的那个，保证同一张卡永远给同一个**判定**）：
 
 | 优先级 | `reason` | 触发 | `reason_text`（界面照原话显示） |
 |---|---|---|---|
@@ -530,7 +531,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 
 | 情况 | HTTP | `error` |
 |---|---|---|
-| `kind` 不在枚举里 | 400 | `{code:"bad_request", message:"图片类型非法：'thumb'", details:{param:"kind", value:"thumb", allowed:["original","clean","mask"]}}` |
+| `kind` 不在枚举里（含**空**：`…/image/`） | 400 | `{code:"bad_request", message:"图片类型非法：'thumb'", details:{param:"kind", value:"thumb", allowed:["original","clean","mask"]}}`。空的时候 `message` 是 `图片类型非法：''`——错要指向 `kind`，不能指向 `pid`（不然人会去查本来是对的题卡 id） |
 | 卡里没记这张图／文件不存在 | 404 | `{code:"not_found", message:"这张卡没有 clean 图（擦除手写后的题面图）", details:{what:"image", id:"p-xxx", kind:"clean", available_kinds:["original"]}}` |
 | 有这张图，但题卡里没记 URL | 404 | 同上，`message` 补一句「卡里没记 clean_image」 |
 | id 非法 | 400 | 同 §5.1 |
@@ -549,7 +550,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 `code` 稳定；`message` 是给人看的原话，允许打磨；`level` 见 §2。
 **每一条码都对应一个会喊的检查**（ADR 0007 第 6 条：每个由人填写的字段都要有一个会喊的检查）。
 
-逐卡（出现在 `Problem.warnings` 里，`level` 全是 `"warning"`，除非另注）：
+逐卡（出现在 `Problem.warnings` 里。v0 的码 `level` 全是 `"warning"`，且**每个警告对象都显式带这个键**；下表中标注 `hint` 的那条归 #9 落地）：
 
 | `code` | 触发 | `message` |
 |---|---|---|
@@ -732,6 +733,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 |---|---|---|
 | `5cdaf75` | 初版（= commit `765cd31`） | 工单 #3：契约优先，先把形状钉住 |
 | 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表。另：§6.1 增第 5 条——M 的那句话由服务给、界面照原话显示（真实渲染验证时发现界面自己又拼了一遍，出现重复行），N 必须逐个理由列数 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
+| 本版 | 空 id（`GET /api/problem/`）与空 kind（`…/image/`）明确成 **400**（不是 404、且错要指向 `kind` 而不是 `pid`）；`Warning.level` 明确「总是显式发出来」；§6 术语滑词「同一个答案」改回「同一个**判定**」 | 独立验证查出的口径差：只差这「空」一档看着像漏网；`level` 有默认值却不出现在响应里，下游只能靠猜 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from conftest import PNG_1X1, make_card
+from conftest import PNG_1X1, get_json, make_card
 
 
 def index_of(api):
@@ -117,3 +117,27 @@ def test_per_card_warnings_show_up_in_both_places(api_for):
     flat = body["warnings"]
     assert per_card and flat == per_card
     assert body["data"]["warnings"] == flat
+
+
+def test_every_warning_says_its_level_out_loud(api_for):
+    """`level` 必须显式发出来（契约 §2）。
+
+    现在的码一律 `"warning"`，`hint` 级的 `page_binding_missing` 归 #9。
+    但只要它有默认值却不出现在响应里，#9 加 hint 码时就得改判定逻辑，
+    界面也只能靠猜——ADR 0007 第 6 条要的是「显式喊出来」。
+    """
+    card = make_card("p-20261004-ef7c47", **{
+        "problem.type": "solution",
+        "standard_answer.value": "",
+        "topics": [],
+    })
+    # 两张题干逐字相同的卡 → 索引级警告（id 为 null 那一种）
+    status, body = get_json(
+        api_for([card, make_card("p-20261004-999999")]), "/api/index"
+    )
+
+    per_card = body["data"]["problems"][0]["warnings"]
+    assert per_card and all(w["level"] == "warning" for w in per_card)
+    index_level = [w for w in body["warnings"] if w["id"] is None]
+    assert index_level and all(w["level"] == "warning" for w in index_level)
+    assert all(w["level"] == "warning" for w in body["skipped"])
