@@ -62,3 +62,21 @@ def test_real_server_answers_even_a_bogus_route_with_json(tmp_path):
             body = json.loads(exc.read())
             assert body["ok"] is False
             assert body["error"]["reason"] == "not_found"
+
+
+def test_a_taken_port_says_so_instead_of_a_traceback(tmp_path, capsys):
+    """起不来也要说人话：`Errno 98` 加一段回溯等于让人自己去猜哪一步错了。
+
+    这条不是洁癖——作者自己在里程碑二里就撞上了（8765 被别的进程占着），
+    当时服务吐了一段回溯，人得读完才知道是端口的问题。
+    """
+    from server.app import main, serve
+
+    root = make_data_dir(tmp_path, [make_card(PID)])
+    with serve(root, port=0) as base_url:
+        taken = int(base_url.rsplit(":", 1)[1])
+        assert main(["--data", str(root), "--port", str(taken)]) == 2
+
+    err = capsys.readouterr().err
+    assert "已被占用" in err
+    assert "Errno" not in err and "Traceback" not in err

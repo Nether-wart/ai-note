@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -109,7 +110,17 @@ def main(argv: list[str] | None = None) -> int:
     if not data_dir.is_dir():
         print(f"数据目录不存在：{data_dir}", file=sys.stderr)
         return 2
-    httpd = build_server(data_dir, args.host, args.port, public_base=args.public_base)
+    try:
+        httpd = build_server(data_dir, args.host, args.port, public_base=args.public_base)
+    except OSError as exc:
+        # 起不来也要说人话。裸回溯（还是 `Errno 98`）等于让人自己去猜哪一步错了，
+        # 这与「不许静默」是同一条道理——端口被占是最常见的一种起不来。
+        if exc.errno == errno.EADDRINUSE:
+            print(f"端口 {args.port} 已被占用：换一个 --port，或先关掉占着它的进程。"
+                  f"（想随便挑一个空闲端口就传 --port 0）", file=sys.stderr)
+            return 2
+        print(f"起不来：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     host, port = httpd.server_address[:2]
     print(f"只读服务在 http://{host}:{port}（数据：{data_dir}）", file=sys.stderr)
     print(f"收件目录：{args.inbox}（v0 不监视，#13 接手）", file=sys.stderr)
