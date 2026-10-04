@@ -167,6 +167,20 @@ def apply_attempt(card: dict, verdict: str, *, confidence=None, source: str = SO
     return step(card, m, attempt)
 
 
+def cooldown_gate(card: dict, prev_at, moment: datetime) -> tuple[bool, int | None]:
+    """冷却门：`(cooling, gap_days)`——`moment` 这一刻**是否落在冷却窗口里**、距上次重做几天。
+
+    基准是**上一次重做**（`prev_at`；从未重做过的以录入时间起算）。门的实现只有这一份：
+    `step`（重放／追加新重做）与 `peek_step`（只改错因时的只读读数）都从这里走，
+    于是「这次重做发生时是否处于冷却」不可能两处各判一套。
+    """
+    base = parse_dt(prev_at) or parse_dt(card.get("created_at"))
+    cooling = bool(base and moment < base + timedelta(days=COOLDOWN_DAYS))
+    # 同一天里「录入在下午、标记在当天」会让差值为负——读数该是 0 天，不是 -1 天
+    gap_days = max(0, int((moment - base).total_seconds() // 86400)) if base else None
+    return cooling, gap_days
+
+
 def step(card: dict, m: dict, attempt: dict) -> dict:
     """把**一次**重做按既定规则作用到掌握状态 `m` 上，返回这一次的读数。
 
@@ -185,11 +199,8 @@ def step(card: dict, m: dict, attempt: dict) -> dict:
     if verdict not in VERDICTS:
         raise ValueError(f"重做记录里的判定取值非法：{verdict!r}")
 
-    # ⚠ 这两行必须排在 `m["last_attempt_at"] = …` 前面（见 docstring）。
-    prev_base = parse_dt(m.get("last_attempt_at")) or parse_dt(card.get("created_at"))
-    cooling = bool(prev_base and moment < prev_base + timedelta(days=COOLDOWN_DAYS))
-    # 同一天里「录入在下午、标记在当天」会让差值为负——读数该是 0 天，不是 -1 天
-    gap_days = max(0, int((moment - prev_base).total_seconds() // 86400)) if prev_base else None
+    # ⚠ 取门必须排在 `m["last_attempt_at"] = …` 前面（见 docstring）。
+    cooling, gap_days = cooldown_gate(card, m.get("last_attempt_at"), moment)
 
     # 时刻一律归一化到 UTC 再落库：定点修正靠它定位，写法必须唯一
     attempt["at"] = moment.isoformat(timespec="seconds")
@@ -228,6 +239,29 @@ def step(card: dict, m: dict, attempt: dict) -> dict:
     # 一次重做只有一句给界面看的原话（契约 §10.1：attempt.note 与 mastery.note 是同一句）
     attempt["note"] = base["note"]
     return base
+
+
+def peek_step(card: dict, index: int) -> dict:
+    """**只读地**看第 `index` 次重做在那段历史里的读数：`{cooling, credited, gap_days}`。
+
+    **不改卡、不改记录、不推进状态机**（D10：只改错因时一个字节都不许动）。冷却门与
+    `step` 用的是同一份实现（`cooldown_gate`，基准是**它前面那一次**重做、第一次以录入
+    时间起算），`credited` 也是同一条规则（判对**且**脱离冷却才算计入）——所以卡自洽时
+    它给出的读数与重放逐字一致；不一致恰恰说明卡上的状态是人动过／旧版本写的，
+    那个漂移该被审计报出来（#15），不是在这里顺手改掉。
+
+    卡级的 `state`／`streak` 与那一次的 `note` 不在这里：前者要么需要重放、要么就是卡上
+    存的那份，后者是记录上已有的原话——都由调用方给（`amend._readout`）。
+    """
+    attempt = (card.get("attempts") or [])[index]
+    moment = parse_dt(attempt.get("at"))
+    if moment is None:
+        raise ValueError(f"重做时刻解析不了：{attempt.get('at')!r}（要 ISO 8601）")
+    prev_at = card["attempts"][index - 1].get("at") if index else None
+    cooling, gap_days = cooldown_gate(card, prev_at, moment.astimezone(timezone.utc))
+    return {"cooling": cooling, "gap_days": gap_days,
+            # 与 `step` 里那条规则一字不差：判对**且**脱离冷却才算进连续正确
+            "credited": attempt.get("verdict") == "correct" and not cooling}
 
 
 def recompute_mastery(card: dict) -> list[dict]:

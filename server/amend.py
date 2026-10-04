@@ -9,8 +9,13 @@
     定位不到就**明确失败**，绝不落到最近一次（验收 4）。
   · **判定与错因只能由这一个形态改**，别的一律 400：`source`／`confidence`／`provider`／
     `model`／`overrode` 是服务写给人看的审计字段，客户端不许碰（#5 立的那条硬规则）。
-  · **掌握只能重算**（`mastery.recompute_mastery`）：改的是历史里某一次时，冷却门
-    必须和写路径是同一个（`mastery.step`），先算门、后写 `last_attempt_at`。
+  · **掌握按「判据变没变」分流**（编排裁决 D10）：只有 `verdict` **真的变了**（改判）才
+    走 `mastery.recompute_mastery` 重放重算——那是 #6 验收 1，一条都不许取消；重放的冷却门
+    必须和写路径是同一个（`mastery.step`），先算门、后写 `last_attempt_at`。**只改
+    `error_causes` 时一个字都不重算**，卡上存的 `mastery` 与既有 `attempts[i].note`
+    **逐字保留**。纯标注编辑不该销毁人动过的状态（spec #2 的同一原则），更不该静默地改
+    （ADR 0007 第 6 条）；至于「卡上状态与历史不一致」这种漂移，该由审计报出来（#15），
+    而不是被一次无关编辑顺手改掉。所以修法是**分流**，不是取消重放。
 
 `verdict` 与 `error_causes` 都不给＝什么都没得改，门口就 400——静默成功是「不许静默」
 最讨厌的那种做法。
@@ -55,12 +60,17 @@ class AmendEndpoint:
         attempt = attempts[index]
 
         before = _snapshot(card)
-        if "verdict" in fields:
-            _override(attempt, fields["verdict"])
+        # **判据变没变**决定走哪条路（D10）。`verdict` 没给、或给的与现值相同，都只是
+        # 「补记错因」——那不是改判，不许借道重放（重发同一个 verdict 同理，见 `_override`）。
+        changed_judgment = _override(attempt, fields["verdict"]) if "verdict" in fields else False
         if "error_causes" in fields:
             attempt["error_causes"] = fields["error_causes"]
 
-        steps = mastery.recompute_mastery(card)
+        # **改判** → 重放重算（验收 1；改的可能不是最后一次，就地打补丁会自相矛盾）。
+        # **纯标注**（判据一个字没变）→ 一个字都不重算：卡上存的 `mastery` 与既有
+        # `attempts[i].note` 逐字保留（D10）。漂移不是在这里顺手修的，是被审计报出来的（#15）。
+        if changed_judgment:
+            mastery.recompute_mastery(card)
         # 幂等（验收 3）：一个字都没变就不碰盘。第二次提交同一 payload 时，
         # 重算的读数与 `overrode` 都与第一次相同，于是这里连写都不写。
         if _snapshot(card) != before:
@@ -68,37 +78,49 @@ class AmendEndpoint:
 
         # 「索引重建」在 v0 是立刻读一次现算索引（ADR 0001），与写路径同一条路。
         index_data, _, _ = self.catalog.index()
-        step = steps[index]
         data = {
             "attempt": attempt,
-            # state/streak/last_attempt_at 是**重算后的卡级终态**（与索引一致）；
-            # cooling/credited/gap_days/note 是**被改那一次**在重放里的读数。
-            # 改的是最后一次时两者重合；不是最后一次时这样分层（见 issue #6 评论）。
-            "mastery": {
-                "state": card["mastery"].get("state"),
-                "streak": card["mastery"].get("streak"),
-                "last_attempt_at": card["mastery"].get("last_attempt_at"),
-                "cooling": step["cooling"],
-                "credited": step["credited"],
-                "gap_days": step["gap_days"],
-                "note": step["note"],
-            },
+            # 两层读数见 `_readout`（`state`/`streak` 是卡上的终态，其余是这一步的读数）。
+            "mastery": _readout(card, attempt, index),
             "run_id": None,  # 人工修正不调模型、不留档（契约 §10.1）
             "index_rebuilt_at": index_data["built_at"],
         }
         return data, card_warnings
 
 
+def _readout(card: dict, attempt: dict, index: int) -> dict:
+    """契约 §10.1 的 `mastery`：`state`／`streak`／`last_attempt_at` 是**卡级终态**
+    （重放后与索引一致；没重放时就是卡上原样存的那三个），`cooling`／`credited`／
+    `gap_days` 是**被改那一次**的读数，`note` 是那一次记录上的原话（契约 §10.1：
+    `attempt.note` 与 `mastery.note` 是同一句）。
+
+    这里**不判分流**：那一次的读数一律问 `mastery.peek_step`（只读、与重放同一条门），
+    于是「改判」与「只改错因」两条路径给出的这一步读数逐字一致——同一 payload 重发一次
+    （第一次改判、第二次已是同一个 verdict）幂等的证据正是这个（验收 3）。
+    """
+    stored = card.get("mastery") or {}
+    return {
+        "state": stored.get("state"),
+        "streak": stored.get("streak"),
+        "last_attempt_at": stored.get("last_attempt_at"),
+        **mastery.peek_step(card, index),
+        "note": attempt.get("note"),
+    }
+
+
 # -------------------------------------------------------------------- 改判
 
-def _override(attempt: dict, verdict: str) -> None:
+def _override(attempt: dict, verdict: str) -> bool:
     """把一次重做的判定改成人给的判定，并把**原判定**留在 `overrode` 上。
 
     `overrode` 只记**最初**那一次原判定：第二次改判不覆盖它，重复提交同一 payload
     也不改动任何东西（幂等，验收 3）。只改错因时不走这里（验收 2）。
+
+    返回**判据到底变没变**（D10 的分流点）：给的 `verdict` 与现值相同 → `False`，
+    连来源都不动（幂等）——「重发一次同一个 verdict」不是改判，于是调用方也不重放。
     """
     if verdict == attempt.get("verdict"):
-        return  # 已经是这个判定：连来源都不动（幂等）
+        return False
     if "overrode" not in attempt:
         attempt["overrode"] = {key: attempt.get(key) for key in _OVERRIDDEN_KEYS}
     attempt["verdict"] = verdict
@@ -108,6 +130,7 @@ def _override(attempt: dict, verdict: str) -> None:
     attempt["confidence"] = None
     attempt["provider"] = None
     attempt["model"] = None
+    return True
 
 
 def _snapshot(card: dict) -> str:
