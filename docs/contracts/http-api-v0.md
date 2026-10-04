@@ -891,6 +891,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版 | 空 id（`GET /api/problem/`）与空 kind（`…/image/`）明确成 **400**（不是 404、且错要指向 `kind` 而不是 `pid`）；`Warning.level` 明确「总是显式发出来」；§6 术语滑词「同一个答案」改回「同一个**判定**」 | 独立验证查出的口径差：只差这「空」一档看着像漏网；`level` 有默认值却不出现在响应里，下游只能靠猜 |
 | B5（#13） | §0 把「无任何写端点」改成「无任何**改已有数据**的写端点」并写明上传页已托管；§1 `--inbox` 默认跟着 `--data` 走、补 `public_base_not_reachable`；§3 `data.server` 加 `upload_url`／`reachable_from_other_devices`／`inbox`／`read_only_note`；§8 加收件目录四个警告码与 `inbox_part_empty` 跳过码；§9 加 **413** `payload_too_large`；§10.3 从「预留」改成**已实现**并钉死 `POST /api/inbox`／`POST /api/inbox/scan` 的形状（文件名取内容哈希、`blocks: null` ≠ `[]`、`watch.implemented: false`） | 工单 #13 落地。形状先在 issue #13 评论里记账再改这份文档（BRIEF 硬规则 3） |
 | 本版（B1 / #9） | §10.2 从「预留」落成**具体形状**：加 §10.2.1 页文件字段（含 `bbox_norm` 是 xywh、`bbox_px` 是 xyxy 的对照表）与 §10.2.2 模块/命令表（`server/pages.py`、`allocate_card_id`/`assign_card_ids`、`rebind`、`python3 -m server.backfill`）；§8 加 `page_binding_lost`（`level: "warning"`），并把 `page_binding_missing` 标成 B1 落地；§12 模块角色加 `server/pages.py`；§12.1 补页的纯逻辑测试接缝 | 工单 #9 验收 1/2/3。**先写进 issue #9 的评论再动手**（BRIEF 硬规则 3）。要点：两套坐标基准（整页 vs 裁剪图）不许混用；「一页多块 id 互不相同」与「重切保留绑定」是同一份逻辑；旧卡缺绑定是**提示**、页↔卡对不上账才是**警告** |
+| 本版（B3 / #11） | §12 模块角色加 `server/ink.py`；§10.2.1 预留的 `ink` 键点明由 `ink.page_block_reports` 产出 | 工单 #11 验收 2「体检与筛选读的是同一个常量」。规格原文说「那**一个**阈值」，但源码里是**两颗**回答不同问题的常量（像素级 `sat >= 60` 见 `proto/slice.py:849`/`:921`，框级 `in_color > 20` 见 `:888`）——收成一颗是错的。真正的重复是 `60` 在体检与擦除里各写了一遍。**先写进 issue #11 的评论再动手**（BRIEF 硬规则 3）。本版**不改任何响应形状**：`ink` 是数据文件里的键，不是端点字段 |
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
 | B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
 
@@ -904,6 +905,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、`POST /api/inbox/scan` 的手动扫描、`multipart/form-data` 解析。**切分（#10）的接缝**在这里：可注入 `segmenter`，不注入就报 `segmentation_not_implemented`、`blocks` 给 `null`——不许编块列表 |
 | `server/static/upload.html` | 手机上传页：**一个文件**，无构建步骤、不引任何外部资源。改它不用碰 Python |
 | `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
+| `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出 |
 
 ## 12.1 测试接缝
 
