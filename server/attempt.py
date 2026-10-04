@@ -24,6 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import autojudge, judge, warnings as warnings_mod
+from .amend import AmendEndpoint
 from .autojudge import REASONS
 from .errors import bad_request, model_unavailable, not_auto_judgeable
 from .judge_client import ModelUnavailable, extract_json
@@ -49,12 +50,22 @@ class AttemptEndpoint:
         # 只在 502 的 details 里用：这次本来想用哪个模型（#5 验收：模型失败要说清）
         self.provider = provider
         self.model = model
+        # 同一个端点的第三种形态（#6）：定点修正只改既有那一次重做，不碰判定角色。
+        self.amend = AmendEndpoint(catalog, clock=clock)
 
     # ---------------------------------------------------------------- 入口
 
     def handle(self, pid: str, raw_body: bytes | str | None) -> tuple[dict, list[dict]]:
-        """返回 `(data, warnings)`；失败一律抛 `ApiError`（由 HTTP 层收进信封）。"""
+        """返回 `(data, warnings)`；失败一律抛 `ApiError`（由 HTTP 层收进信封）。
+
+        同一个端点收两种形态（契约 §10.1）：带 `attempt_at` 的是**定点修正**（#6），
+        只改既有那一次重做；其余走**屏幕重做**（#5），自己问模型、自己判定。
+        形态由**键**分辨，不由「试一下」分辨——两者对同一个键的合法性判断不同。
+        """
         body = _parse_body(raw_body)
+        if "attempt_at" in body:
+            return self.amend.handle(pid, body)
+
         answer = _screen_form(body)
 
         card = self.catalog.load_card(pid)  # id 非法 → 400；没有这张卡 → 404
