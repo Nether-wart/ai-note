@@ -113,7 +113,8 @@ def api_for(tmp_path):
     """
     from server.http import Api
 
-    def build(cards=None, *, files=None, extra_files=None, images=None, root=None, clock=None):
+    def build(cards=None, *, files=None, extra_files=None, images=None, root=None, clock=None,
+              judge=None, runs_dir=None, config=None):
         base = root or make_data_dir(tmp_path, cards or [])
         for name, card in (files or {}).items():
             (base / "problems" / f"{name}.json").write_text(
@@ -125,7 +126,7 @@ def api_for(tmp_path):
         if images:
             for name, blob in images.items():
                 (base / "assets" / name).write_bytes(blob)
-        return Api(base, clock=clock)
+        return Api(base, clock=clock, judge=judge, runs_dir=runs_dir, config=config)
 
     return build
 
@@ -136,20 +137,14 @@ def get_json(api, target: str):
     return response.status, json.loads(response.body)
 
 
-def multipart_body(files, *, field: str = "file", boundary: str = "----AiNoteTestBoundary"):
-    """自造一个 multipart/form-data body（形状与浏览器 FormData 一致）。
+def post_json(api, target: str, payload):
+    """打一个 POST（body 按 JSON 编码），返回 `(status, 解析后的信封)`。"""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    response = api.handle("POST", target, body)
+    return response.status, json.loads(response.body)
 
-    `files` 是 `[(文件名, 字节)]` 或 `[(文件名, 字节, 声明的 Content-Type)]`。
-    返回 `(body, content_type)`——上传测试不许碰真照片，一律自己造字节。
-    """
-    out = bytearray()
-    for item in files:
-        name, blob = item[0], item[1]
-        declared = item[2] if len(item) > 2 else "image/png"
-        out += f"--{boundary}\r\n".encode()
-        out += f'Content-Disposition: form-data; name="{field}"; filename="{name}"\r\n'.encode()
-        if declared:
-            out += f"Content-Type: {declared}\r\n".encode()
-        out += b"\r\n" + blob + b"\r\n"
-    out += f"--{boundary}--\r\n".encode()
-    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+def post_raw(api, target: str, body: bytes):
+    """打一个 POST，body 原样送（用来测「不是 JSON」那类输入错）。"""
+    response = api.handle("POST", target, body)
+    return response.status, json.loads(response.body)
