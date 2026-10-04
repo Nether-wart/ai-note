@@ -334,3 +334,52 @@ function firstQueuePid(search) {
   const raw = new URLSearchParams(String(search || '').replace(/^\?/, '')).get('queue');
   return raw ? raw.split(',')[0] : null;
 }
+
+// --------------------------------- 不变量 4：自检不得有副作用
+
+/**
+ * 验收 4（spec #1）：**「只读检查」不许变成一个会坏的写操作**。
+ *
+ * 原型的 `--selftest` 会写派生索引（`selftest → render_list → build_index →
+ * INDEX_PATH.write_text`，`proto/server.py:973 → :637 → :172`）。后果有两层：
+ * 跑一次自检就**生成了 `data/index.json`**；而在只读环境里，它报出来的错是
+ * 「界面自检未通过」——**真因（不能写）与界面无关**，人会被引去修界面。
+ *
+ * 所以「自检有没有副作用」本身是一条**可跑的不变量**：把检查前后的目录快照比一比。
+ * 快照的形状（由跑检查的那一侧生成）：
+ *
+ *     {"files": {"<相对路径>": {"size": <字节>, "mtime_ns": <整数>}}}
+ *
+ * JS 侧只负责**比**，不负责采（采集要在真跑子进程的前后各来一次，那件事在驱动侧）。
+ */
+export function checkNoSideEffects({before, after}) {
+  const violations = [];
+  const beforeFiles = before?.files || {};
+  const afterFiles = after?.files || {};
+
+  for (const path of Object.keys(afterFiles)) {
+    if (!(path in beforeFiles)) {
+      violations.push(
+        violate('selftest_created_file', `自检创建了文件：${path}。只读检查不许写任何东西。`,
+          {path, size: afterFiles[path]?.size ?? null}),
+      );
+    }
+  }
+
+  for (const path of Object.keys(beforeFiles)) {
+    if (!(path in afterFiles)) {
+      violations.push(violate('selftest_deleted_file', `自检删掉了文件：${path}。`, {path}));
+      continue;
+    }
+    const was = beforeFiles[path] || {};
+    const now = afterFiles[path] || {};
+    if (was.size !== now.size || was.mtime_ns !== now.mtime_ns) {
+      violations.push(
+        violate('selftest_modified_file', `自检改动了文件：${path}（size ${was.size}→${now.size}）。`,
+          {path, before: was, after: now}),
+      );
+    }
+  }
+
+  return violations;
+}
