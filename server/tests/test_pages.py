@@ -170,8 +170,12 @@ def test_rebind_keeps_the_binding_of_a_block_that_stayed_put():
 
     (block,) = report["blocks"]
     assert block["card_id"] == "p-20261004-aaa111", "绑定照旧"
-    assert block["matched_from"] == "b1"
-    assert block["iou"] > 0.9
+    assert block["keep"] is True
+    # 对照事实在 matches 里、不写进块：块会长成页文件的一行，而 matched_from 下次就过期
+    (match,) = report["matches"]
+    assert (match["block_id"], match["matched_from"]) == ("n1", "b1")
+    assert match["iou"] > 0.9
+    assert "matched_from" not in block and "iou" not in block
     assert report["summary"] == {"matched": 1, "new": 0, "removed": 0, "removed_with_card": 0}
 
 
@@ -188,15 +192,15 @@ def test_rebind_geometry_boundaries():
     old = [blk("b1", old_box, card_id="p-20261004-aaa111")]
 
     same = pages.rebind(old, [blk("n1", [0, 0, 0.5, 0.5])])
-    assert same["blocks"][0]["matched_from"] == "b1"
+    assert same["matches"][0]["matched_from"] == "b1"
 
     partial = pages.rebind(old, [blk("n1", [0.3, 0, 0.4, 0.5])])
-    assert partial["blocks"][0]["matched_from"] is None, "IoU≈0.29 < 0.5：这不是同一块"
+    assert partial["matches"][0]["matched_from"] is None, "IoU≈0.29 < 0.5：这不是同一块"
     assert partial["summary"] == {"matched": 0, "new": 1, "removed": 1, "removed_with_card": 1}
 
     disjoint = pages.rebind(old, [blk("n1", [0.6, 0.6, 0.3, 0.3])])
-    assert disjoint["blocks"][0]["matched_from"] is None
-    assert disjoint["blocks"][0]["iou"] is None, "没配上就没有重合度可言"
+    assert disjoint["matches"][0]["matched_from"] is None
+    assert disjoint["matches"][0]["iou"] is None, "没配上就没有重合度可言"
 
 
 def test_rebind_never_invents_an_id_for_a_genuinely_new_block():
@@ -224,7 +228,7 @@ def test_rebind_matches_one_to_one_greedily_by_overlap():
 
     report = pages.rebind(old, new)
 
-    assert [b["matched_from"] for b in report["blocks"]] == ["b1", None]
+    assert [m["matched_from"] for m in report["matches"]] == ["b1", None]
     assert report["blocks"][1]["card_id"] is None
     assert report["summary"] == {"matched": 1, "new": 1, "removed": 0, "removed_with_card": 0}
 
@@ -247,5 +251,5 @@ def test_rebind_tolerates_a_block_without_a_usable_box():
 
     report = pages.rebind(old, [blk("n1", [0, 0, 1, 1])])
 
-    assert report["blocks"][0]["matched_from"] is None
+    assert report["matches"][0]["matched_from"] is None
     assert any(w["code"] == "block_without_box" for w in report["warnings"])

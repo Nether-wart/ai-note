@@ -379,8 +379,13 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
     - 没被任何新块配上的旧块进 `removed`；**带着卡片的必须喊**——「人动过的卡片
       不允许被一次重切抹掉」（spec #2）。
 
-    本函数**不写盘、不写题卡**，只给事实：`matched_from` 与 `iou`。界面上
-    「新增／替换／保留」怎么措辞由 #10 定（它在这些事实上做三态映射）。
+    本函数**不写盘、不写题卡**，只给事实：`matches`（与 `blocks` 同序的逐块对照，
+    给出 `matched_from` 与 `iou`）与 `removed`。界面上「新增／替换／保留」怎么措辞
+    由 #10 定（它在这些事实上做三态映射）。
+
+    对照事实**放在 `matches` 里、不放进块**：块会长成页文件的一行，而
+    `matched_from` 下一次重切就过期了——把过期事实写进存档文件，正是这个项目
+    最怕的那种「安静的谎」。
 
     ⚠ 已知弱点：匹配的判据只有**位置**。块被大幅拖动（IoU < 阈值）会被算成
     「旧的消失 + 新的出现」而不是「同一个块被移动」——所以消失的块带着卡片时会喊。
@@ -430,19 +435,20 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
         matched_new[new_index] = (old_list[old_index], score)
 
     blocks: list[dict] = []
+    matches: list[dict] = []
     for new_index, new in enumerate(new_list):
         block = {**new}
         if new_index in matched_new:
             old, score = matched_new[new_index]
             for key in PRESERVED_KEYS:
                 block[key] = old.get(key)
-            block["matched_from"] = old.get("id")
-            block["iou"] = score
+            matches.append({"block_id": block.get("id"),
+                            "matched_from": old.get("id"), "iou": score})
         else:
             for key in PRESERVED_KEYS:
                 block.setdefault(key, None)
-            block["matched_from"] = None
-            block["iou"] = None
+            matches.append({"block_id": block.get("id"),
+                            "matched_from": None, "iou": None})
         blocks.append(block)
 
     removed: list[dict] = []
@@ -465,6 +471,7 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU) -> dict:
 
     return {
         "blocks": blocks,
+        "matches": matches,
         "removed": removed,
         "summary": {
             "matched": len(matched_new),
