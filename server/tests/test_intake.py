@@ -690,3 +690,156 @@ def test_a_human_decided_block_is_not_asked_about_again(tmp_path):
 
     assert [call["block_id"] for call in fake.calls] == ["b2"]
     assert report["page"]["blocks"][0]["decision"] == human
+
+
+# ---------------------------------------------------------------- CLI 入口（一键补收的命令形态）
+
+
+def cli(*args, **kwargs):
+    """跑一次 CLI，返回 `(退出码, 解析后的信封, stderr 文本)`。"""
+    import contextlib
+    import io
+
+    from server.intake import main
+
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(list(args), **kwargs)
+    text = out.getvalue().strip()
+    return code, (json.loads(text) if text else None), err.getvalue()
+
+
+def test_the_cli_defaults_to_a_preview_that_writes_nothing(tmp_path):
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block(), plain_block()])
+    before = path.read_bytes()
+    fake = FakeSemantics({"b1": "correction"})
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            semantics=fake, at=AT)
+
+    assert code == 0
+    assert envelope["ok"] is True
+    assert envelope["data"]["preview"] is True
+    assert envelope["skipped"] == []
+    assert path.read_bytes() == before
+    assert fake.calls == []
+
+
+def test_the_cli_apply_writes_the_decisions_and_prints_the_envelope(tmp_path):
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block(), plain_block()])
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            "--apply", semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    assert code == 0 and envelope["ok"] is True
+    data = envelope["data"]
+    assert data["preview"] is False and data["asked"] == ["b1"]
+    assert data["not_kept"]["message"] == "另有 1 道没有红笔痕迹、未入库"
+    assert data["not_kept"]["one_click"]["entry"] == "server.intake.include_blocks"
+    for warning in envelope["warnings"]:
+        assert warning["level"] in ("warning", "hint"), "level 总是显式发出来（契约 §2）"
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["blocks"][0]["keep"] is True
+
+
+def test_the_cli_reports_a_model_failure_as_the_d1_envelope_and_writes_nothing(tmp_path):
+    """D1：模型失败 → 明确失败（`model_unavailable`），不留半截决策。"""
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block("b1"), red_block("b2")])
+    before = path.read_bytes()
+    fake = FakeSemantics({"b1": "cross"}, raises={"b2": "HTTP 502（redpen-semantics）：上游挂了"})
+
+    code, envelope, err = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                              "--apply", semantics=fake, at=AT)
+
+    assert code == 2
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "model_unavailable"
+    assert envelope["error"]["reason"] == "model_unavailable"
+    assert "上游挂了" in envelope["error"]["message"]
+    assert envelope["error"]["details"]["id"] == "41c86bcfc007"
+    assert "没有留下任何记录" in envelope["error"]["hint"], \
+        "与 HTTP 端点共用 errors.model_unavailable 那一份信封（两处不许各说各的）"
+    assert path.read_bytes() == before, "字节不变才是「没有留下任何记录」的证据"
+    assert "model_unavailable" in err
+
+
+def test_the_cli_one_click_include_takes_every_block_that_is_not_kept(tmp_path):
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block("b1"), plain_block("b2")])
+    cli("--data", str(catalog.root), "--page", "41c86bcfc007", "--apply",
+        semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            "--include", "--apply", at=AT)
+
+    assert code == 0
+    assert envelope["data"]["summary"]["included"] == 1
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert [b["keep"] for b in on_disk["blocks"]] == [True, True]
+    assert on_disk["blocks"][1]["decision"]["rule"] == intake.RULE_HUMAN_INCLUDE
+
+
+def test_the_cli_can_include_named_blocks(tmp_path):
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block("b1"), plain_block("b2")])
+    cli("--data", str(catalog.root), "--page", "41c86bcfc007", "--apply",
+        semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            "--include-block", "b2", "--apply", at=AT)
+
+    assert code == 0
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert [b["keep"] for b in on_disk["blocks"]] == [True, True]
+    assert envelope["data"]["summary"]["included"] == 1
+
+
+def test_the_cli_reports_a_bad_page_id_as_a_400_envelope(tmp_path):
+    catalog, _ = make_pages_dir(tmp_path, blocks=[red_block()])
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "../problems/p-x", at=AT)
+
+    assert code == 2
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["reason"] == "bad_request"
+    assert envelope["error"]["details"]["param"] == "page_id"
+
+
+def test_the_cli_refuses_a_data_dir_that_is_not_there(tmp_path):
+    code, _, err = cli("--data", str(tmp_path / "nope"), "--page", "41c86bcfc007")
+
+    assert code == 2
+    assert "数据目录不存在" in err
+
+
+def test_the_cli_builds_the_real_extractor_when_nothing_is_injected(tmp_path, monkeypatch):
+    """不注入 `semantics` 时 CLI 自己建抽取角色（`--apply` 的那条路）。
+
+    这条分支原先**没有测试**，是 `ruff check server/` 用 `F821`（`HttpSemantics`
+    未导入）抓出来的——那种写法在真跑时是 `NameError` → 裸回溯，而测试全绿
+    （因为测试都注入了假角色）。这正是「测试全绿永不覆盖没写的测试」的样本。
+
+    这条用例仍然不联网、不花钱：把真实现换成一个**被调用就报错**的替身，
+    页上又只有「没有红笔」的块（压根不会问到它），于是构造那一半被覆盖、
+    调用那一半不可能发生。
+    """
+    catalog, _ = make_pages_dir(tmp_path, blocks=[plain_block()])
+    built: dict = {}
+
+    def spy(config, runs_dir, **kwargs):
+        built["config"], built["runs_dir"] = config, str(runs_dir)
+
+        class NeverCalled:
+            def __call__(self, *args, **kwargs):
+                raise AssertionError("这一页没有红笔块，不该问模型")
+
+        return NeverCalled()
+
+    monkeypatch.setattr(intake, "HttpSemantics", spy)
+    runs = tmp_path / "runs"
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            "--apply", "--runs-dir", str(runs), at=AT)
+
+    assert code == 0 and envelope["ok"] is True
+    assert envelope["data"]["asked"] == []
+    assert built["config"].role == "extract", "抽取角色的身份走同一张角色表"
+    assert built["runs_dir"] == str(runs), "留档目录用 --runs-dir 给的那个"

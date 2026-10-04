@@ -62,10 +62,18 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from . import errors, ink, pages
+from .config import EXTRACT_ROLE, load_role_config
 from .errors import ApiError
+from .intake_client import HttpSemantics
+from .model_client import ModelUnavailable
 from .warnings import _warn
 
 # ---------------------------------------------------------------- 决策的取值（stable）
@@ -601,6 +609,38 @@ def _human_keep(page: dict, block_ids, *, keep: bool, at=None) -> dict:
 # ---------------------------------------------------------------- 驱动：读页 → 统计 → 问模型 → 写回
 
 
+def _load_page(catalog, page_id) -> dict:
+    """点名要一页：id 非法 → 400；不在 → 404；读不了 → 500。**拒绝路径只有这一处**。
+
+    页 id 会拼进路径（`<data>/pages/<id>.json`），所以校验必须发生在碰盘之前——
+    `../../problems/p-xxx` 这种 id 会让写回打到 `pages/` 外面，可能覆盖一张真题卡。
+    """
+    if not pages.is_page_id(page_id):
+        raise errors.bad_request(
+            f"页 id 非法：{page_id!r}",
+            hint="页 id 就是页文件名的主干，只允许字母、数字、点、下划线与连字符，"
+                 "必须以字母或数字开头，且不许出现 '..'（它会变成路径穿越）",
+            param="page_id",
+            value=page_id,
+        )
+    page, read_error = pages.read_page(catalog, page_id)
+    if read_error:
+        raise ApiError(
+            500, "internal_error", read_error,
+            reason="page_file_unreadable",
+            hint="页文件读不了就没法谈收入决策；先修好这个文件（或从照片重建这一页）",
+            details={"what": "page", "id": page_id},
+        )
+    if page is None:
+        raise errors.not_found(
+            f"没有这一页：{page_id}（页文件 {pages.page_path(catalog, page_id)} 不在）",
+            hint="先建页：存量卡用 `python3 -m server.backfill --apply`，"
+                 "新照片走收件目录（#13）",
+            what="page", id=page_id,
+        )
+    return page
+
+
 def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False) -> dict:
     """跑一页的收入决策：**唯一的入口**（#14 的界面与 CLI 都调它）。
 
@@ -626,30 +666,7 @@ def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False
     返回值在 `plan_decisions` 的报告之上再加 `page_id` / `page_path` / `apply` / `preview` /
     `asked`（这次问了哪些块）——「我做了什么、没做什么」都要看得见（ADR 0007 第 6 条）。
     """
-    if not pages.is_page_id(page_id):
-        raise errors.bad_request(
-            f"页 id 非法：{page_id!r}",
-            hint="页 id 就是页文件名的主干，只允许字母、数字、点、下划线与连字符，"
-                 "必须以字母或数字开头，且不许出现 '..'（它会变成路径穿越）",
-            param="page_id",
-            value=page_id,
-        )
-
-    page, read_error = pages.read_page(catalog, page_id)
-    if read_error:
-        raise ApiError(
-            500, "internal_error", read_error,
-            reason="page_file_unreadable",
-            hint="页文件读不了就没法谈收入决策；先修好这个文件（或从照片重建这一页）",
-            details={"what": "page", "id": page_id},
-        )
-    if page is None:
-        raise errors.not_found(
-            f"没有这一页：{page_id}（页文件 {pages.page_path(catalog, page_id)} 不在）",
-            hint="先建页：存量卡用 `python3 -m server.backfill --apply`，"
-                 "新照片走收件目录（#13）",
-            what="page", id=page_id,
-        )
+    page = _load_page(catalog, page_id)
 
     moment = at or datetime.now()
     image_path = catalog.pages_dir / str(page.get("image") or "")
@@ -700,3 +717,121 @@ def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False
         "asked": asked,
         "warnings": warnings + plan["warnings"],
     }
+
+
+# ---------------------------------------------------------------- CLI 入口（一键补收的命令形态）
+
+
+def _default_runs_dir() -> Path:
+    """留档目录的唯一定义在 `server/http.py`（所有角色的调用档都落在那儿）。"""
+    from .http import DEFAULT_RUNS_DIR
+    return DEFAULT_RUNS_DIR
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="收入决策（#12）：红笔痕迹的语义 → 收 / 不收 / 待定")
+    parser.add_argument("--data", default=os.environ.get("AI_NOTE_DATA"),
+                        help="数据目录（默认仓库根的 data/，也是 AI_NOTE_DATA）")
+    parser.add_argument("--page", required=True,
+                        help="页 id（页文件名主干，例如 41c86bcfc007）")
+    parser.add_argument("--apply", action="store_true",
+                        help="真的问模型并写回页文件；不传就是预演（只报告，一个字节都不写，"
+                             "也不问模型——调模型要花钱，预演不该悄悄花）")
+    parser.add_argument("--include", action="store_true",
+                        help="一键补收：把这一页没入库的块全收进来（写回要加 --apply）")
+    parser.add_argument("--include-block", action="append", default=None, metavar="块ID",
+                        help="只补收点名的块（可重复：--include-block b2 --include-block b5）")
+    parser.add_argument("--runs-dir", default=os.environ.get("AI_NOTE_RUNS"),
+                        help="模型调用留档目录（契约 §10.1；默认仓库根的 runs/，已在 .gitignore）")
+    return parser
+
+
+def main(argv: list[str] | None = None, *, semantics=None, at=None) -> int:
+    """CLI：`python3 -m server.intake --page <页 id> [--apply] [--include]`。
+
+    输出是**契约 §2 的信封**（`{ok, data, warnings, skipped}` 或 `{ok, error, …}`）——
+    与 HTTP 端点同一形状，所以 #14 把界面接到这里时不必要另学一套。
+    失败一律退出码 2 并把 `code`/`reason`/`message` 打出来（D1：绝不许裸回溯）。
+
+    `semantics` 是**测试接缝**：注入假的抽取角色，测试就不联网、不花钱。
+    """
+    # 环境先灌、parser 后建（与 `server/app.py: main` 同一个顺序讲究：默认值现算）。
+    from .app import DEFAULT_DATA, load_local_env
+
+    for env_file in load_local_env():
+        print(f"密钥文件：{env_file}", file=sys.stderr)
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.data is None:
+        args.data = str(DEFAULT_DATA)
+
+    data_dir = Path(args.data)
+    if not data_dir.is_dir():
+        print(f"数据目录不存在：{data_dir}", file=sys.stderr)
+        return 2
+
+    from .catalog import Catalog
+
+    catalog = Catalog(data_dir)
+    moment = at or datetime.now()
+    want_include = bool(args.include or args.include_block)
+    block_ids = None if args.include else args.include_block
+
+    try:
+        if want_include:
+            result = include_blocks(_load_page(catalog, args.page), block_ids, at=moment)
+            if args.apply:
+                pages.save_page(catalog, result["page"], apply=True)
+            report = result
+        else:
+            extractor = semantics
+            if args.apply and extractor is None:
+                # 抽取角色的身份走同一张角色表（EXTRACT_PROVIDER / EXTRACT_MODEL）
+                extractor = HttpSemantics(load_role_config(EXTRACT_ROLE),
+                                          args.runs_dir or _default_runs_dir())
+            report = run_intake(catalog, args.page, semantics=extractor,
+                                at=moment, apply=args.apply)
+    except ApiError as exc:
+        print(json.dumps({"ok": False, "error": exc.payload(),
+                          "warnings": exc.warnings, "skipped": []},
+                         ensure_ascii=False, indent=2))
+        print(f"[{exc.code}] {exc.message}", file=sys.stderr)
+        return 2
+    except ModelUnavailable as exc:
+        # D1：模型失败 → 502 那一个码，页文件一个字节都没动（写回只在全部块判完之后）
+        err = errors.model_unavailable(str(exc), pid=args.page)
+        print(json.dumps({"ok": False, "error": err.payload(),
+                          "warnings": err.warnings, "skipped": []},
+                         ensure_ascii=False, indent=2))
+        print(f"[model_unavailable] {err.message}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        # 坏配置（provider 不在白名单、阈值 NaN…）——**起不来**，不许静默降级
+        print(f"配置有问题：{exc}", file=sys.stderr)
+        return 2
+
+    warnings = report.get("warnings") or []
+    data = {key: value for key, value in report.items() if key != "warnings"}
+    print(json.dumps({"ok": True, "data": data, "warnings": warnings, "skipped": []},
+                     ensure_ascii=False, indent=2))
+
+    verdict = "已写入" if args.apply else "预演（页文件一个字节都没写；要写加 --apply）"
+    if want_include:
+        summary = report["summary"]
+        print(f"{verdict}：补收 {summary['included']} 块，"
+              f"{summary['already_kept']} 块本来就在库里，"
+              f"{summary['unknown']} 个块 id 在页上找不到", file=sys.stderr)
+    else:
+        counts = report["counts"]
+        print(f"{verdict}：这一页 {counts['blocks']} 块 —— 收 {counts['kept']} / "
+              f"不收 {counts['dropped']} / 待定 {counts['pending']}；"
+              f"{report['not_kept']['message']}", file=sys.stderr)
+    for warning in warnings:
+        print(f"[{warning['level']}] {warning['code']}：{warning['message']}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
