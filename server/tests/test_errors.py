@@ -74,3 +74,32 @@ def test_every_error_carries_a_machine_readable_reason(api_for):
         assert isinstance(error.get("reason"), str) and error["reason"], error
         assert error["reason"] == error.get("reason", error["code"])
     assert cases[2] and json.loads(cases[2].body)["error"]["reason"] == "bad_request"
+
+
+def test_an_empty_problem_id_is_a_client_bug_not_a_missing_route(api_for):
+    """/api/problem/ 是「你没给 id」，不是「没这条路由」（契约 §5.1）。
+
+    404 会让人去翻路由表；400 + `题卡 id 非法：''` 才能让人当场改对。
+    而且 `/`、`..`、超长、空白都已经落在 400，只漏「空」这一档看着就像漏网。
+    """
+    status, body = get_json(api_for([]), "/api/problem/")
+
+    assert status == 400
+    assert body["error"]["code"] == "bad_request"
+    assert body["error"]["reason"] == "bad_request"
+    assert "id" in body["error"]["message"]
+    assert body["error"]["details"]["value"] == ""
+
+
+def test_an_empty_image_kind_blames_the_kind_not_the_id(api_for):
+    """`/api/problem/<pid>/image/` 的错要指向 kind，不能指向 pid。
+
+    不然人会去查题卡 id（是对的），而真正的问题是图片类型没给。
+    """
+    status, body = get_json(api_for([]), "/api/problem/p-20200101-aaaaaa/image/")
+
+    assert status == 400
+    assert body["error"]["code"] == "bad_request"
+    assert body["error"]["details"]["param"] == "kind"
+    assert body["error"]["details"]["value"] == ""
+    assert "图片类型" in body["error"]["message"]

@@ -132,13 +132,15 @@ class Api:
             raise method_not_allowed("GET", ["POST", "OPTIONS"])
 
         # 图片路由要排在读一题前面：`/api/problem/<pid>/image/<kind>`
-        match = re.fullmatch(r"/api/problem/(?P<pid>.+?)/image/(?P<kind>.+)", path)
+        # `.*`（而不是 `.+`）：空 pid / 空 kind 要落到下面那两条 400 上，
+        # 而不是掉进「没有这条路由」的 404——客户端少给一段路径不是路由写错了。
+        match = re.fullmatch(r"/api/problem/(?P<pid>.*?)/image/(?P<kind>.*)", path)
         if match:
             return self._image(match.group("pid"), match.group("kind"))
 
         # pid 用 `.+` 而不是 `[^/]+`：带斜杠的非法 id 要被 **400** 抓住，
         # 而不是掉进一个含糊的路由 404（契约 §5.1）。
-        match = re.fullmatch(r"/api/problem/(?P<pid>.+)", path)
+        match = re.fullmatch(r"/api/problem/(?P<pid>.*)", path)
         if match:
             return json_response(200, data=self.catalog.problem_detail(match.group("pid")))
 
@@ -155,7 +157,7 @@ class Api:
 
     def _post(self, path: str, body: bytes | str | None) -> Response:
         """契约 §10.1：写端点一个入口。已落地的是屏幕重做那一种形态。"""
-        match = re.fullmatch(r"/api/attempt/(?P<pid>.+)", path)
+        match = re.fullmatch(r"/api/attempt/(?P<pid>.*)", path)
         if match:
             data, warnings = self.attempts.handle(match.group("pid"), body)
             return json_response(200, data=data, warnings=warnings)

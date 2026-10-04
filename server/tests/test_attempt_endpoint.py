@@ -189,6 +189,8 @@ def test_unparseable_model_output_is_unreadable_and_says_so(api_for):
     assert body["data"]["attempt"]["verdict"] == "unreadable"
     codes = [w["code"] for w in body["warnings"]]
     assert "judge_output_unparsed" in codes
+    # 级别要显式发出来（契约 §2 的 level），界面不靠猜
+    assert all(w["level"] == "warning" for w in body["warnings"])
     assert body["data"]["mastery"]["streak"] == 0
 
 
@@ -351,6 +353,17 @@ def test_a_path_traversal_id_is_a_400_not_a_404(api_for):
 
     assert status == 400
     assert body["error"]["reason"] == "bad_request"
+
+
+def test_an_empty_pid_is_a_400_not_a_404(api_for):
+    """少给一段路径不是路由写错了——与 /api/problem 那两条 400 同一口径。"""
+    _, api = attempt(api_for, plain_card())
+
+    status, body = post_json(api, "/api/attempt/", {"channel": "screen", "answer": "A"})
+
+    assert status == 400
+    assert body["error"]["code"] == "bad_request"
+    assert body["error"]["details"]["param"] == "pid"
 
 
 def test_an_unknown_problem_is_a_404(api_for):

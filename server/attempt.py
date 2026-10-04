@@ -84,6 +84,8 @@ class AttemptEndpoint:
                 "code": "judge_output_unparsed",
                 "message": f"模型输出不是一个可解析的 JSON 对象，落向看不清：{call.text[:200]}",
                 "id": pid,
+                # 与 warnings.py 一致：级别显式发出来，界面不靠猜（契约 §2）
+                "level": "warning",
             })
 
         judgment = judge.judgment_from_output(
