@@ -23,7 +23,7 @@
 | 有 | 每个响应带 `warnings[]`，以及「我跳过了什么」的 `skipped[]`（ADR 0007 第 6 条：不许静默） |
 | 有 | 屏幕重做的硬闸门读数（有擦除图 **且** 可自动判定）与「另有 N/M 道进不来」的两个显式数字（§6.1） |
 | 有 | 「这道题能不能走自动判定」的**唯一一份**实现（三拒绝理由，见 §6）——#5 直接复用，不许另写 |
-| 无 | 改已有题卡的写端点只有一种形态：`POST /api/attempt/<pid>`（#5，形状见 §10.1）。`POST /api/inbox*` 只往收件目录放**新**文件（#13），它不改任何题卡／资产／索引 |
+| 无 | 改已有题卡的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态：**屏幕重做**（#5）与**定点修正**（#6），形状见 §10.1；纸上重做（`channel:"paper"`）仍未实现。`POST /api/inbox*` 只往收件目录放**新**文件（#13），它不改任何题卡／资产／索引 |
 | 无 | **渲染页面**。ADR 0007 第 2 条把两件事分开说：后端**不负责渲染**（不做模板、不管界面状态），但它**托管静态资源**（手机上传页、图片、前端产物）——**托管文件不是渲染**。所以 v0 出 JSON 与静态图片字节，并托管那个单文件的手机上传页（§10.3）：页面里没有任何服务端注入的值，请求一律走同源相对路径 |
 | 无 | 索引落盘。v0 每次请求**现算**（索引是派生数据，ADR 0001）；写盘归写端点 |
 
@@ -296,7 +296,8 @@
 
 - `source` 的取值**只有两个机器可读的值**：`"auto"`（自动判定）与 `"human"`（人工确认），
   中文渲染另走 `source_cn`（编排裁决 D2，沿用原型的取值）。改判（#6）后 `source` 变成
-  `"human"`，原来那条判定留在 `overrode` 里——**「这条判定原本是谁给的」永远可查**。
+  `"human"`，原来那条判定留在 `overrode` 里——**「这条判定原本是谁给的」永远可查**
+  （`overrode` = `{verdict, source, confidence, provider, model}`，见 §10.1）。
 - `provider` 与 `model` 是**两个**字段（`"deepseek"` / `"deepseek-flash"`），
   不许拼成一个 `"provider/model"`（编排裁决 D2）。理由：「换判定模型必须重跑考卷」
   这句话要求模型身份可查、可比。
@@ -623,8 +624,13 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `method_not_allowed` | 405 | 端点收到它不接受的方法（只读端点收到 POST、`/api/inbox*` 收到 GET…）。`details.allowed` 列出允许的方法，**`OPTIONS` 永远在列表里**（预检） |
 | `internal_error` | 500 | 服务自己出错。`message` 带异常类名，`hint` 指向服务日志。**不允许用 500 表达「输入不对」** |
 | `payload_too_large` | **413** | 一次上传的 body 超过上限（默认 32MB，见 §10.3）。`details` 给 `{param, value, max}`。**判在读 body 之前**：上限要在声明长度上就判掉，读一个百 MB 的 body 再拒绝不是拒绝。这个响应之后连接会关闭（body 没读完，keep-alive 会串味） |
-| `not_auto_judgeable` | **422** | **v0 预留，未实现**（#5）：`reason` ∈ §6 的三个码之一，`message` 就是那句中文原话，`warnings[]` 带该卡的自检警告。**不是 400，更不是 500**（编排裁决 D1） |
-| `model_unavailable` | **502** | **v0 预留，未实现**（#5）：判定角色调用失败（网络／超时／缺密钥）。同一个信封，`reason = "model_unavailable"`。**这一次重做不留下任何记录**——「我们没能问成」不是「看不清」，记成看不清会凭空造出一条没发生过的重做，并静默重置冷却。界面可以直接重试 |
+| `not_auto_judgeable` | **422** | **#5，已实现**：`reason` ∈ §6 的三个码之一，`message` 就是那句中文原话，`warnings[]` 带该卡的自检警告。**不是 400，更不是 500**（编排裁决 D1） |
+| `model_unavailable` | **502** | **#5，已实现**：判定角色调用失败（网络／超时／缺密钥）。同一个信封，`reason = "model_unavailable"`。**这一次重做不留下任何记录**——「我们没能问成」不是「看不清」，记成看不清会凭空造出一条没发生过的重做，并静默重置冷却。界面可以直接重试 |
+| `ambiguous_attempt_at` | **409** | **#6，已实现**：定点修正的 `attempt_at` 定位到**不止一次**重做（同一秒里做了两次）。`details.candidates` 列出命中的索引。**不是 404**：那几次确实存在，只是这个参数区分不了它们；挑一个就是「猜」 |
+
+`not_found` 下的 `reason` 取值（都是 404，`code` 不变）：没有这道题（`reason == "not_found"`）、
+没有**那一次重做**（`reason == "attempt_not_found"`，#6，`details.available` 列出实际有哪些时刻）、
+没有这张图（`reason == "not_found"`）。
 
 补充硬规则（编排裁决 D1）：
 
@@ -641,19 +647,21 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 
 | 小节 | 状态 |
 |---|---|
-| §10.1 `POST /api/attempt/<pid>` | **已实现**（#5）：屏幕重做那一种形态 |
-| §10.2 `/api/page*` | 预留，未实现（#9 #10 #12 #14） |
+| §10.1 `POST /api/attempt/<pid>` | **已实现**：屏幕重做（#5）与定点修正（#6）；`channel:"paper"`（人工确认）仍是预留 |
+| §10.2 `/api/page*` | 形状已落定（#9）；四个动作未实现（#10 #12 #14） |
 | §10.3 收件目录与手机上传页 | **已实现**（#13） |
 
-### 10.1 `POST /api/attempt/<pid>` —— #5（**已实现**）、#6
+### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
 
 三种形态：
 
 ```jsonc
-{ "channel": "screen", "answer": "<作答文本>" }                 // 自动判定
-{ "channel": "paper", "verdict": "…", "at": "…", "error_causes": ["…"] }  // 人工确认（行为不变）
-{ "attempt_at": "…", "error_causes": ["…"], "verdict": "…" }     // 定点修正（#6）
+{ "channel": "screen", "answer": "<作答文本>" }                 // 自动判定（#5，已实现）
+{ "channel": "paper", "verdict": "…", "at": "…", "error_causes": ["…"] }  // 人工确认（预留）
+{ "attempt_at": "…", "error_causes": ["…"], "verdict": "…" }     // 定点修正（#6，已实现）
 ```
+
+形态由**键**分辨：带 `attempt_at` 的一律走定点修正。
 
 | 结果 | HTTP | `error` |
 |---|---|---|
@@ -661,6 +669,8 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | 三个拒绝理由 | **422** | `{code:"not_auto_judgeable", reason:"solution_type"\|"no_standard_answer"\|"unreviewed", message:"<autojudge 那句原话>", details:{id}, }` + `warnings[]` = 该卡的自检警告 |
 | 模型调用失败 | **502** | `{code:"model_unavailable", reason:"model_unavailable", message:"…", hint:"可以直接重试；这一次没有留下任何记录"}` |
 | `channel`／`verdict` 取值非法 | 400 | `{code:"bad_request", details:{param,value,allowed}}` |
+| 定点修正：`attempt_at` **不存在** | **404** | `{code:"not_found", reason:"attempt_not_found", message:"…", details:{id, attempt_at, available:[…]}}` + `warnings[]` = 该卡的自检警告。`available` 是这道题**实际有哪些**重做时刻。**绝不落到最近一次、也绝不按「最接近」匹配** |
+| 定点修正：`attempt_at` **定位到不止一次** | **409** | `{code:"ambiguous_attempt_at", reason:"ambiguous_attempt_at", details:{id, attempt_at, candidates:[索引…]}}`。同一秒里有两次重做时不许静默挑一个 |
 
 `reason` 与 `message` **必须**取自 `server/autojudge.py` 的同一份实现（§6）——
 #5 的派发简报已经写明「必须调用它、不许重写」。
@@ -678,9 +688,37 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
   "model": "deepseek-flash",
   "error_causes": ["计算失误"],
   "note": "判对且脱离冷却：连续正确 1/2",
-  "overrode": { "verdict": "wrong", "source": "auto", "confidence": 0.6 }  // 只在改判后出现
+  "overrode": { "verdict": "wrong", "source": "auto", "confidence": 0.6,
+                "provider": "deepseek", "model": "deepseek-flash" }  // 只在改判后出现
 }
 ```
+
+**定点修正（#6）只改既有那一次重做**：不新建记录、不重跑判定、不调模型
+（`run_id` 恒为 `null`），也不看这道题能不能自动判定（人给的判定不需要闸门）。
+`verdict` 与 `error_causes` 至少要给一个；两个都不给 → **400**（什么都没得改，
+不假装成功）。除这两个字段外的键一律 400：`source`／`confidence`／`provider`／`model`／
+`overrode` 是**服务**写的审计字段。
+
+改判（给了 `verdict` 且与现值不同）时：
+
+- `source` → `human`，`confidence`／`provider`／`model` → `null`（契约把它们定义为
+  「谁判的」，改判后判的是人）；
+- `overrode` 记下**最初**那次原判定 `{verdict, source, confidence, provider, model}`
+  ——前三个键是 §10.1 的原形状，后两个是超集，否则「原本是哪台机器误判的」永久丢失
+  （spec #1 US 28）。**只改错因不算改判**：不写 `overrode`，来源与置信度一概不动。
+- 同一 payload 重复提交**幂等**：不追加记录、不改状态、`overrode` 不覆盖（验收 3）。
+
+**掌握只能重算**（`server/mastery.recompute_mastery`）：改的是历史里某一次（甚至不是
+最后一次）时，把卡里 `attempts` 从头按既定规则**重放**一遍。状态机对
+「`created_at` + 一串 (at, verdict)」是确定的纯函数，所以重放得到的读数**就是**
+「这条判定从一开始就是这样」时该有的读数；就地打补丁会让后面几次的 `credited`
+仍按旧判定算。重放用的是**同一个冷却门**（先算门、后写 `last_attempt_at`，见下），
+不允许定点修正另写一套。
+
+于是定点修正返回的 `mastery` **分两层**（改的是最后一次时两者重合）：
+
+- `state`／`streak`／`last_attempt_at` = **重放后卡级的终态**（与 `GET /api/index` 一致）；
+- `cooling`／`credited`／`gap_days`／`note` = **被改那一次**在重放里的读数。
 
 **`mastery` 是这次重做之后的读数**（形状与 `Problem.mastery` 一致，另加两个解释用的字段）：
 
@@ -889,9 +927,9 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `5cdaf75` | 初版（= commit `765cd31`） | 工单 #3：契约优先，先把形状钉住 |
 | 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表。另：§6.1 增第 5 条——M 的那句话由服务给、界面照原话显示（真实渲染验证时发现界面自己又拼了一遍，出现重复行），N 必须逐个理由列数 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
 | 本版 | 空 id（`GET /api/problem/`）与空 kind（`…/image/`）明确成 **400**（不是 404、且错要指向 `kind` 而不是 `pid`）；`Warning.level` 明确「总是显式发出来」；§6 术语滑词「同一个答案」改回「同一个**判定**」 | 独立验证查出的口径差：只差这「空」一档看着像漏网；`level` 有默认值却不出现在响应里，下游只能靠猜 |
+| 本版 | #6 定点修正（§10.1 的第三种形态）：写明「只改既有那一次、不新建不重跑判定、不调模型（`run_id=null`）、不看能否自动判定」；`verdict`/`error_causes` 至少给一个否则 400；定位不到 → **404** `reason=attempt_not_found` + `details.available`，定位到不止一次 → **409** `ambiguous_attempt_at`；改判后 `source=human`、`confidence`/`provider`/`model` 置 null、`overrode` 记最初原判定（后两个键是超集）；掌握由 `recompute_mastery` **重放重算**，返回的 `mastery` 分两层（卡级终态 + 被改那一次的读数）；重复提交幂等。§9 码表补 409 与 `attempt_not_found`，并把 #5 两行从「预留、未实现」改成「已实现」；§0 的「无任何写端点」改成「除两种已实现形态外」 | 定点修正改的是历史里**某一次**，可能不是最后一次：就地打补丁会让后面几次的 `credited` 仍按旧判定算，所以只能重放重算（原型 `apply_attempt` 只追加，这条是新决定，先在 issue #6 评论里写明再定）。`overrode` 补 `provider`/`model`：契约原形状只有三键，「原本是哪台机器误判的」会永久丢失（spec #1 US 28）。409 与 `attempt_not_found` 都是「不许猜」：`attempt_at` 定位不到唯一一次时必须明确失败 |
 | B5（#13） | §0 把「无任何写端点」改成「无任何**改已有数据**的写端点」并写明上传页已托管；§1 `--inbox` 默认跟着 `--data` 走、补 `public_base_not_reachable`；§3 `data.server` 加 `upload_url`／`reachable_from_other_devices`／`inbox`／`read_only_note`；§8 加收件目录四个警告码与 `inbox_part_empty` 跳过码；§9 加 **413** `payload_too_large`；§10.3 从「预留」改成**已实现**并钉死 `POST /api/inbox`／`POST /api/inbox/scan` 的形状（文件名取内容哈希、`blocks: null` ≠ `[]`、`watch.implemented: false`） | 工单 #13 落地。形状先在 issue #13 评论里记账再改这份文档（BRIEF 硬规则 3） |
 | 本版（B1 / #9） | §10.2 从「预留」落成**具体形状**：加 §10.2.1 页文件字段（含 `bbox_norm` 是 xywh、`bbox_px` 是 xyxy 的对照表）与 §10.2.2 模块/命令表（`server/pages.py`、`allocate_card_id`/`assign_card_ids`、`rebind`、`python3 -m server.backfill`）；§8 加 `page_binding_lost`（`level: "warning"`），并把 `page_binding_missing` 标成 B1 落地；§12 模块角色加 `server/pages.py`；§12.1 补页的纯逻辑测试接缝 | 工单 #9 验收 1/2/3。**先写进 issue #9 的评论再动手**（BRIEF 硬规则 3）。要点：两套坐标基准（整页 vs 裁剪图）不许混用；「一页多块 id 互不相同」与「重切保留绑定」是同一份逻辑；旧卡缺绑定是**提示**、页↔卡对不上账才是**警告** |
-| 本版（B3 / #11） | §12 模块角色加 `server/ink.py`；§10.2.1 预留的 `ink` 键点明由 `ink.page_block_reports` 产出 | 工单 #11 验收 2「体检与筛选读的是同一个常量」。规格原文说「那**一个**阈值」，但源码里是**两颗**回答不同问题的常量（像素级 `sat >= 60` 见 `proto/slice.py:849`/`:921`，框级 `in_color > 20` 见 `:888`）——收成一颗是错的。真正的重复是 `60` 在体检与擦除里各写了一遍。**先写进 issue #11 的评论再动手**（BRIEF 硬规则 3）。本版**不改任何响应形状**：`ink` 是数据文件里的键，不是端点字段 |
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
@@ -899,12 +937,12 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 模块 | 角色 |
 |---|---|
 | `server/autojudge.py` | **「能不能自动判定」的唯一实现**：三个拒绝理由与它们的优先级。`#5` 的写端点**必须调用它**，不许重写；界面只显示 `reason_text`，不许自己再判一遍（编排裁决 D3） |
-| `server/mastery.py` | **掌握与冷却的只读读数**：冷却基准（从未重做过的以录入时间起算）与「比较前先归一化到 UTC」。写状态机（`apply_attempt`）归 `#5`，也在这一处实现，免得两套规则 |
+| `server/mastery.py` | **掌握与冷却的读数 + 状态机的唯一一份实现**：冷却基准（从未重做过的以录入时间起算）、比较前先归一化到 UTC、冷却门取在写 `last_attempt_at` **之前**。规则本体只有一处（`step`）：`apply_attempt`（#5，追加一次重做）与 `recompute_mastery`（#6，定点修正后重放整段历史）都从它走——两套规则分开写迟早各判各的 |
+| `server/amend.py` | **定点修正的唯一实现**（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，掌握交给 `mastery.recompute_mastery`，审计字段（`source`/`confidence`/`provider`/`model`/`overrode`）只有它能写 |
 | `server/publicbase.py` | **对外可达地址的唯一实现**（ADR 0007 第 5 条）：`resolve_public_base`（显式优先，否则按绑定之后的 `host:port` 推导）与 `public_base_warning`（推出来的地址别的设备打不开就喊）。`Catalog.public_url` 用它拼上传页链接与将来的页锚点 |
 | `server/inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、`POST /api/inbox/scan` 的手动扫描、`multipart/form-data` 解析。**切分（#10）的接缝**在这里：可注入 `segmenter`，不注入就报 `segmentation_not_implemented`、`blocks` 给 `null`——不许编块列表 |
 | `server/static/upload.html` | 手机上传页：**一个文件**，无构建步骤、不引任何外部资源。改它不用碰 Python |
 | `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
-| `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出 |
 
 ## 12.1 测试接缝
 

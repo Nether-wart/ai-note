@@ -19,6 +19,13 @@ curl -s http://127.0.0.1:8765/api/index | python3 -m json.tool | head -40
 curl -s -X POST http://127.0.0.1:8765/api/attempt/p-20261004-41c86b \
      -H 'Content-Type: application/json' \
      -d '{"channel":"screen","answer":"A"}' | python3 -m json.tool
+
+# 定点修正（#6）：只改**既有那一次**重做的错因／判定。不新建记录、不重跑判定、不调模型。
+# attempt_at 就是那一次记录的尝试时刻；找不到就 404，绝不落到最近一次。
+curl -s -X POST http://127.0.0.1:8765/api/attempt/p-20261004-41c86b \
+     -H 'Content-Type: application/json' \
+     -d '{"attempt_at":"2026-10-04T09:39:57+00:00","verdict":"wrong","error_causes":["计算失误"]}' \
+     | python3 -m json.tool
 ```
 
 **手机上录入**（局域网，ADR 0007 第 4 条）：绑通配地址，并把**手机能打开的地址**显式给它——
@@ -77,12 +84,12 @@ python3 -m pytest server/tests -q
 |---|---|
 | `autojudge.py` | **「能不能自动判定」的唯一实现**（三个拒绝理由 + 优先级）。`#5` 的写端点**调用**它，不重写 |
 | `judge.py` | **映射的唯一实现**：模型输出（等价 / 置信度 / 残缺）→ 三值判定。纯逻辑，脱网可测 |
-| `mastery.py` | 掌握与冷却的**读数 + 状态机**（`apply_attempt`）。冷却基准（从未重做过的以录入时间起算）、比较前归一化到 UTC、冷却必须在更新 `last_attempt_at` **之前**算 |
+| `mastery.py` | 掌握与冷却的**读数 + 状态机**。规则本体一处（`step`）：`apply_attempt`（#5，追加）与 `recompute_mastery`（#6，定点修正后重放整段历史）都从它走。冷却基准（从未重做过的以录入时间起算）、比较前归一化到 UTC、冷却门必须在更新 `last_attempt_at` **之前**算 |
+| `amend.py` | 定点修正（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，掌握交给 `recompute_mastery`，审计字段只有它能写 |
 | `config.py` | 装载处配置：provider 白名单、阈值校验一次（坏配置起不来）、`.env.local` 读取 |
 | `judge_client.py` | 判定角色的调用接缝：纯文本提示词（不发图）、HTTP transport 可注入、留档 `runs/`、失败抛 `ModelUnavailable` |
 | `attempt.py` | 写端点：客户端不碰判定、调用 autojudge/judge/mastery、原子回写题卡、索引重建 |
 | `assets.py` | 题卡里的图片路径 → 磁盘文件 → 服务 URL。**一处实现**，顺带挡住路径穿越 |
-| `ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（#11）：`COLORED_SATURATION_MIN`（像素级：一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级：一个框里几个像素才算有红笔）是**两颗**回答不同问题的常量，筛选/体检/擦除三条路径都读它们；深色掩膜的两颗也在这里。只回答「有没有红笔、多少」，**不做语义判断**（勾还是订正归 #12 的模型）。PNG 读写也在这里，用**标准库**（`zlib`），不引入 PIL/numpy |
 | `warnings.py` | 会喊的检查（ADR 0007 第 6 条）：逐卡自检 + 索引级检查（串题、id 不一致） |
 | `records.py` | **Problem 记录的唯一构造函数**：列表与详情由它产出，详情是它的超集 |
 | `catalog.py` | 一个数据目录的访问：索引、一题、数据目录形状、对外地址拼法（`public_url`） |
@@ -101,13 +108,16 @@ python3 -m pytest server/tests -q
   `in_default_list`（开关没勾）与 `including_cooling`（勾了「显示冷却中的题」）都算好了，
   界面按开关取，不许重算。`stats.*` 的分母是**全部题卡**，与它们不是一回事。
 - **客户端不碰判定**：`POST /api/attempt/<pid>` 的屏幕重做形态只收 `{channel, answer}`；
-  带了 `verdict`／`source`／`confidence`／`provider`／`model` 一律 400。
+  带了 `verdict`／`source`／`confidence`／`provider`／`model` 一律 400。定点修正形态
+  （`{attempt_at, error_causes?, verdict?}`）**允许**人给 `verdict` 与 `error_causes`——
+  那是 spec #1 US 16 的当场改判——但 `source`／`confidence`／`provider`／`model`／`overrode`
+  仍然只有服务能写（改判后 `source` 变 `human`，原判定留在 `overrode` 里）。
 
 ## 不做
 
-- **改已有数据的写端点只有屏幕重做那一种形态**（`POST /api/attempt/<pid>`，归 #5）。
-  `GET`/`POST` 到没落地的预留命名空间会返回一句明说「预留、还没实现」的 404。
-  #13 的 `POST /api/inbox` 只往收件目录放**新**文件。
+- **改已有数据的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态**：
+  屏幕重做（#5）与定点修正（#6）。`GET`/`POST` 到没落地的预留命名空间会返回一句
+  明说「预留、还没实现」的 404。#13 的 `POST /api/inbox` 只往收件目录放**新**文件。
 - **不改 `proto/`**、**不落索引盘**（每次请求现算）。
 - **不渲染页面**：`GET /upload` 是后端**托管**的一个静态文件，页面里没有一处服务端注入的值
   （ADR 0007 第 2 条：托管文件不是渲染）。
@@ -117,5 +127,6 @@ python3 -m pytest server/tests -q
   `POST /api/inbox` 的响应里 `pipeline.segmentation.available` 是 `false`、
   `pages[].blocks` 是 `null`（**不是 `[]`**）、`committed` 是 `false`——
   没有块列表、没有红笔统计、没有「已入库」。`inbox.py` 里的 `segmenter` 就是 #10 接上来的口子。
-- **纸上重做与定点修正的形态**（`channel:"paper"` 与 `attempt_at`）归 #6；
-  `POST` 到 `/api/page*` 仍是「预留、还没实现」的 404。
+- **纸上重做的形态**（`channel:"paper"`）还没实现，仍是 400；`POST` 到 `/api/page*`
+  仍是「预留、还没实现」的 404（页文件的形状已由 #9 定下，四个动作归 #10/#12/#14）。
+  定点修正（`attempt_at`）已随 #6 落地。
