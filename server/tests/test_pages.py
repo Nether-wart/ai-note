@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
 
 from conftest import make_card
 from server import pages
@@ -334,3 +338,45 @@ def test_ids_allocated_on_one_page_do_not_collide_with_other_pages():
 
     ids = [x["card_id"] for x in a["page"]["blocks"] + b["page"]["blocks"]]
     assert len(set(ids)) == len(ids) == 6
+
+
+# ------------------------------------------- 实测：真的存量数据（只读，绝不写）
+
+# 真数据是被 gitignore 的私人数据，不在 worktree 里（BRIEF「实测数据事实」）。
+# 这里**只读**它：把真卡读进来，回填结果写到临时目录，并断言真数据目录没有被碰。
+REAL_DATA = Path(os.environ.get("AI_NOTE_REAL_DATA", "/home/river/Projects/ai-note/data"))
+KNOWN_PAGE_IDS = {"41c86bcfc007", "ef7c47156392"}
+
+
+@pytest.mark.skipif(not (REAL_DATA / "problems").is_dir(),
+                    reason="真数据不在本机（私人数据，被 gitignore）")
+def test_backfilling_the_real_legacy_cards_writes_pages_next_to_their_photos(api_for):
+    """实测验收 1：存量那两张卡（一页一题）反推成页文件，落在照片旁边。"""
+    cards = [json.loads(p.read_text(encoding="utf-8"))
+             for p in sorted((REAL_DATA / "problems").glob("*.json"))]
+    assert cards, "真数据目录里连一张卡都没有，这条测试就没有意义了"
+
+    # 页文件名的主干必须真的就是盘上那张照片的名字（命名推法不是纸上谈兵）
+    for card in cards:
+        stem = pages.page_hash_from_image(card["source"]["page_image"])
+        assert stem and (REAL_DATA / "pages" / f"{stem}.png").is_file()
+
+    before = sorted(p.name for p in (REAL_DATA / "pages").glob("*.json"))
+    api = api_for(cards)   # 卡片写进 pytest 的临时目录，真目录一个字节都不碰
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    assert {p["id"] for p in report["pages"]} >= KNOWN_PAGE_IDS
+    for card in cards:
+        stem = pages.page_hash_from_image(card["source"]["page_image"])
+        page = json.loads((api.catalog.pages_dir / f"{stem}.json").read_text(encoding="utf-8"))
+        assert page["id"] == stem
+        assert page["image"] == f"{stem}.png"
+        assert page["origin"]["original_file"] == card["source"]["original_file"]
+        # 单块 = 那张卡的边界：归一化坐标是规范基准，像素框照抄盘上的原值
+        (block,) = page["blocks"]
+        assert block["bbox_norm"] == card["source"]["bbox_norm"]
+        assert block["bbox_px"] == card["source"]["bbox_px"]
+        assert block["card_id"] == card["id"]
+
+    assert sorted(p.name for p in (REAL_DATA / "pages").glob("*.json")) == before, \
+        "回填只读真数据目录，绝不往里写任何东西"
