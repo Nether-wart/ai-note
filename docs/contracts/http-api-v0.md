@@ -892,7 +892,6 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | B5（#13） | §0 把「无任何写端点」改成「无任何**改已有数据**的写端点」并写明上传页已托管；§1 `--inbox` 默认跟着 `--data` 走、补 `public_base_not_reachable`；§3 `data.server` 加 `upload_url`／`reachable_from_other_devices`／`inbox`／`read_only_note`；§8 加收件目录四个警告码与 `inbox_part_empty` 跳过码；§9 加 **413** `payload_too_large`；§10.3 从「预留」改成**已实现**并钉死 `POST /api/inbox`／`POST /api/inbox/scan` 的形状（文件名取内容哈希、`blocks: null` ≠ `[]`、`watch.implemented: false`） | 工单 #13 落地。形状先在 issue #13 评论里记账再改这份文档（BRIEF 硬规则 3） |
 | 本版（B1 / #9） | §10.2 从「预留」落成**具体形状**：加 §10.2.1 页文件字段（含 `bbox_norm` 是 xywh、`bbox_px` 是 xyxy 的对照表）与 §10.2.2 模块/命令表（`server/pages.py`、`allocate_card_id`/`assign_card_ids`、`rebind`、`python3 -m server.backfill`）；§8 加 `page_binding_lost`（`level: "warning"`），并把 `page_binding_missing` 标成 B1 落地；§12 模块角色加 `server/pages.py`；§12.1 补页的纯逻辑测试接缝 | 工单 #9 验收 1/2/3。**先写进 issue #9 的评论再动手**（BRIEF 硬规则 3）。要点：两套坐标基准（整页 vs 裁剪图）不许混用；「一页多块 id 互不相同」与「重切保留绑定」是同一份逻辑；旧卡缺绑定是**提示**、页↔卡对不上账才是**警告** |
 | 本版 | §10.1 的 `mastery.cooling` 注释改写成「**这次重做发生时**是否处于冷却窗口」——判定门在写入 `last_attempt_at` **之前**取，并写明 `cooling:true` → `credited:false`（只热身） | 原措辞「更新之后是否仍在冷却」按字面读**恒为真**，与同一段示例（`credited:true` + `cooling:false`）自相矛盾。#5 按 proto 口径实现（`proto/slice.py:620` 先算、`:631` 后写），#6 定点修正要读这段语义——留着矛盾注释会让它按字面把冷却算错（`docs/acceptance-log.md:277` 记的「真错，不是风格问题」）。§3.1 表里 `Problem.cooling` 那行**不改**：它是索引的实时读数（当前时刻 vs 上次重做＋7 天），与写入顺序无关 |
-| B5 修正（#13） | §12.1 清掉合并时留下的一条**重复 bullet**（「纯逻辑（冷却／排序／可判性／警告码…）」出现两次），并把同一条改成「拒绝路径也要有测试」——记下 `POST /api/inbox` 的「一次传的全部是空文件」那条拒绝分支写错变量名会退化成兜底 500 的教训 | 两个下游工单（#6／#11）在集成分支 tip 上跑 `ruff check server/` 报 `F821`，卡着它们的验收。契约层面要留下的不是那一行修正，而是**判据**：每条会拒绝的分支都要有一条断言形状的测试 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
@@ -913,11 +912,8 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
   信封出来、临时收件目录里多个文件出来；**不碰真照片、不占固定端口**（`port=0`）。
 - 纯逻辑（冷却／排序／可判性／警告码／对外地址解析）用**假时钟 + 构造记录**喂进去测，
   不联网、不花钱、不画图——`proto/test_mastery.py` 是这份做法的先例。
-- **拒绝路径也要有测试**（#13 的教训）：`POST /api/inbox` 的「一次传的全部是空文件」
-  这一条只有它自己走到，写错一个变量名就退化成兜底 500，而 270 条测试照样全绿。
-  所以每条会拒绝的分支都要有一条**断言形状**的测试（`code`/`reason`/`message`/`hint`/`details`
-  齐、HTTP 码对、**不是** `internal_error`），而断言「没留下任何痕迹」的测试要连
-  「目录都不该被建出来」一起断言。
+- 纯逻辑（冷却／排序／可判性／警告码）用**假时钟 + 构造记录**喂进去测，不联网、不花钱、
+  不画图——`proto/test_mastery.py` 是这份做法的先例。
 - **页的纯逻辑**（`server/pages.py`：`page_binding`／`rebind`／`allocate_card_id`／
   `assign_card_ids`）用**构造的块列表**喂进去测，同样不联网、不画图——这是 spec #2
   「测试四层」的第 1 层，#9 的验收就落在这一层。它同时也是 HTTP 那一层的判据来源

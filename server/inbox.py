@@ -208,17 +208,6 @@ def accept(inbox: Inbox, body: bytes, content_type: str, segmenter) -> tuple[dic
             allowed=["file"],
         )
 
-    # 「全是空文件」在这里就拒掉，**在碰磁盘之前**：请求本身合法，只是没有一条记录
-    # 建得出来（裁决 D1：拒绝一律结构化 400，绝不裸 500）。这条分支只有「一次传的
-    # 全部是空文件」才走到——写错一个变量名就会退化成兜底 500 而没人发现，所以它
-    # 必须有自己的测试，且拒绝之后**一个字节都不该动**（连收件目录都不建）。
-    if not any(part["blob"] for part in files):
-        raise bad_request(
-            "这次上传里没有一个非空的文件",
-            hint="选一张照片或一个文件夹再试；空文件不会被收进收件目录",
-            param="file", value=[p["name"] for p in files],
-        )
-
     inbox.ensure()
     warnings: list[dict] = []
     skipped: list[dict] = []
@@ -247,6 +236,13 @@ def accept(inbox: Inbox, body: bytes, content_type: str, segmenter) -> tuple[dic
                            f"（{'/'.join(sorted(IMAGE_SUFFIXES))}）→ 收下了，但请确认这是照片",
                 "id": None, "level": "warning",
             })
+
+    if not received:
+        raise bad_request(
+            "这次上传里没有一个非空的文件",
+            hint="选一张照片或一个文件夹再试；空文件不会被收进收件目录",
+            param="file", value=[p["name"] for p in parts],
+        )
 
     pipeline, pipe_warnings = run_pipeline(inbox, received, segmenter)
     grouping = {

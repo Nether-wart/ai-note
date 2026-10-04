@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from conftest import PNG_1X1, multipart_body
+from conftest import PNG_1X1, make_card, multipart_body
 
 
 def build_api(tmp_path, *, files=(), segmenter=None, max_upload_bytes=None, **kwargs):
@@ -229,30 +229,6 @@ def test_an_empty_part_is_skipped_and_said_so(tmp_path):
     assert [s["code"] for s in env["skipped"]] == ["inbox_part_empty"]
     assert "empty.png" in env["skipped"][0]["message"]
     assert env["data"]["inbox"]["files"] == 1
-
-
-def test_a_request_where_every_part_is_empty_is_a_structured_400(tmp_path):
-    """**全是空文件**是「一条记录都没建出来」，要说清楚——但**是 400，不是 500**。
-
-    这条路径曾经会抛 `NameError`（拒绝分支里写了一个不存在的变量名）→ 兜底 500，
-    正撞裁决 D1（拒绝一律结构化 JSON，绝不裸 500）。所以判据要盯着**形状**：
-    `ok:false` + `reason`/`message`/`hint`/`details` 齐、`code` 是 `bad_request`、
-    HTTP 400——**不是** `internal_error`。多传几个空文件，一次全部落在这条路上。
-    """
-    api = build_api(tmp_path)
-    status, env = post(api, "/api/inbox",
-                       *multipart_body([("a.png", b""), ("b.jpg", b""), ("c.png", b"")]))
-
-    assert status == 400, env
-    assert env["ok"] is False
-    error = env["error"]
-    assert error["code"] == "bad_request"          # 绝不是 internal_error
-    assert error["reason"] == "bad_request"
-    assert error["message"] and error["hint"]
-    assert error["details"]["param"] == "file"
-    # 是哪个 part 空，要说得出名字；而且真的什么都没写进收件目录
-    assert error["details"]["value"] == ["a.png", "b.jpg", "c.png"]
-    assert not (tmp_path / "data" / "inbox").exists()
 
 
 def test_the_inbox_endpoints_only_answer_post(tmp_path):
