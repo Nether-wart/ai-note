@@ -28,6 +28,7 @@ CHANNEL_SCREEN = "screen"  # 屏幕重做
 CHANNEL_PAPER = "paper"    # 纸上重做
 CHANNELS = (CHANNEL_SCREEN, CHANNEL_PAPER)
 SOURCE_AUTO = "auto"
+SOURCE_HUMAN = "human"
 CHANNEL_CN = {"paper": "纸上重做", "screen": "屏幕重做"}
 # 「这条判定是谁给的」。**机器可以读的取值只有这两个**（编排裁决 D2：沿用 proto 的
 # auto/human）；中文渲染另给一份，界面照它显示，不要把中文写回 source 字段。
@@ -148,13 +149,6 @@ def apply_attempt(card: dict, verdict: str, *, confidence=None, source: str = SO
         raise ValueError(f"重做时刻解析不了：{at!r}（要 ISO 8601 或 datetime）")
     moment = moment.astimezone(timezone.utc)
 
-    # ⚠ 冷却的基准取的是**写之前**的状态。这两行必须排在
-    # `m["last_attempt_at"] = …` 前面（见 docstring）。
-    prev_base = last_attempt_at(card) or parse_dt(card.get("created_at"))
-    cooling = bool(prev_base and moment < prev_base + timedelta(days=COOLDOWN_DAYS))
-    # 同一天里「录入在下午、标记在当天」会让差值为负——读数该是 0 天，不是 -1 天
-    gap_days = max(0, int((moment - prev_base).total_seconds() // 86400)) if prev_base else None
-
     causes = [error_causes] if isinstance(error_causes, str) else list(error_causes or [])
     attempt = {
         "at": moment.isoformat(timespec="seconds"),   # 定点修正靠它定位，不靠「最近一次」
@@ -170,12 +164,41 @@ def apply_attempt(card: dict, verdict: str, *, confidence=None, source: str = SO
     if judge_note:
         attempt["judge_note"] = judge_note
     card.setdefault("attempts", []).append(attempt)
+    return step(card, m, attempt)
+
+
+def step(card: dict, m: dict, attempt: dict) -> dict:
+    """把**一次**重做按既定规则作用到掌握状态 `m` 上，返回这一次的读数。
+
+    状态机的规则**只有这一处实现**：`apply_attempt`（追加一次新重做）与
+    `recompute_mastery`（重放整段历史）都从它走。定点修正（#6）因此复用的是
+    同一个冷却门，不可能和写路径各判各的。
+
+    ⚠ 冷却的基准取的是**写之前**的状态：`m["last_attempt_at"]` 必须排在
+    `cooling` 算完之后才更新（否则这一刻永远落在冷却里，见模块 docstring）。
+    """
+    moment = parse_dt(attempt.get("at"))
+    if moment is None:
+        raise ValueError(f"重做时刻解析不了：{attempt.get('at')!r}（要 ISO 8601）")
+    moment = moment.astimezone(timezone.utc)
+    verdict = attempt.get("verdict")
+    if verdict not in VERDICTS:
+        raise ValueError(f"重做记录里的判定取值非法：{verdict!r}")
+
+    # ⚠ 这两行必须排在 `m["last_attempt_at"] = …` 前面（见 docstring）。
+    prev_base = parse_dt(m.get("last_attempt_at")) or parse_dt(card.get("created_at"))
+    cooling = bool(prev_base and moment < prev_base + timedelta(days=COOLDOWN_DAYS))
+    # 同一天里「录入在下午、标记在当天」会让差值为负——读数该是 0 天，不是 -1 天
+    gap_days = max(0, int((moment - prev_base).total_seconds() // 86400)) if prev_base else None
+
+    # 时刻一律归一化到 UTC 再落库：定点修正靠它定位，写法必须唯一
+    attempt["at"] = moment.isoformat(timespec="seconds")
     m["last_attempt_at"] = attempt["at"]
 
     base = {
         "verdict": verdict, "credited": False, "streak": int(m.get("streak") or 0),
         "state": m.get("state") or "in_pool", "cooling": cooling, "gap_days": gap_days,
-        "confidence": confidence, "source": source, "note": None,
+        "confidence": attempt.get("confidence"), "source": attempt.get("source"), "note": None,
     }
 
     if verdict == "wrong":
@@ -205,3 +228,19 @@ def apply_attempt(card: dict, verdict: str, *, confidence=None, source: str = SO
     # 一次重做只有一句给界面看的原话（契约 §10.1：attempt.note 与 mastery.note 是同一句）
     attempt["note"] = base["note"]
     return base
+
+
+def recompute_mastery(card: dict) -> list[dict]:
+    """把卡里的 `attempts` **从头重放一遍**重算掌握，返回每一步的读数。
+
+    定点修正（#6）改的是历史里**某一次**，甚至可能不是最后一次，于是掌握与冷却
+    只能重算：状态机对「`created_at` + 一串 (at, verdict)」是一个确定的纯函数
+    （冷却基准是上一次重做／录入时间），所以重放得到的读数**就是**「这条判定
+    从一开始就是这样」时该有的读数。就地打补丁在「改的不是最后一次」时会得出
+    自相矛盾的读数——后面几次的 `credited` 还是按旧判定算的。
+
+    重放会覆盖 `mastery` 与各次记录的 `note`：两者都是派生数据（ADR 0001）。
+    """
+    card["mastery"] = {"state": "in_pool", "streak": 0, "last_attempt_at": None}
+    m = card["mastery"]
+    return [step(card, m, attempt) for attempt in (card.get("attempts") or [])]
