@@ -476,6 +476,10 @@
    因为两句话都真的成立。`blocked_total` 是**去重**的卡数，所以允许 `N + M > blocked_total`。
 4. **真源是每张卡的 `screen_redo.blockers`**；`by_reason` 与 M 只是从同一批记录一趟算出来的
    便利读数。有任何一个数字对不上，以 `problems` 为准。
+5. **M 的那句话由服务给**（`no_clean_image.message`），界面**照原话显示，不再自己拼一遍**
+   ——拼了就会出现两句措辞几乎一样的话（里程碑二第一次跑真实渲染时就撞上了这个重复）。
+   N 没有现成句子，因为它的构成（三个理由的分布）只有界面知道该怎么排版：
+   界面拼 N 时**必须逐个列出理由码与道数**（裁决 D3），不许只说「另有 N 道」。
 
 ## 7. `GET /api/problem/<pid>/image/<kind>` —— 读图片
 
@@ -727,7 +731,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | 版本 | 改了什么 | 为什么 |
 |---|---|---|
 | `5cdaf75` | 初版（= commit `765cd31`） | 工单 #3：契约优先，先把形状钉住 |
-| 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
+| 本版 | H1 补 `clean.boxes_norm`/`clean.manual` 的定义与裁剪图坐标标注、偏离表记下图片字段改名；H2 写明 `data/index.json` 是 proto 遗留物、形状基准是契约；H3 写明 `attempts_detail` = 卡里 `attempts` 原样（含 `provider`/`model`）；H4 定义 `mastery.credited`/`note`/`gap_days`、钉死 `channel` 枚举、补 `run_id` 与留档；M5 改正「服务不出 HTML」为「不渲染但托管静态资源」并给 `--public-base`/`--inbox` 补暴露面；M6 补 mask 的来源文件名；M7 `screen_redo` 改成两套 `bases`；M8 写死队列的快照语义；M9 加 `page_binding_missing`（`hint` 级）；M10/M11 拆开 `warnings` 与 `skipped` 两张码表、`level` 字段化、id 非法的说明改到 `hint`；M12/M13 修错引用并给 `stats` 标明分母；M14 加基线与本表。另：§6.1 增第 5 条——M 的那句话由服务给、界面照原话显示（真实渲染验证时发现界面自己又拼了一遍，出现重复行），N 必须逐个理由列数 | 契约缺口评审（4 高 + 7 中）：这些缺口会让 #5/#7/#9/#13 各自发明一套 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 

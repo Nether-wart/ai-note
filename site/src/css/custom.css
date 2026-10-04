@@ -1,0 +1,88 @@
+/* 只加这一页真正需要的东西：一张卡一张卡地看，不比 Docusaurus 默认主题更花哨。 */
+:root {
+  --ifm-color-primary: #b3261e;
+  --ai-note-border: var(--ifm-color-emphasis-300);
+}
+
+.ai-note-summary {
+  margin: 1rem 0 1.5rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--ai-note-border);
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.ai-note-banner {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 4px solid var(--ifm-color-warning-dark);
+  background: var(--ifm-color-warning-contrast-background);
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.ai-note-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  gap: 1rem;
+}
+
+.ai-note-card {
+  border: 1px solid var(--ai-note-border);
+  border-radius: 10px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ai-note-card h2 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.ai-note-card img {
+  max-width: 100%;
+  border: 1px solid var(--ai-note-border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ai-note-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.ai-note-badge {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--ai-note-border);
+}
+
+.ai-note-badge--screen {
+  border-color: var(--ifm-color-success-dark);
+  color: var(--ifm-color-success-dark);
+}
+
+.ai-note-badge--paper {
+  border-color: var(--ifm-color-warning-dark);
+  color: var(--ifm-color-warning-dark);
+}
+
+.ai-note-meta {
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.ai-note-warn {
+  font-size: 0.85rem;
+  border-left: 3px solid var(--ifm-color-danger);
+  padding-left: 0.6rem;
+  margin: 0;
+}
+
+.ai-note-card_placeholder {
+  color: var(--ifm-color-emphasis-600);
+}

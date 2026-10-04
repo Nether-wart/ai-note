@@ -1,0 +1,47 @@
+// 界面壳：Docusaurus 站点（ADR 0006）。
+//
+// 两条架构约束写在配置里而不是文档里：
+//   1. **数据不进构建产物**（ADR 0001/0006）：索引在**运行时**从只读服务取，
+//      所以这里的 apiBase 是一个浏览器用得上的地址，不是构建期的读取。
+//   2. **Tauri 兼容**：产物是纯静态 bundle、不做 SSR。打包成 Tauri 时把
+//      `AI_NOTE_BASE_URL=./` 传进来即可（本地文件加载要相对路径）。
+const apiBase = process.env.AI_NOTE_API || 'http://127.0.0.1:8765';
+
+/** @type {import('@docusaurus/types').Config} */
+const config = {
+  title: '错题本',
+  tagline: '录入 → 重做 → 直到掌握',
+  url: process.env.AI_NOTE_SITE_URL || 'http://127.0.0.1:3000',
+  baseUrl: process.env.AI_NOTE_BASE_URL || '/',
+  organizationName: 'nether-wart',
+  projectName: 'ai-note',
+  trailingSlash: true,
+  onBrokenLinks: 'throw',
+  i18n: {defaultLocale: 'zh-Hans', locales: ['zh-Hans']},
+  // 界面从哪取数据。**运行时**读它（见 src/lib/api.js），不参与构建。
+  customFields: {apiBase},
+  presets: [
+    [
+      'classic',
+      {
+        docs: false,
+        blog: false,
+        theme: {customCss: './src/css/custom.css'},
+      },
+    ],
+  ],
+  themeConfig: {
+    navbar: {
+      title: '错题本',
+      items: [
+        {to: '/', label: '清单', position: 'left'},
+      ],
+    },
+    footer: {
+      style: 'dark',
+      copyright: `数据只在这台机器上 · 服务地址 ${apiBase}`,
+    },
+  },
+};
+
+module.exports = config;

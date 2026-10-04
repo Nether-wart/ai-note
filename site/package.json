@@ -1,0 +1,21 @@
+{
+  "name": "ai-note-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "错题本的界面：Docusaurus 站点，运行时从只读服务取派生索引（ADR 0006 / ADR 0001）",
+  "scripts": {
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.9.2",
+    "@docusaurus/preset-classic": "^3.9.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

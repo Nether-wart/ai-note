@@ -16,6 +16,9 @@ node_modules/
 .docusaurus/
 site/build/
 
+# 里程碑二真实渲染验收留下的证据（HTML/PNG 转储）。留着方便复核，但不进仓库。
+.verify/
+
 # 调用留档（含提示词与用量，可能夹带题目内容）
 runs/
 
