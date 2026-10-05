@@ -33,8 +33,10 @@
 | **复习纸** | `CONTEXT.md`「复习纸」 | **未实现** |
 | **手机上传页** | ADR 0007 决定 4 | 已实现：`GET /upload` + `POST /api/inbox`（**未在真手机上验过**） |
 | **收件目录监视** | ADR 0007 决定 4 | **未实现监视**（`inotify` 在同步盘上不可靠）；手动等价入口已实现：`POST /api/inbox/scan` |
-| **生产前端（Docusaurus 站点）** | ADR 0006、ADR 0009 | 已实现：清单页 / 重做页 / 切分修正页（`site/`）；**重构中**：索引栏以**科目**为根（[issue #17](https://github.com/Nether-wart/ai-note/issues/17)） |
+| **生产前端（Docusaurus 站点）** | ADR 0006、ADR 0009 | 已实现（[issue #17](https://github.com/Nether-wart/ai-note/issues/17)）：**索引栏以科目为根**（首页总览 → 科目 → 简报／细则／考点大纲／今日重做 ＋ 未归类）、**录入**（全屏工作台：建页／切分／人工增删改／重置为预设／入库）与**阅读**（每题一页）都在同一个前端里走完；重做页与切分修正页保留 |
 | **科目与受控词表** | `CONTEXT.md`「科目」、ADR 0009 | 已实现：`subject` 是题卡一等字段、`vocab/subjects.json` 只有一份来源、`stats.by_subject` 按科目汇总、**未归类**兜底、`python3 -m server.subject_assign --map … [--apply]` 显式回填 |
+| **简报（模型写的科目总结）** | `CONTEXT.md`「简报」、issue #17 | 已实现：`POST/GET /api/brief/<科目>`、落盘保历史、**数字一致性闸门**（任何一条数字在索引里找不回 → 不落盘 + 502 `brief_unverifiable`） |
+| **切分角色** | issue #17 §8 | 已实现并**默认接上**（`main()` 注入）；上岗要过三关（视觉探针／固定照片集上的人工判定／三条对账判据），**没密钥时验收是 skip 不是 pass** |
 | **Tauri 打包** | ADR 0006 | **未实现** |
 | **后端重写（`server/`）** | ADR 0007 | 已实现：契约 v0（[`docs/contracts/http-api-v0.md`](docs/contracts/http-api-v0.md)）+ 只读端点 + 写端点 |
 | **界面鉴权** | ADR 0003（单用户本机） | 按设计不做 |
@@ -62,15 +64,20 @@ python3 -m pytest -q
 node --test site/tests/ && node site/tests/selftest.mjs
 ```
 
-**人工验收清单**（起服务、点完三个页面、哪些行为算红线）在 [`docs/walkthrough.md`](docs/walkthrough.md)。
+**人工验收清单**（起服务、从侧栏点到阅读页、哪些行为算红线）在 [`docs/walkthrough.md`](docs/walkthrough.md)。
 
 这一层的边界，一并说清：
 
-- **一页多题的模型切分没接上**：建页与重切都会明确报「切分不可用」，`blocks` 是 `null` 而不是 `[]`
-  ——**不许返回一个看起来能跑的假块列表**。
+- **切分角色默认接上**（`main()` 注入 `HttpSegmenter`）：**没配密钥时 `POST /api/page` 是 502**，
+  不会退回手动画框。想走手动画框那条路，要么配密钥，要么显式用 `build_server(..., segmenter=None)`
+  起服务——那时页照建、`blocks` 是 `null` 而**不是** `[]`（**不许返回一个看起来能跑的假块列表**）。
+- **「重置为预设」是破坏性动作**：它真的会换掉块列表，所以没带 `confirm_discard_manual` 时先 **409**，
+  把将丢弃什么报清（`manual_blocks`／`removed_blocks`／`mode_before`）再问一次。
+- **删块要留痕**：已绑 `card_id` 的块**永远不许删**（400 `block_delete_bound_to_card`）；
+  未入库的块可删，但进 `removed_blocks[]`——只增不减、同 id 允许多条。
 - **纸上重做的活页纸与标记页仍是 `proto/server.py` 的**：新后端只落了屏幕重做的写端点
-  （`channel:"paper"` 仍是 400），审核字段的编辑也还在原型界面上。
-- **界面侧还缺「建 / 入库」两个动作的入口**（服务层已实现，界面没接）。
+  （`channel:"paper"` 仍是 400）。
+- **模型上岗验收在这台机器上没跑过**：夹具与命令都在，但没配密钥时它是 `skip`（**不是 pass**）。
 - 各目录的读法见 [`server/README.md`](server/README.md)、[`site/README.md`](site/README.md)、
   [`docs/README.md`](docs/README.md)、[`data/README.md`](data/README.md)。
 
@@ -362,7 +369,8 @@ samples/         真实照片样例（已在 .gitignore 中）
 - **判定只看最终答案，不看过程**。
 - **活页纸是浏览器打印的 HTML**，不是 PDF 生成；打孔与双面未考虑。
 - **页锚点是短码 + 本机网址，不是二维码**；「扫一下打开」未实现（它不承担回写，只是快捷入口）。
-- **切分的模型层还没接**（`segmenter` 注入点是空的）：建页与重切都会明说「切分不可用」。
+- **切分角色默认接上，所以「切分不可用」是配置出来的状态**，不是常态：没密钥时建页是 502
+  （契约的选择：「我们没能问成」不等于「这一页没有题」）。
   页**照建**、`blocks` 是 `null`（不是 `[]`），人可以在照片上自己画框——机器切分只是**预设**。
 - **复习纸未实现**。
 
@@ -378,11 +386,14 @@ samples/         真实照片样例（已在 .gitignore 中）
 
 ## 接下来的方向
 
-- **接上切分的模型层**：`segmenter` 注入点还是空的（`server/app.py` 的 `build_server` 默认不注入），
-  上岗要过三关：视觉探针、固定照片集上的人工判定、三条对账判据。
-- **前端重构**：规格在 [issue #17](https://github.com/Nether-wart/ai-note/issues/17)，标签 `ready-for-agent`
-  ——索引以**科目**为根，录入与阅读都在同一个前端里走完（[ADR 0009](docs/adr/0009-runtime-sidebar-not-docs-plugin.md)）。
-- **生产前端**：以 Docusaurus 为基、保持可编译为 Tauri（ADR 0006）。数据不进构建产物；写入服务退化为纯 JSON API。
+- **把模型上岗验收真跑一遍**：夹具、命令与三关判据都在（`python3 -m pytest server/tests/test_acceptance_models.py -v`），
+  但这台机器上**没跑过**——没配密钥时它是 `skip`（**不是 pass**）。换模型必须重跑。
+- **纸上重做那条路**：活页纸与标记页仍是 `proto/server.py` 的（`channel:"paper"` 还是 400）。
+- **Tauri 打包**：ADR 0006 说它是**架构约束**，不是现在要出的产物；两条前提（纯静态 bundle、独立本机进程）都已满足。
+- **`/redo` 的 hydrate**：查询串路由在静态站上有一次「按没有查询串的地址渲」的首次渲染，
+  三个新页面用 `useMounted()` 把它推到挂载之后；`/redo` 没动——`site/tests/selftest.mjs`
+  正是对着它的 SSR 输出断言的，加挂载门会先把那条判据判红。
+- **收件目录的监视**：仍是轮询／手动等价入口（`POST /api/inbox/scan`），ADR 0007 的待验证项。
 - **后端重写**：契约优先，`proto/server.py` 只作原型的证据（ADR 0007）。实现语言暂时仍是 Python，因为十轮实测的资产（擦除、闸门统计、裁剪体检、逐字打磨过的提示词与阈值）都在 Python 里。
 
 ## 文档索引
