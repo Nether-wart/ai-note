@@ -10,12 +10,12 @@
 ## 0. 自动化的那几件（先跑，60 秒）
 
 ```bash
-python3 -m pytest -q                    # 全绿；4 条 skip 的原因是「没装 site/node_modules」
+python3 -m pytest -q                    # 全绿（727 passed, 2 skipped）
 ruff check server/                      # All checks passed!
 
 cd site
 npm_config_cache="$PWD/../.npm-cache" npm ci    # 有 lock 文件，用 ci 更可复现
-node --test tests/                      # 全绿（#7/#8/#14 的判据）
+node --test tests/                      # 全绿（#7/#8/#14 的判据，加侧栏树与地址形状那 14 条）
 node tests/selftest.mjs                 # 退出码 0：四条不变量成立，且判据对坏夹具会响
 npm run build                           # 退出码 0
 ls build/index.html build/redo/index.html build/split/index.html
@@ -27,6 +27,11 @@ grep -rl "p-2026" build/                # 必须为空
 
 > 退出码 `2` 与 `1` 是两回事：`selftest.mjs` 退 `1` = 界面不变量失败，退 `2` = 这次没跑完
 > （环境缺依赖）。环境故障从不冒充界面故障。
+
+**判据自己也会坏**，所以基线要现取：重构前这一批是 **pytest 4 失败 / 自检 exit 1**，
+病根是三条判据把「环境」当成了「性质」（报警夹具被一个 proto 遗留物缴械、副作用测试
+把证据判成故障、一条断言仓库里恰好没有测试语料）。修完才是 727／38。教训写在这里：
+**判据绿着、行为坏着，是这个项目最贵的失败**。
 
 ## 1. 起服务与界面
 
@@ -107,8 +112,22 @@ python3 -m server.app --data data --host 0.0.0.0 --port 8765 \
 
 - [ ] 不配 key 时，所有会用到模型的路径都**明确报错**（502 `model_unavailable` 或界面上的明确失败），
       **不静默降级**、不留半截记录、不写坏数据。
-- [ ] 配了 key 之后才谈**模型验收**：视觉探针 + 该角色的通过标准，记录落 `docs/acceptance-log.md`；
-      换模型必须重跑（`CONTEXT.md` 的「验收」）。
+- [ ] **一条连带的后果要主动验**：切分角色默认是接上的（`main()` 注入），所以**没有密钥时
+      `POST /api/page` 是 502，不会退回手动画框**。想走手动画框那条路，要么配密钥，
+      要么显式用 `build_server(..., segmenter=None)` 起服务——那时页照建、`blocks` 是 `null`。
+      两种行为都要亲眼见到一次，因为它们看起来像同一件事的两个说法。
+- [ ] 配了 key 之后才谈**模型验收**：
+
+```bash
+python3 -m pytest server/tests/test_acceptance_models.py -v
+```
+
+  三关：**视觉探针**（合成数字图，不需要私人内容）／**真实照片上的人眼判定**
+  （本机 `data/pages/*.png`，把框画成 PNG 落在 `.verify/acceptance/`）／
+  **三条确定性对账判据**。三条都要过，记录落 `docs/acceptance-log.md`；
+  换模型必须重跑（`CONTEXT.md` 的「验收」）。
+- [ ] **没配密钥时那条验收必须是 `skip` 而不是 `pass`**——「没跑」不许看起来像「通过了」。
+      故意把密钥清掉跑一遍，确认它真的报的是 skipped。
 
 ## 什么算不合格（红线）
 
@@ -120,3 +139,8 @@ python3 -m server.app --data data --host 0.0.0.0 --port 8765 \
 | 界面自己重拼了服务给的文案 | 会印出两句几乎一样的话（里程碑二真撞过一次） |
 | 构建产物里搜到真题 id 或题干 | 违反 ADR 0001：公开仓库的静态站点泄露真实作业 |
 | 真数据目录里多出／少掉文件 | 最高优先级：那是真实学生的手写作业 |
+| 一道题不在侧栏的任何一栏下（含「未归类」） | 违反 ADR 0009 的兜底：**静默少一道题**是这个项目最怕的失败 |
+| 提交了科目，回执里却没有它 | 界面从此只能靠猜「我填的到底进没进去」 |
+| 删了一个块，页文件的 `removed_blocks[]` 里没有它 | 「删掉它才是静默丢题」——留痕是那条裁决剩下的部分 |
+| 简报里的数字在索引里找不到 | 一段读起来很顺、数字却是编的总结：闸门必须当场拦下它 |
+| 判据报「通过」，而它其实从没跑过（环境缺依赖、夹具被缴械） | 本条清单最后一次修的就是这一类，**它比没写判据更坏** |
