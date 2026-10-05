@@ -44,8 +44,18 @@ class ApiError(Exception):
         return out
 
 
-def bad_request(message: str, *, hint: str | None = None, **details) -> ApiError:
-    return ApiError(400, "bad_request", message, hint=hint, details=details)
+def bad_request(message: str, *, hint: str | None = None, reason: str | None = None,
+                **details) -> ApiError:
+    """**400 的唯一构造入口**。
+
+    `reason` 是机器可读的**细因**：契约 §9 里这一类错误的 `code` 恒为 `bad_request`，
+    而 `reason` 指出到底是哪一条规矩被破了（`subject_unknown`、
+    `block_delete_bound_to_card`……）。不给就与 `code` 相同（没细分的那些）。
+
+    这个参数存在的理由是**一处实现**：没有它，各模块只能直接 `ApiError(400, ...)`
+    自己拼——同一个形状很快就有了两种写法（R2/R9 记过的那类事）。
+    """
+    return ApiError(400, "bad_request", message, reason=reason, hint=hint, details=details)
 
 
 def body_too_large(size: int, *, limit: int) -> ApiError:

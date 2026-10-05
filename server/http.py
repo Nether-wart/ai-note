@@ -13,10 +13,11 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import assets, inbox as inbox_mod
+from . import assets, brief, inbox as inbox_mod, subjects
 from .attempt import MAX_BODY_BYTES, AttemptEndpoint
+from .brief_client import HttpBrief
 from .catalog import Catalog
-from .config import load_judge_config
+from .config import BRIEF_ROLE, load_judge_config, load_role_config
 from . import errors
 from .errors import ApiError, bad_request, method_not_allowed, not_found
 from .judge_client import HttpJudge
@@ -69,12 +70,56 @@ def json_response(
     )
 
 
+def _optional_json_object(body) -> dict:
+    """**可选**的 JSON body → 对象。空 body 等价于「一个参数都不给」。
+
+    与 `attempt.py`／`page_api.py` 那两个解析器**故意不同**，理由要说清：那两个资源的
+    body 是**必填**的（一次作答必须有 `channel`；改一页必须有 `edits`），所以空 body
+    是输入错。简报的每个参数都有默认值（`window_days` 缺省 7），空 body 是**合法**的。
+    硬把三处合成一个「有时必填、有时可选」的解析器，只会让「必填」那句悄悄失效——
+    而那正是这一类工具最贵的失败（一条看着在、其实不判的检查）。
+    """
+    if body is None:
+        return {}
+    raw = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else (body or "")
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise bad_request(
+            f"body 不是 JSON：{exc}",
+            hint='要么不给 body（全部用默认值），要么给 {"window_days": 7}',
+            param="body", value=raw[:200]) from exc
+    if not isinstance(data, dict):
+        raise bad_request(f"body 必须是一个 JSON 对象，拿到的是 {type(data).__name__}",
+                          param="body", value=raw[:200], allowed=["object"])
+    return data
+
+
+def _window_days(payload: dict) -> int:
+    """`window_days`：不给就是默认天数；给了就必须是正整数。
+
+    拼错的值**不许静默落到默认值上**——`"7"`、`0`、`-3`、`true` 都要当场 400。
+    """
+    if "window_days" not in payload:
+        return brief.DEFAULT_WINDOW_DAYS
+    value = payload["window_days"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise bad_request(
+            f"window_days 必须是正整数，拿到的是 {value!r}",
+            hint="窗口是「最近几天」，从 1 起数",
+            param="window_days", value=value, allowed=">=1")
+    return value
+
+
 class Api:
     def __init__(self, data_dir: Path | str, clock=None, public_base: str | None = None,
                  *, inbox: Path | str | None = None, bind_host: str | None = None,
                  max_upload_bytes: int | None = None, max_attempt_bytes: int | None = None,
                  segmenter=None,
-                 judge=None, runs_dir: Path | str | None = None, config=None) -> None:
+                 judge=None, runs_dir: Path | str | None = None, config=None,
+                 brief_client=None) -> None:
         self.catalog = Catalog(data_dir, clock=clock, public_base=public_base,
                                inbox=inbox, bind_host=bind_host)
         # 上传上限是**可注入**的：测试不必真造一个 32MB 的 body 去验 413。
@@ -99,6 +144,11 @@ class Api:
         # 页资源（契约 §10.2）。`segmenter` 是 #10 的模型接缝（与 #13 的收件管道
         # 共用同一个注入对象）；不注入 = 切分不可用，绝不编块列表。
         self.pages = PageEndpoint(self.catalog, segmenter=segmenter)
+        # 简报角色（#17 §10.5）：与判定角色同一个形状——**默认接上**（它不是「故障态」，
+        # 而 `segmenter=None` 那种「不注入 = 不可用」的语义是切分独有的）。
+        # 坏配置在这里就起不来（provider 不在白名单 → ValueError → 退出码 2）。
+        self.brief = brief_client or HttpBrief(
+            load_role_config(BRIEF_ROLE), runs_dir or default_runs_dir())
 
     def handle(self, method: str, target: str, body: bytes | str | None = b"",
                content_type: str = "", declared_length: int | None = None) -> Response:
@@ -193,7 +243,7 @@ class Api:
         # 写端点（#5）：GET 到它要说清「它收的是 POST」，不是含糊的 404（契约 §9）
         if path.startswith("/api/attempt/"):
             self._require(method, "POST")
-            self._reject_oversized_attempt(body, declared_length)
+            self._reject_oversized_write(body, declared_length)
             return self._post(path, body)
 
         # 页资源（契约 §10.2）：四个动作一个接缝。路由在这里显式列出，
@@ -203,6 +253,11 @@ class Api:
             return self._page_create(body, content_type)
         if path.startswith("/api/page/"):
             return self._page_route(method, path, body)
+
+        # 简报（#17 §10.5）：读最新那一份／生成一份。显式列出来，好让「用错方法」得到
+        # 405（带 `allowed`）而不是一个含糊的 404——路由**在**，只是不收这个方法。
+        if path.startswith("/api/brief/"):
+            return self._brief_route(method, path, query, body, declared_length)
 
         # 其余 POST 交给写端点那一份判断：只读端点上是 405、预留命名空间是带说明的 404。
         if method == "POST":
@@ -231,6 +286,67 @@ class Api:
                 )
 
         raise not_found(f"没有这条路由：{path}", hint="GET /api/index 看看索引")
+
+    # ------------------------------------------------------------ 简报（#17 §10.5）
+
+    def _brief_route(self, method: str, path: str, query: dict, body,
+                     declared_length: int | None) -> Response:
+        """`GET /api/brief/<科目>`（读）与 `POST /api/brief/<科目>`（生成）。
+
+        科目是**另一类路径参数**（契约 §1）：它不在 id 的字符集里（中文），所以只做
+        URL 解码（`handle` 已经解过）＋**词表逐字校验**。取值不在词表里 → 400
+        `subject_unknown` 带 `allowed`——与卡级那条警告**同名同事实**，层次不同：
+        这里发生在「拒绝一次输入」，那里发生在「自检一份已有数据」。名字同一个，
+        是因为「同一个事实两个码会让界面出现两种说法、让按码统计永远对不上」（R2/R9）。
+        """
+        subject = path[len("/api/brief/"):].strip()
+        vocabulary, _vocab_warnings = subjects.load(self.catalog)
+        known = list(vocabulary["subjects"])
+        if subject not in known:
+            raise bad_request(
+                f"科目 {subject!r} 不在受控词表里",
+                reason="subject_unknown",
+                hint="先把它加进 <数据目录>/vocab/subjects.json；简报只对有科目的题生成",
+                param="subject", value=subject, allowed=known,
+            )
+
+        if method == "GET":
+            at = (query.get("at") or [None])[0]
+            document, where = (brief.load_at(self.catalog, subject, at) if at
+                               else brief.load_latest(self.catalog, subject))
+            return json_response(200, data={
+                "brief": self._brief_readout(subject, document),
+                # `str()`：这两处回来的是 `Path`，直接塞进信封就是一个
+                # 「Object of type PosixPath is not JSON serializable」的 500——
+                # 契约要的是路径字符串，不是一个 Python 对象。
+                "path": str(where),
+            })
+
+        self._require(method, "POST")
+        self._reject_oversized_write(body, declared_length)
+        payload = _optional_json_object(body)
+        generated = brief.generate(self.catalog, subject, client=self.brief,
+                                  window_days=_window_days(payload))
+        return json_response(200, data={
+            "brief": self._brief_readout(subject, generated["brief"]),
+            "path": str(generated["path"]),
+            "run_id": generated.get("run_id"),
+        })
+
+    def _brief_readout(self, subject: str, document: dict) -> dict:
+        """落盘形状 ＋ 三个**现算**的读数（契约 §10.5）：`is_latest`／`stale`／`new_problems`。
+
+        为什么不把这三个键写进文件：它们是「此刻」的读数（今天最新的是哪一份、之后又录进来
+        几道题），落盘就会陈旧——`is_latest` 更是下一份生成出来的那一刻就变了。
+        判据只有 `brief.stale` 一处，这里只**取**。
+        """
+        dates = brief.list_briefs(self.catalog, subject)
+        latest = dates[-1] if dates else None
+        return {
+            **(document or {}),
+            "is_latest": latest is not None and (document or {}).get("window_until") == latest,
+            **brief.stale(self.catalog, subject, document),
+        }
 
     # ------------------------------------------------------------ 页资源
 
@@ -326,17 +442,20 @@ class Api:
     def body_limit(self, path: str) -> int:
         """这条路由的 body 上限。`app.py` 靠它在**读 body 之前**决定读不读。
 
-        按路由分档：写端点收的是几个键的 JSON（`MAX_BODY_BYTES`），上传收的是
-        多部分照片（`max_upload_bytes`）。上限只有这一处判据，`app.py` 与
-        `_reject_oversized_attempt` 都从这里取——两处各写一份迟早分叉。
+        按路由分档：**写端点**收的是几个键的 JSON（`MAX_BODY_BYTES` = 64 KiB），
+        上传收的是多部分照片（`max_upload_bytes`）。上限只有这一处判据，`app.py` 与
+        `_reject_oversized_write` 都从这里取——两处各写一份迟早分叉。
+
+        写端点那一档**不分资源**：作答与简报的 body 都只有几个键，没有理由放宽
+        （放宽了就是又一条「读一个巨大的 body 再拒绝」的路）。
         """
         raw_path = path.partition("?")[0]
-        if raw_path.startswith("/api/attempt/"):
+        if raw_path.startswith("/api/attempt/") or raw_path.startswith("/api/brief/"):
             return self.max_attempt_bytes
         return self.max_upload_bytes
 
-    def _reject_oversized_attempt(self, body: bytes | str | None,
-                                  declared_length: int | None) -> None:
+    def _reject_oversized_write(self, body: bytes | str | None,
+                                declared_length: int | None) -> None:
         """写端点的 body 超限 → 400 `body_too_large`，**在进模型之前**（作业单 2）。
 
         声明长度与真读到的字节数取大的那个：`app.py` 只按 `Content-Length` 判、

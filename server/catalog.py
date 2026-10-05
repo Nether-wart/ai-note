@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .autojudge import REASONS
+from .brief import index_briefs
 from .errors import ApiError, bad_request, not_found
 from .inbox import Inbox
 from .publicbase import is_reachable_from_other_devices, public_base_warning
@@ -216,6 +217,11 @@ class Catalog:
             # 「有科目但没有大纲」的中间态，而中间态在界面上就是一道错。
             "subjects": vocabulary["subjects"],
             "outline": vocabulary["outline"],
+            # 每个科目最新那一份简报的读数（有没有、过没过期、几道新题没进去）。
+            # 侧栏要显示「简报已过期：有 N 道新题没进去」，而那句话是服务的事实——
+            # 界面不许自己算，也不该为了一个角标再打一次网络。
+            # 科目取**汇总的键**（词表 ∪ 卡上出现过的），表外科目也照样有一栏读数。
+            "briefs": index_briefs(self, list(subjects_rollup["by_subject"]), records),
             "screen_redo": screen_redo_summary(records),
             # 服务自述：手机该用哪个地址（ADR 0007 第 5 条）、上传页链接、收件目录在哪，
             # 以及「我没有改任何已有数据」（ADR 0007 第 6 条要的就是这句话）。

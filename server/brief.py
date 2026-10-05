@@ -531,8 +531,53 @@ def stale(catalog, subject, brief, records=None) -> dict:
     return {"stale": count > 0, "new_problems": count}
 
 
+def index_briefs(catalog, subjects, records) -> dict:
+    """`/api/index` 的 `data.briefs`（契约 §3）：每个科目**最新**那一份的读数。
+
+    形状：`{<科目>: {latest_date, generated_at, stale, new_problems}}`。
+
+    **为什么放在索引里、而不是让界面照着科目一个个去问**：侧栏要能显示
+    「简报已过期：有 N 道新题没进去」，而那句话涉及「哪些题是在 `covers_until` 之后录进来的」
+    ——那是服务的事实，界面不许自己算（契约 §3、ADR 0009 的「一次请求画出整棵树」）。
+    索引一趟带上它，侧栏就不用为了一个角标再打一次网络。
+
+    `stale` 的判据只有一处（本模块的 `stale()`），这里只负责**取**——不重算、不近似。
+    `records` 由调用方传进来（`catalog.index()` 手上正好有一份），免得每个科目重算一次索引。
+
+    两条不许静默的边界：
+
+      · 列出来的那一份**读不了**（权限、半截 JSON）→ 按**过期**报（`stale: True`）。
+        端着一个读不出来的文件说「它是最新的」，比让人重新生成一次坏得多。
+      · 科目名本身不合法（含 `/`、空白等纵深防御那一档）→ 没有简报可读，给空读数，
+        **不让它把整个索引打成 500**：一个坏科目名不该让所有题都看不见。
+    """
+    out: dict[str, dict] = {}
+    for subject in subjects or []:
+        blank = {"latest_date": None, "generated_at": None, "stale": False, "new_problems": 0}
+        try:
+            dates = list_briefs(catalog, subject)
+        except errors.ApiError:
+            out[subject] = dict(blank)
+            continue
+        if not dates:
+            out[subject] = dict(blank)
+            continue
+        latest = dates[-1]
+        try:
+            brief_doc, _path = load_at(catalog, subject, latest)
+        except errors.ApiError:
+            out[subject] = {**blank, "latest_date": latest, "stale": True}
+            continue
+        out[subject] = {
+            "latest_date": latest,
+            "generated_at": (brief_doc or {}).get("generated_at"),
+            **stale(catalog, subject, brief_doc, records),
+        }
+    return out
+
+
 __all__ = [
     "BRIEFS_DIR", "DEFAULT_WINDOW_DAYS", "UNCLASSIFIED_LABEL", "UNCLASSIFIED_PATH",
-    "brief_digest", "brief_path", "briefs_dir", "generate", "list_briefs", "load_at",
-    "load_latest", "resolve_path", "save_brief", "stale", "verify_facts",
+    "brief_digest", "brief_path", "briefs_dir", "generate", "index_briefs", "list_briefs",
+    "load_at", "load_latest", "resolve_path", "save_brief", "stale", "verify_facts",
 ]
