@@ -102,11 +102,15 @@ def not_auto_judgeable(reason: str, message: str, *, pid: str, warnings: list | 
 
 
 def model_unavailable(message: str, *, pid: str, provider: str | None = None,
-                      model: str | None = None) -> ApiError:
+                      model: str | None = None, hint: str | None = None) -> ApiError:
     """契约 §9：模型调用失败 → **502**（上游失败），且这一次重做**不留任何记录**。
 
     把它记成「看不清」会在重做历史里造出一条没发生过的重做，并静默推进
     「上次重做」时刻、凭空重置冷却（编排裁决 D1、spec #1 US 14）。
+
+    `hint` 可覆盖：切分（`POST /api/inbox*`）那条路上，照片**已经收进收件目录**
+    ——那是「收」这一步的产物，不是这次请求的残留——所以默认那句「没有留下任何记录」
+    在那边不成立，调用方给一句准确的（不许静默、也不许说反话）。
     """
     details = {"id": pid}
     if provider:
@@ -118,7 +122,7 @@ def model_unavailable(message: str, *, pid: str, provider: str | None = None,
         "model_unavailable",
         message,
         reason="model_unavailable",
-        hint="可以直接重试；这一次没有留下任何记录",
+        hint=hint or "可以直接重试；这一次没有留下任何记录",
         details=details,
     )
 

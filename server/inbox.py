@@ -26,7 +26,8 @@ from email.parser import BytesParser
 from pathlib import Path
 
 from . import assets
-from .errors import bad_request
+from .errors import bad_request, model_unavailable
+from .model_client import ModelUnavailable
 
 # 一次请求的字节上限。手机原图通常 2–8MB；给足余量，同时挡住「把磁盘读爆」这一类。
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
@@ -136,7 +137,25 @@ def run_pipeline(inbox: Inbox, pages: list[dict], segmenter) -> tuple[dict, list
     for page in pages:
         blocks = None
         if status["available"]:
-            blocks = segmenter(inbox.dir / page["stored_as"])
+            try:
+                blocks = segmenter(inbox.dir / page["stored_as"])
+            except ModelUnavailable as exc:
+                # 切分是**模型调用**：上游失败 → 502 `model_unavailable`（D1），
+                # 走 `errors.py` 的唯一实现（不是让异常落到 HTTP 层的兜底 500）。
+                #
+                # **半截状态的边界**：照片已经在**收件目录**里——「往收件目录放一个文件
+                # 就是录入」是这一层的定义，而扫描那条路上的照片甚至不是这次请求建的，
+                # 所以**不回滚**它（删掉用户刚拍的照片是数据丢失，不是「不留痕迹」）。
+                # 不留的是**页/卡/块**：切分本来就不写盘，这一抛出去一个都不会有。
+                # `hint` 照实说：照片收下了、切分没跑成、可以重传或重扫。
+                raise model_unavailable(
+                    f"第 {page['page_index'] + 1} 页（{page['stored_as']}）的切分没能跑成："
+                    f"{exc} → 照片已经收进收件目录，但没有切分、没有建页/建卡",
+                    pid=None,
+                    hint="照片已经收在收件目录里（没有丢）；可以直接重传这一页，"
+                         "或跑 POST /api/inbox/scan 重试切分——"
+                         "这一次没有留下页文件、题卡或块列表",
+                ) from exc
         out_pages.append({"page_index": page["page_index"],
                           "stored_as": page["stored_as"], "blocks": blocks})
     warnings = []

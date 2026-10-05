@@ -1146,6 +1146,12 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
    `segmentation_not_implemented`**（§8），不许静默降级、不许编一个块列表。
 4. **`committed` 与 `pipeline.commit`**：入库（按块生成题卡 + 回写绑定）归 #9/#15，
    #13 一个题卡都不建。这块必须显式，否则界面会以为照片已经变成题卡了。
+5. **切分失败 → 502 `model_unavailable`**（D1，最终修复 pass 接上）：切分是模型调用，
+   上游失败时 `POST /api/inbox*` 与 `POST /api/page*` 走同一个错误形状，
+   `message` 里点名**哪一页**（收件目录里那个文件名）。**半截状态的边界**：照片已经
+   在**收件目录**里（那是「收」这一步的产物；扫描那条路上的照片甚至不是这次请求建的），
+   所以**不回滚照片**，`hint` 照实说明它没有丢；不留的是页文件、题卡与块列表——
+   切分本来就不写盘。绝不落兜底 500。
 
 **`POST /api/inbox/scan`** —— 无 body。目录监视（`inotify`）在多平台上不可靠，
 所以它是那个**手动等价入口**，不是装饰：它认出现在收件目录里有哪些照片，逐条说清
@@ -1217,6 +1223,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（B7 / #15） | §10 状态表把 §10.2 改成**已实现**（四个动作都有路由）；§10.2.1b 补「建」「入库」的请求/响应形状与各四条规矩；§10.2.2 与 §12 加 `server/page_create.py`／`page_commit.py`／`audit.py`；§8 加「页资源建/入库与审计码表」14 条（含 `hint` 级），逐卡表加 `problem_transcript_missing`；§9 的 `problem_missing_field` **语义收窄**成「连 `problem` 对象都没有」并写明「题面还没转录不再跳过」；§12.1 补审计与端到端的测试接缝 | 工单 #15 验收 1/2/3。**先写进 issue #15 的评论再动手**（BRIEF 硬规则 3）。要点：①入库建的是**骨架卡**（块上只有边界与题号），所以索引必须**收录还没转录的卡**并报 `problem_transcript_missing`——落盘了看不见就是静默丢题，与 spec #2 第 17 条冲突；②只给「收」的块发卡号（丢给弃块发号＝幽灵绑定）；**先写页再建卡**是幂等的一部分（反过来会换 id）；③页绑定那一条**不另造码**，消费 `pages.page_binding`：旧卡 `hint`／页↔卡对不上账 `warning`，两级不许混；④同页题干逐字相同的判据与索引级**共用一份实现**（`duplicate_transcript_groups`），没有模糊比、没有相似度；⑤审计 `checked[]` **永远在**、退出码只认 `warning` 级发现；⑥真数据只读复核（跑前跑后 `data/` 逐字节不变）：两张存量卡的 `page_binding_missing` 都是 `hint`，那张解答题卡（标准答案空、考点空）的两条 warning 是真问题，没被提示淹掉 |
 | 本版（#12 数据安全修复） | §8 加「写盘路径的纵深防御」三个码（`page_id_mismatch`/`page_image_unsafe` 为 400 + `details.param`、`filesystem_error` 为 500）；§9 补 `internal_error`/`bad_request` 的 `reason` 取值；`save_page(catalog, page, *, page_id, …)` 的写盘路径只认 `page_id`，身份闸在算路径之前、预演走同一道闸 | 独立验证者实测的真反例：页 id 的校验只挡「传进来的 id」，挡不住「页文件里 `id` 字段」——`save_page` 拿它拼路径，`{"id":"../problems/p-20261004-41c86b"}` 会让 `run_intake(apply=True)` 把整份页 JSON **覆盖一张真题卡**（受害者 md5 变、`warnings == []`、CLI rc=0），`"id":"../../problems/p-nope"` 则是 CLI 裸 `FileNotFoundError`。同类入口还有 `image` 拼 `image_path`（可借读取穿越 `pages/`）与 `backfill` 的写回。**先写进 issue #12 的评论再动手**（BRIEF 硬规则 3） |
 | 本版（最终修复 pass） | §9 补 `bad_request` 的 `reason: "body_too_large"` 与「写端点 body 的显式上限 64 KiB」一段；§10.1 的错误表加一行；上限按路由由 `Api.body_limit` 一处判，`app.py` 在读 body 之前就用它 | 最终修复 pass 作业单 2（来源 #5 的 merger 给的真反例：2MB 合法 JSON → 200，`_read_body` 按 `Content-Length` 整段读进内存、作答还会发给模型）。#13 之后服务要经 Tailscale 给手机用，所以这条要在**进模型之前**拒绝且不留记录（D1/D9）。裁决用 **400**（不是上传那档的 413）：写端点的 body 只有几个键，超限是「参数写错」那一类；上传那档仍是 413（见 §10.3） |
+| 本版（最终修复 pass） | §10.3 加第 5 条：切分接缝上的模型失败 → 502 `model_unavailable`（`message` 点名哪一页、`hint` 说明照片没丢、不回滚收件目录里的照片）。`errors.model_unavailable` 加可覆盖的 `hint` | 最终修复 pass 作业单 7（#10 明说的未做项）。`inbox.run_pipeline` 以前直接调 `segmenter(...)`：`ModelUnavailable` 只能靠 HTTP 层的兜底 catch 变成 502（`details.id` 是 `null`），既不点名哪一页，`hint` 还写着「没有留下任何记录」——可照片明明已经收在收件目录里，那是**说反话**。现在接缝显式走 `errors.py` 的唯一实现；扫描那条路上的照片不是这次请求建的，回滚它在语义上根本不成立 |
 | 本版（最终修复 pass） | §8 没有改码表，但补齐了三个出口的 `level`：`catalog.problem_id_mismatch`、`pages.backfill_pages` 的 5 条、`pages.rebind` 的 3 条一律走 `warnings._warn`（裁决 (a)：`rebind` 不是「内部结构、由消费方补级别」）；`card_warnings` 的 `standard_answer_missing` 在 `problem.type == "solution"` 时降为 `hint`（非解答题仍是 `warning`） | 最终修复 pass 作业单 3/3b/5/9。§2 要求 `level` **总是显式发出来**，手搓 dict 让它取决于「谁在读」；解答题没有标准答案是**预期状态**（原型 `--audit` 一直这么降级），报 `warning` 会把它淹在噪声里，与 D3/D4「提示与警告分级」的一贯口径冲突 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）

@@ -321,3 +321,79 @@ def test_an_injected_segmenter_is_the_seam_the_blocks_come_through(tmp_path):
     # 块出来了，但**没有**入库——`committed` 与 commit 那段话仍然说实话
     assert env["data"]["pipeline"]["committed"] is False
     assert env["data"]["pipeline"]["commit"]["reason"] == "not_implemented"
+
+
+# ----------------------------------- 切分接缝上的模型失败（最终修复 pass 作业单 7）
+
+def test_a_segmenter_that_fails_is_a_502_and_names_the_page(tmp_path):
+    """切分是**模型调用**：上游失败 → 502 `model_unavailable`（D1），不许落兜底 500。
+
+    错误映射走 `errors.py` 的唯一实现——所以 `details`、`hint` 的形状与判定角色那条
+    （#5）逐字一致，另外把**哪一页**没切成写进给人看的原话（不许含糊）。
+    """
+    from server.model_client import ModelUnavailable
+
+    def broken(image_path):
+        raise ModelUnavailable("上游 402：余额不足")
+
+    api = build_api(tmp_path, segmenter=broken)
+    body, ctype = multipart_body([("p.png", PNG_1X1)])
+
+    status, env = post(api, "/api/inbox", body, ctype)
+
+    assert status == 502, env
+    assert env["ok"] is False
+    error = env["error"]
+    assert error["code"] == "model_unavailable"
+    assert error["reason"] == "model_unavailable"
+    assert "余额不足" in error["message"], "上游的原话要带出来"
+    stored = api.catalog.inbox.dir
+    (name,) = [p.name for p in stored.iterdir()]
+    assert name in error["message"], "要说清是哪一页（收件目录里那个文件名）"
+    assert "重试" in error["hint"]
+
+
+def test_a_failed_segmenter_leaves_no_half_state(tmp_path):
+    """D9：拒绝/失败路径不许留下半截状态——没有页、没有卡、没有块。
+
+    切分本来就不写盘；**收件目录里的照片不回滚**（那是「收」这一步的产物，
+    扫描那条路上的照片甚至不是这次请求建的），所以这条测试断言的是
+    「data 里没有建出任何页/卡/块」，并且响应**明说**照片已经收下（不许静默）。
+    """
+    from server.model_client import ModelUnavailable
+
+    def broken(image_path):
+        raise ModelUnavailable("boom")
+
+    api = build_api(tmp_path, segmenter=broken)
+    root = tmp_path / "data"
+    body, ctype = multipart_body([("p.png", PNG_1X1)])
+
+    status, env = post(api, "/api/inbox", body, ctype)
+
+    assert status == 502, env
+    assert list((root / "problems").glob("*.json")) == [], "没有建任何题卡"
+    assert not (root / "pages").exists() or list((root / "pages").iterdir()) == [], \
+        "没有建任何页文件"
+    assert env["warnings"] == [] and env["skipped"] == []
+    assert "收件目录" in env["error"]["hint"], "要明说照片已经收下了（不许让人以为白传了）"
+
+
+def test_the_scan_entry_gets_the_same_502_for_a_failed_segmenter(tmp_path):
+    """扫描是同一个接缝的手动入口：那里的照片**不是这次请求建的**，更不许回滚。"""
+    from server.model_client import ModelUnavailable
+
+    def broken(image_path):
+        raise ModelUnavailable("上游超时")
+
+    api = build_api(tmp_path, segmenter=broken)
+    inbox_dir = api.catalog.inbox.dir
+    inbox_dir.mkdir(parents=True)
+    (inbox_dir / "synced-1.png").write_bytes(PNG_1X1)
+
+    status, env = post(api, "/api/inbox/scan")
+
+    assert status == 502, env
+    assert env["error"]["code"] == "model_unavailable"
+    assert (inbox_dir / "synced-1.png").is_file(), "扫描不许删掉它扫到的东西"
+    assert [w["code"] for w in env["warnings"]] == []
