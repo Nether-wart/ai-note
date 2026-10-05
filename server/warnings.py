@@ -78,21 +78,37 @@ def card_warnings(card: dict, catalog) -> list[dict]:
     return warns
 
 
+def duplicate_transcript_groups(entries) -> list[dict]:
+    """「题干逐字相同」的分组——**这条判据只有这一处实现**（#15）。
+
+    `entries` 是 `(卡片 id, 题干)` 的序列。判据是 `strip()` 之后 `==`：**逐字**，
+    没有模糊比、没有相似度、没有编辑距离（spec #2：两道不同的题不可能有同一段题干，
+    这条**没有例外**——一页多题时相邻题互相污染的概率随同页题数上升）。
+    空题干不参与（「还没转录」不是「与别人相同」）。
+
+    为什么收成函数：索引级（`index_warnings`，跨全库，码 `duplicate_transcript`）与
+    #15 审计的**页级**检查（`audit.py`，码 `duplicate_transcript_on_page`）是同一个判据
+    的两个范围。两处各写一份就会各判各的（spec #2 的跨单元表点名「串题检查」只有一处）。
+    """
+    groups: dict[str, list[str]] = {}
+    for pid, transcript in entries:
+        text = (transcript or "").strip()
+        if text:
+            groups.setdefault(text, []).append(pid)
+    return [{"transcript": text, "ids": ids} for text, ids in groups.items() if len(ids) > 1]
+
+
 def index_warnings(records: list[dict]) -> list[dict]:
     """索引级检查：跨卡才看得出来的那类错。"""
     warns: list[dict] = []
 
-    by_transcript: dict[str, list[str]] = {}
-    for rec in records:
-        text = (rec.get("transcript") or "").strip()
-        if text:
-            by_transcript.setdefault(text, []).append(rec["id"])
-    for text, ids in by_transcript.items():
-        if len(ids) > 1:
-            warns.append(_warn(
-                "duplicate_transcript",
-                f"两张卡的题干逐字相同（{' '.join(ids)}）→ 两道不同的题不可能有同一段题干，"
-                f"检查是不是串题了。题干：{text[:40]}",
-                None,
-            ))
+    for group in duplicate_transcript_groups(
+            [(rec["id"], rec.get("transcript")) for rec in records]):
+        text, ids = group["transcript"], group["ids"]
+        warns.append(_warn(
+            "duplicate_transcript",
+            f"两张卡的题干逐字相同（{' '.join(ids)}）→ 两道不同的题不可能有同一段题干，"
+            f"检查是不是串题了。题干：{text[:40]}",
+            None,
+        ))
     return warns
