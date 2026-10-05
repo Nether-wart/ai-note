@@ -89,6 +89,15 @@ def card_warnings(card: dict, catalog) -> list[dict]:
     binding = pages.page_binding(catalog, card)
     if not binding["bound"]:
         warns.append(_warn(binding["code"], binding["message"], pid, level=binding["level"]))
+
+    # 科目（契约 §8、#17）。判据与级别的唯一实现在 `subjects.card_warnings`：
+    # 未归类是 `hint`（一等状态），不在词表里是 `warning`（有东西不对），
+    # 而且词表没读出来时**一条都不报**——那是上面那几条词表级警告的事。
+    # import 放在函数里：`subjects.py` 模块级要 `from .warnings import _warn`，
+    # 反过来在模块级 import 就成环了。
+    from . import subjects
+
+    warns += subjects.card_warnings(card, subjects.load(catalog)[0])
     return warns
 
 

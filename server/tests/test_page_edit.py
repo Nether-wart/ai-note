@@ -366,6 +366,367 @@ def test_a_question_number_can_be_cleared_to_unreadable():
     assert result["page"]["blocks"][0]["question_no"] is None
 
 
+# ---------------------------------------------------------------- 新增一块（#24/#25/#26）
+
+
+def test_adding_a_block_gets_a_fresh_id_in_the_same_number_space_as_the_model_blocks():
+    """新块的 id 与机器切出来的块**共用一套命名**（`b<序号>`）——不许两套编号空间。
+
+    序号取页上已有的那些 `b<序号>` 里最大的 +1，所以它**不会撞上任何已有的 id**。
+    """
+    result = page_edit.add_block(three_blocks(), [0.02, 0.68, 0.9, 0.2],
+                                 question_no=4, at=AT)
+
+    assert result["changed"] is True
+    assert [b["id"] for b in result["page"]["blocks"]] == ["b1", "b2", "b3", "b4"]
+    added = result["page"]["blocks"][-1]
+    assert added["bbox_norm"] == [0.02, 0.68, 0.9, 0.2]
+    assert added["question_no"] == 4
+    assert result["blocks_changed"] == ["b4"]
+
+    # 页上有个洞（b2 被删过）也不复用那个号：重复用一个刚删掉的号，会让留痕里那条
+    # 「b2 被删过」看起来像在说一个还活着的块。
+    holed = page([block("b1", [0.02, 0.02, 0.9, 0.2]),
+                  block("b3", [0.02, 0.46, 0.9, 0.2])])
+    assert page_edit.add_block(holed, [0.02, 0.68, 0.9, 0.2], at=AT)[
+        "page"]["blocks"][-1]["id"] == "b4"
+
+
+def test_a_hand_drawn_block_defaults_to_keep_and_carries_no_machine_readings():
+    """#26：**手工块默认「收」**——人自己画的框就是他要的题。
+
+    这一块的 `bbox_px`／`card_id`／`ink` 都是 `None`：人画的框没有盘上像素原值、
+    还没入库（分配在入库那一刻）、红笔统计要等一次 `intake`——**一项都不许编**。
+
+    但 `decision` **不是** `None`：默认「收」是一次**人的判断**，得记成 `source = "human"`。
+    不记的话，下一次 `intake --apply` 就会拿像素统计重判它（`plan_decisions` 只保留
+    human 的决策）——「不再拿像素统计否决他」那句话当场作废。
+    """
+    result = page_edit.add_block(three_blocks(), [0.02, 0.68, 0.9, 0.2], at=AT)
+
+    added = result["page"]["blocks"][-1]
+    assert added["keep"] is True
+    assert added["bbox_px"] is None and added["card_id"] is None
+    assert added["ink"] is None
+    assert added["problem_type"] is None
+    assert added["decision"]["keep"] is True
+    assert added["decision"]["source"] == intake.SOURCE_HUMAN
+    assert added["decision"]["rule"] == intake.RULE_HUMAN_INCLUDE
+
+
+@pytest.mark.parametrize("given,expected", [(None, None), (False, False), (True, True)])
+def test_an_explicit_keep_on_a_new_block_is_honoured(given, expected):
+    """「没给 `keep`」与「明确给了 `null`／`false`」是两件事：后者照给，不被默认值吃掉。
+
+    `null`（待定）**没有**决策记录——「还没有人做决定」与「人说了待定」是同一件事，
+    那一条留给 `intake` 判；`false` 则要记成 `human_drop`，否则自动决策会把它翻回去。
+    """
+    result = page_edit.add_block(three_blocks(), [0.02, 0.68, 0.9, 0.2],
+                                 keep=given, at=AT)
+
+    added = result["page"]["blocks"][-1]
+    assert added["keep"] is expected
+    if expected is None:
+        assert added["decision"] is None
+    else:
+        assert added["decision"]["keep"] is expected
+        assert added["decision"]["source"] == intake.SOURCE_HUMAN
+
+
+def test_adding_a_block_with_an_unusable_box_is_the_same_rejection_shape_as_move():
+    """读不出来的框：**一类错误只有一种说法**——与 `move` 同一个码、同一种形状（D9）。"""
+    before = three_blocks()
+    refused = page_edit.add_block(before, [0.1, 0.2, 0.0, 0.3], at=AT)
+    moved = page_edit.move_block(three_blocks(), "b1", [0.1, 0.2, 0.0, 0.3], at=AT)
+
+    assert refused["changed"] is False
+    assert refused["page"] is before
+    refused_box = [w for w in refused["warnings"] if w["code"] == page_edit.BOX_NOT_USABLE]
+    moved_box = [w for w in moved["warnings"] if w["code"] == page_edit.BOX_NOT_USABLE]
+    assert refused_box and moved_box
+    assert set(refused_box[0]) == set(moved_box[0])
+    assert refused_box[0]["level"] == moved_box[0]["level"] == "warning"
+
+
+def test_adding_a_block_with_a_type_outside_the_enum_is_rejected():
+    """拼错的题型会**静默**让「解答题没有标准答案属正常」那条判据失效——照既有形状拒绝。"""
+    before = three_blocks()
+    result = page_edit.add_block(before, [0.02, 0.68, 0.9, 0.2],
+                                 problem_type="multiple_choice", at=AT)
+
+    assert result["changed"] is False
+    assert result["page"] is before
+    refused = [w for w in result["warnings"] if w["code"] == page_edit.TYPE_UNKNOWN]
+    assert refused and "solution" in refused[0]["message"]      # 把可取值说出来
+
+
+@pytest.mark.parametrize("bad", ["4", 4.5, 0, -1, True])
+def test_adding_a_block_with_a_question_number_that_is_not_a_positive_integer_is_rejected(bad):
+    """编一个题号会让「题号连续性」这条最强的检查失灵：非正整数一律拒绝。"""
+    before = three_blocks()
+    result = page_edit.add_block(before, [0.02, 0.68, 0.9, 0.2], question_no=bad, at=AT)
+
+    assert result["changed"] is False
+    assert result["page"] is before
+    assert page_edit.QUESTION_NO_INVALID in [w["code"] for w in result["warnings"]]
+
+
+def test_adding_a_block_works_on_a_page_that_had_no_block_list_at_all():
+    """切分不可用的页（`blocks: null`）**也能手动画框**——这正是它存在的理由。
+
+    画完之后 `blocks` 是**真的列表**、来源是 `manual`：契约 §10.2.1 那条
+    「`mode == "unavailable"` 时 `blocks` 必须是 `null`」仍然成立——来源已经不是它了。
+    """
+    blank = page(None, segmentation={"mode": "unavailable", "at": None,
+                                     "note": "切分不可用：等人手动画框"})
+    result = page_edit.add_block(blank, [0.02, 0.02, 0.9, 0.2], question_no=1, at=AT)
+
+    assert result["changed"] is True
+    assert [b["id"] for b in result["page"]["blocks"]] == ["b1"]
+    assert result["page"]["segmentation"]["mode"] == page_edit.MODE_MANUAL
+    assert result["page"]["segmentation"]["note"] == "切分不可用：等人手动画框"
+
+
+# ---------------------------------------------------------------- 删块（#30）
+
+
+def test_a_block_that_carries_a_card_can_never_be_deleted():
+    """**硬约束 1**：已绑 `card_id` 的块永远不许删。
+
+    那张卡已经存在，删块会造出一条**孤儿绑定**。要「不要它」只能用既有的 `drop`
+    （不收，块留在页文件里、带 `decision.rule = "human_drop"`，可审计）。
+    """
+    from server.errors import ApiError
+
+    blocks = page([block("b1", [0.02, 0.02, 0.9, 0.2], card_id="p-20261004-aaaaaa")])
+
+    with pytest.raises(ApiError) as excinfo:
+        page_edit.delete_block(blocks, "b1", at=AT)
+
+    payload = excinfo.value.payload()
+    assert excinfo.value.status == 400
+    assert payload["code"] == "bad_request"
+    assert payload["reason"] == page_edit.DELETE_BOUND_TO_CARD
+    assert payload["details"]["param"] == "block_id"
+    assert payload["details"]["card_id"] == "p-20261004-aaaaaa"
+
+
+def test_deleting_a_never_committed_block_leaves_exactly_one_trace(api_for):
+    """**硬约束 2**：未入库的块可以删，但删除**必须留痕**——绝不静默消失。
+
+    留痕里那一行是 `{block_id, bbox_norm, question_no, removed_at}`，**永远不带 `card_id`**
+    （带了就等于「删块那道闸破了」）。
+    """
+    api = api_for([])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
+
+    report = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                  [{"action": "delete", "block_id": "b2"}], at=AT, apply=True)
+
+    assert report["changed"] is True
+    assert report["blocks_removed"] == 1
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1", "b3"]
+    assert len(on_disk["removed_blocks"]) == 1
+    entry = on_disk["removed_blocks"][0]
+    assert set(entry) == {"block_id", "bbox_norm", "question_no", "removed_at"}
+    assert entry["block_id"] == "b2"
+    assert entry["bbox_norm"] == [0.02, 0.24, 0.9, 0.2]
+    assert entry["question_no"] == 2
+    assert entry["removed_at"] == AT.isoformat()
+
+
+def test_deleting_a_block_that_is_not_on_the_page_is_the_same_rejection_as_move():
+    """点不到那块 → 与 `move`／`drop` 同一个拒绝形状（`BLOCK_UNKNOWN`、页文件不动）。"""
+    before = three_blocks()
+    result = page_edit.delete_block(before, "b9", at=AT)
+
+    assert result["changed"] is False
+    assert result["page"] is before
+    unknown = [w for w in result["warnings"] if w["code"] == page_edit.BLOCK_UNKNOWN]
+    assert unknown and unknown[0]["level"] == "warning"
+
+
+def test_a_refused_delete_writes_nothing_at_all(api_for):
+    """拒绝就该**一个字节都不动**（D9）：同一次请求里前半条已经改好的修正也不许落盘。"""
+    from server.errors import ApiError
+
+    api = api_for([])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    pages.save_page(api.catalog, page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], question_no=1),
+        block("b2", [0.02, 0.24, 0.9, 0.2], card_id="p-20261004-aaaaaa"),
+    ]), page_id=PAGE_ID, apply=True)
+    page_file = api.catalog.pages_dir / f"{PAGE_ID}.json"
+    before = page_file.read_bytes()
+
+    with pytest.raises(ApiError) as excinfo:
+        page_edit.apply_edit(api.catalog, PAGE_ID, [
+            {"action": "question_no", "block_id": "b1", "question_no": 17},
+            {"action": "delete", "block_id": "b2"},
+        ], at=AT, apply=True)
+
+    assert excinfo.value.payload()["reason"] == page_edit.DELETE_BOUND_TO_CARD
+    assert page_file.read_bytes() == before
+
+
+# ---------------------------------------------------------------- 块列表的来源（#17 §4）
+
+
+def test_any_successful_human_edit_turns_the_block_list_into_a_manual_one():
+    """人一改块列表，这份列表的来源就是人（`manual`）——机器预设不再是它的来源。"""
+    result = page_edit.move_block(three_blocks(), "b1", [0.0, 0.0, 1.0, 0.3], at=AT)
+
+    assert result["page"]["segmentation"]["mode"] == page_edit.MODE_MANUAL
+    assert result["page"]["segmentation"]["at"] == AT.isoformat()
+
+
+def test_a_no_op_edit_does_not_claim_the_block_list_became_manual():
+    """没动的修正（重复提交幂等）不许动来源：它一个字节都没改。"""
+    before = three_blocks()
+    result = page_edit.move_block(before, "b1", [0.02, 0.02, 0.9, 0.2], at=AT)
+
+    assert result["changed"] is False
+    assert result["page"] is before
+    assert "segmentation" not in before
+
+
+def test_both_new_actions_also_mark_the_block_list_as_manual():
+    """`add` 与 `delete` 也算人给的列表（同一个来源口径，不许漏一条路）。"""
+    added = page_edit.add_block(three_blocks(), [0.02, 0.68, 0.9, 0.2], at=AT)
+    assert added["page"]["segmentation"]["mode"] == page_edit.MODE_MANUAL
+
+    deleted = page_edit.delete_block(page([block("b1", [0.02, 0.02, 0.9, 0.2])]),
+                                     "b1", at=AT)
+    assert deleted["page"]["segmentation"]["mode"] == page_edit.MODE_MANUAL
+
+
+def test_an_old_page_without_a_segmentation_key_reads_as_a_machine_preset():
+    """ADR 0008 时代的页文件**没有** `segmentation` 这个键：按 `model` 读，**不许崩**。
+
+    这就是「旧的页文件不许因为新字段变成脏数据」那条老规矩在新字段上的落点；人一动它，
+    这个键就地懒建出来，而不是把旧页判成坏页。
+    """
+    old = three_blocks()
+    assert "segmentation" not in old
+
+    assert page_edit.segmentation_of(old)["mode"] == page_edit.MODE_MODEL
+    assert page_edit.has_human_work(old) is False
+    assert page_edit.discarded_manual_work(old) == {
+        "manual_blocks": 0, "removed_blocks": 0, "mode_before": page_edit.MODE_MODEL}
+
+    edited = page_edit.set_question_no(old, "b1", 5, at=AT)["page"]
+    assert edited["segmentation"]["mode"] == page_edit.MODE_MANUAL
+
+
+def test_a_manual_list_or_a_trace_both_count_as_human_work():
+    """「有人工改动」= 块列表是人给的，**或者**删过块（留痕不空）——两条判据都要在。"""
+    manual = page([block("b1", [0.02, 0.02, 0.9, 0.2])],
+                  segmentation={"mode": "manual", "at": None, "note": None})
+    assert page_edit.has_human_work(manual) is True
+    assert page_edit.discarded_manual_work(manual) == {
+        "manual_blocks": 1, "removed_blocks": 0, "mode_before": "manual"}
+
+    trimmed = page([block("b1", [0.02, 0.02, 0.9, 0.2])],
+                   segmentation={"mode": "model", "at": None, "note": None},
+                   removed_blocks=[{"block_id": "b9", "bbox_norm": [0.5, 0.5, 0.1, 0.1],
+                                    "question_no": 9,
+                                    "removed_at": "2026-10-04T15:00:00+08:00"}])
+    assert page_edit.has_human_work(trimmed) is True
+    assert page_edit.discarded_manual_work(trimmed) == {
+        "manual_blocks": 0, "removed_blocks": 1, "mode_before": "model"}
+
+
+# ---------------------------------------------------------------- 重置为预设（#31）
+
+
+def test_resetting_to_the_preset_swaps_the_blocks_and_records_the_lost_ones():
+    """「重置为预设」：块列表换成新预设，没进新列表的旧块进 `removed_blocks[]` 留痕。
+
+    留痕的形状与 `delete` 那条路**一模一样**（同一本账、同一个形状）。回执报的是
+    **真的**丢了几块：409 那份粗估会说 2（`mode == "manual"` 时页上有几块就报几块），
+    而这里只丢掉了 1 块——多的那一块被新预设按位置配上了。
+    """
+    from server import segmentation
+
+    manual = page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], question_no=1),
+        block("b2", [0.02, 0.24, 0.9, 0.2], question_no=2),
+    ], segmentation={"mode": "manual", "at": "2026-10-04T15:00:00+08:00", "note": None})
+    report = segmentation.classify_resegment(manual, [
+        {"id": "b1", "bbox_norm": [0.02, 0.02, 0.9, 0.1], "question_no": 1}])
+
+    result = page_edit.reset_to_preset(manual, report, at=AT)
+
+    assert page_edit.discarded_manual_work(manual)["manual_blocks"] == 2   # 粗估
+    assert result["discarded"] == {"manual_blocks": 1, "removed_blocks": 1,
+                                   "mode_before": "manual"}
+    reset_page = result["page"]
+    assert [b["id"] for b in reset_page["blocks"]] == ["b1"]
+    assert reset_page["segmentation"]["mode"] == page_edit.MODE_MODEL
+    assert reset_page["segmentation"]["at"] == AT.isoformat()
+    entry = reset_page["removed_blocks"][0]
+    assert set(entry) == {"block_id", "bbox_norm", "question_no", "removed_at"}
+    assert entry["block_id"] == "b2" and entry["question_no"] == 2
+
+
+def test_a_vanishing_block_that_carries_a_card_never_enters_the_trace():
+    """**硬规矩**：留痕里永远不许出现带 `card_id` 的块。
+
+    带卡的旧块在新预设里找不到位置 → 它确实从页上消失了，但**进不了 `removed_blocks[]`**
+    （那正是「删块那道闸破了」的直接证据）；它由 `block_removed_with_card` 另外喊。
+    """
+    from server import segmentation
+
+    manual = page([block("b1", [0.6, 0.6, 0.3, 0.2], card_id="p-20261004-aaaaaa")],
+                  segmentation={"mode": "manual", "at": None, "note": None})
+    report = segmentation.classify_resegment(manual, [
+        {"id": "b1", "bbox_norm": [0.02, 0.02, 0.3, 0.2], "question_no": 1}])
+
+    result = page_edit.reset_to_preset(manual, report, at=AT)
+
+    assert result["page"]["removed_blocks"] == []
+    assert result["discarded"]["manual_blocks"] == 0
+    assert "block_removed_with_card" in [w["code"] for w in report["warnings"]]
+
+
+def test_the_report_counts_only_the_explicit_adds_and_deletes(api_for):
+    """回执里的 `blocks_removed`／`blocks_added` **只数 `add` / `delete` 两条显式的增删**。
+
+    `merge`（两块并一块）与 `split`（一块拆几块）也会改块数，但那两样的结果在 `edits[]`
+    与块列表里报——混进这两个数会让「这一块是谁删的」重新变模糊（契约 §10.2.1b 第 3 条）。
+    **0 也报**，两个数也是对称的。
+    """
+    api = api_for([])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
+
+    moved = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                 [{"action": "move", "block_id": "b1",
+                                   "bbox_norm": [0.01, 0.01, 0.9, 0.2]}], at=AT)
+    assert moved["blocks_removed"] == 0 and moved["blocks_added"] == 0
+
+    merged = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                  [{"action": "merge", "block_ids": ["b1", "b2"]}], at=AT)
+    assert merged["blocks_removed"] == 0, "合并改块数，但不是在删块"
+
+    split = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                 [{"action": "split", "block_id": "b1",
+                                   "boxes": [[0.02, 0.02, 0.9, 0.09],
+                                             [0.02, 0.13, 0.9, 0.09]]}], at=AT)
+    assert split["blocks_removed"] == 0 and split["blocks_added"] == 0, "拆分也不算增删"
+
+    added = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                 [{"action": "add", "bbox_norm": [0.02, 0.68, 0.9, 0.2]}],
+                                 at=AT)
+    assert added["blocks_added"] == 1 and added["blocks_removed"] == 0
+
+    deleted = page_edit.apply_edit(api.catalog, PAGE_ID,
+                                   [{"action": "delete", "block_id": "b1s2"}], at=AT)
+    assert deleted["blocks_removed"] == 1 and deleted["blocks_added"] == 0
+
+
 # ---------------------------------------------------------------- 一份页的修正报告
 
 

@@ -34,7 +34,8 @@ const config = {
     navbar: {
       title: '错题本',
       items: [
-        {to: '/', label: '清单', position: 'left'},
+        // 首页是**跨科目总览**（#17 §0）：错题住在侧栏的「科目 → 细则」里，不在导航栏
+        {to: '/', label: '总览', position: 'left'},
       ],
     },
     footer: {

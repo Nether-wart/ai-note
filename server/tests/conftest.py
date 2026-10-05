@@ -70,6 +70,9 @@ def make_card(pid: str = "p-20200101-aaaaaa", **overrides) -> dict:
     card = {
         "id": pid,
         "created_at": LONG_AGO,
+        # 科目是导航的根，也是卡上的一等字段。夹具默认给一个**在词表里**的科目，
+        # 这样"一张干净的卡"仍然是干净的；要造未归类就显式 `**{"subject": None}`。
+        "subject": "数学",
         "source": {
             "page_image": f"data/pages/{pid[2:8]}.png",
             "bbox_norm": [0.0, 0.0, 1.0, 1.0],
@@ -124,11 +127,25 @@ def make_card(pid: str = "p-20200101-aaaaaa", **overrides) -> dict:
     return card
 
 
-def make_data_dir(tmp_path: Path, cards: list[dict], *, images: dict[str, bytes] | None = None) -> Path:
-    """在工作区里造一个最小数据目录：problems/ + assets/。"""
+def make_data_dir(tmp_path: Path, cards: list[dict], *, images: dict[str, bytes] | None = None,
+                  vocab: bool = True) -> Path:
+    """在工作区里造一个最小数据目录：problems/ + assets/（+ vocab/）。
+
+    `vocab=False` 用来造「数据目录里根本没有词表」那一档——那是要**喊出来**的一种状态
+    （`subjects_vocab_missing`），不是崩溃，但也不能装作科目表是空的。
+    """
     root = tmp_path / "data"
     (root / "problems").mkdir(parents=True, exist_ok=True)
     (root / "assets").mkdir(parents=True, exist_ok=True)
+    if vocab:
+        (root / "vocab").mkdir(parents=True, exist_ok=True)
+        (root / "vocab" / "subjects.json").write_text(
+            json.dumps({"科目": ["数学", "物理"]}, ensure_ascii=False), encoding="utf-8"
+        )
+        (root / "vocab" / "topic-outline.seed.json").write_text(
+            json.dumps({"大纲": {"数学": {"函数与导数": {"极值与最值": []}}}},
+                       ensure_ascii=False), encoding="utf-8"
+        )
     for card in cards:
         (root / "problems" / f"{card['id']}.json").write_text(
             json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -172,13 +189,20 @@ def get_json(api, target: str):
     return response.status, json.loads(response.body)
 
 
-def multipart_body(files, *, field: str = "file", boundary: str = "----AiNoteTestBoundary"):
+def multipart_body(files, *, field: str = "file", fields=None,
+                   boundary: str = "----AiNoteTestBoundary"):
     """自造一个 multipart/form-data body（形状与浏览器 FormData 一致）。
 
-    `files` 是 `[(文件名, 字节)]` 或 `[(文件名, 字节, 声明的 Content-Type)]`。
+    `files` 是 `[(文件名, 字节)]` 或 `[(文件名, 字节, 声明的 Content-Type)]`；
+    `fields` 是**文本**字段 `[(名, 值)]`——浏览器 `FormData.append("subject", "数学")`
+    发出来的就是这一种：有 `name`、**没有** `filename`，服务按「纯文本段」认它。
     返回 `(body, content_type)`——上传测试不许碰真照片，一律自己造字节。
     """
     out = bytearray()
+    for name, value in (fields or []):
+        out += f"--{boundary}\r\n".encode()
+        out += f'Content-Disposition: form-data; name="{name}"\r\n'.encode()
+        out += b"\r\n" + str(value).encode("utf-8") + b"\r\n"
     for item in files:
         name, blob = item[0], item[1]
         declared = item[2] if len(item) > 2 else "image/png"

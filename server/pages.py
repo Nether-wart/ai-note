@@ -186,6 +186,10 @@ def save_page(catalog, page: dict, *, page_id: str, apply: bool = True) -> Path:
 
 def _new_page(page_id: str, card: dict) -> dict:
     """一个页文件的骨架。整页照片只存**文件名**：页文件与它同目录并列（D5）。"""
+    # import 放在函数里：`subjects.py` 模块级要 `from .warnings import _warn`，
+    # 而 `warnings.py` 模块级要 import 本模块——两头都在模块级就成了环。
+    from . import subjects
+
     source = card.get("source") or {}
     return {
         "version": PAGE_VERSION,
@@ -197,6 +201,12 @@ def _new_page(page_id: str, card: dict) -> dict:
             "sheet": None,          # 哪张卷子：由录入的人填（#13），存量数据没有
             "page_number": None,    # 第几页：同上
         },
+        # 回填出来的页**继承**那张卡的科目：人是当初录入时指定的，不该在回填里丢掉
+        # （丢了它就掉进「未归类」，看起来像一次归类退步）。
+        "subject": subjects.card_subject(card),
+        # 这一份块列表是从存量卡反推的，不是这次机器切的：`note` 把它说清楚。
+        "segmentation": {"mode": "model", "at": card.get("created_at"),
+                         "note": "回填自存量题卡（不是这一次切的）"},
         "blocks": [],
     }
 

@@ -212,10 +212,20 @@ for (const scenario of QUEUE_CASES) {
   record('不变量 4 · 快照真的拍到了东西（空快照比出来的"没变"不算数）',
     Object.keys(before.files).length > 10, `${Object.keys(before.files).length} 个文件`);
 
-  // 反过来：判据对"生成了派生索引"这种真事必须响（原型的靶子）
-  const created = {files: {...after.files, 'data/index.json': {size: 1, mtime_ns: 1}}};
+  // 反过来：判据对"生成了派生索引"这种真事必须响（原型的靶子）。
+  //
+  // 夹具**自己先钉住前提**：`data/index.json` 是 proto 遗留物，契约 §11 定它「在磁盘上
+  // 保持原样——它是私人数据、也是历史证据」，所以它**可能就在**这张快照里。若直接往
+  // `after.files` 上加这个键，而那个键已经存在，夹具就退化成"改了一个已有文件"，
+  // 报警能力被静默缴械（2026-10-05 真发生过：判据报出来的是 selftest_modified_file）。
+  // 所以先从快照里**明确摘掉**它，再加回去——这样"新出现"才是真的。
+  const alarmBefore = {...after.files};
+  delete alarmBefore['data/index.json'];
+  record('报警能力 · 前提：这个路径在「之前」那张快照里确实不在（否则夹具会被缴械）',
+    !('data/index.json' in alarmBefore));
+  const created = {files: {...alarmBefore, 'data/index.json': {size: 1, mtime_ns: 1}}};
   expectAlarm('报警能力 · 自检生成了 data/index.json → 判据必须响',
-    checkNoSideEffects({before: after, after: created}), ['selftest_created_file']);
+    checkNoSideEffects({before: {files: alarmBefore}, after: created}), ['selftest_created_file']);
 }
 
 // ------------------------------------------------------------------ 报告

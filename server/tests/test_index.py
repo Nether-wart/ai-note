@@ -7,6 +7,43 @@ import json
 from server import pages
 
 
+def test_the_index_carries_each_subjects_brief_readout(tmp_path):
+    """`data.briefs`（契约 §3）：一眼看出「有没有简报、过没过期、有几道新题没进去」。
+
+    放在索引里是为了让侧栏**一次请求**就能写出「简报已过期：有 N 道新题没进去」——
+    那句话涉及「哪些题是在 `covers_until` 之后录进来的」，那是服务的事实，界面不许自己算。
+    """
+    from conftest import make_card, make_data_dir
+    from server import brief
+    from server.catalog import Catalog
+
+    root = make_data_dir(tmp_path, [make_card("p-20200101-aaaaaa")])
+    catalog = Catalog(root)
+
+    # 还没有简报：那不是错误，是一栏空读数（侧栏照样问得出「有没有」）
+    data, _, _ = catalog.index()
+    assert data["briefs"]["数学"] == {
+        "latest_date": None, "generated_at": None, "stale": False, "new_problems": 0}
+    # 词表里那个一道题都没有的科目也要有一栏
+    assert data["briefs"]["物理"]["latest_date"] is None
+
+    # 写一份截止在很久以前的简报：那张卡比它新 → 过期，1 道新题
+    brief.save_brief(catalog, {
+        "subject": "数学", "generated_at": "2019-01-02T00:00:00+00:00",
+        "window_days": 7, "window_from": "2018-12-27", "window_until": "2019-01-02",
+        "covers_until": "2019-01-02T00:00:00+00:00",
+        "provider": "deepseek", "model": "deepseek-flash", "text": "（夹具）",
+        "window_facts": [], "history_facts": [],
+    })
+
+    data, _, _ = catalog.index()
+    math = data["briefs"]["数学"]
+    assert math["latest_date"] == "2019-01-02"
+    assert math["generated_at"] == "2019-01-02T00:00:00+00:00"
+    # `stale` 的判据只有一处（`brief.stale`），索引只负责**取**——所以这里断的是它的读数
+    assert math["stale"] is True and math["new_problems"] == 1
+
+
 def get_json(api, target: str):
     r = api.handle("GET", target)
     return r.status, json.loads(r.body)
@@ -105,6 +142,15 @@ def test_images_auto_judge_and_stats(api_for):
         "graduated": 0,
         "auto_judge_eligible": 1,
         "auto_judge_ineligible": 0,
+        # 按科目汇总（#17）。不变式：sum(by_subject[*].problems) + unclassified == problems。
+        # 词表里的科目哪怕 0 道也要在树上——侧栏要能画出空科目，不然人会以为它丢了。
+        "by_subject": {
+            "数学": {"problems": 1, "in_default_list": 1, "cooling": 0, "graduated": 0,
+                     "auto_judge_eligible": 1, "unreviewed": 0},
+            "物理": {"problems": 0, "in_default_list": 0, "cooling": 0, "graduated": 0,
+                     "auto_judge_eligible": 0, "unreviewed": 0},
+        },
+        "unclassified": 0,
     }
     assert body["warnings"] == []
 

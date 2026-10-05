@@ -44,8 +44,18 @@ class ApiError(Exception):
         return out
 
 
-def bad_request(message: str, *, hint: str | None = None, **details) -> ApiError:
-    return ApiError(400, "bad_request", message, hint=hint, details=details)
+def bad_request(message: str, *, hint: str | None = None, reason: str | None = None,
+                **details) -> ApiError:
+    """**400 的唯一构造入口**。
+
+    `reason` 是机器可读的**细因**：契约 §9 里这一类错误的 `code` 恒为 `bad_request`，
+    而 `reason` 指出到底是哪一条规矩被破了（`subject_unknown`、
+    `block_delete_bound_to_card`……）。不给就与 `code` 相同（没细分的那些）。
+
+    这个参数存在的理由是**一处实现**：没有它，各模块只能直接 `ApiError(400, ...)`
+    自己拼——同一个形状很快就有了两种写法（R2/R9 记过的那类事）。
+    """
+    return ApiError(400, "bad_request", message, reason=reason, hint=hint, details=details)
 
 
 def body_too_large(size: int, *, limit: int) -> ApiError:
@@ -203,16 +213,78 @@ def page_image_unsafe(*, page_id: str, image) -> ApiError:
     )
 
 
-def filesystem_error(exc: OSError) -> ApiError:
-    """盘上的失败（文件不在／无权限／盘满）→ **500**，`message` 带异常类名。
+def filesystem_error(exc: Exception, *, hint: str | None = None) -> ApiError:
+    """盘上的失败（文件不在／无权限／盘满／内容读不出来）→ **500**，`message` 带异常类名。
 
     D1：CLI 也不许裸回溯。写盘是「先写临时文件再原子替换」，所以失败不会留下半个文件。
+    `hint` 可覆盖（先例 `model_unavailable`）：简报那条路上读不了的是一份**简报**，
+    默认那句「页文件没有写到一半」在那边是错的——不许说反话。
     """
     return ApiError(
         500,
         "internal_error",
         f"盘上操作失败：{exc.__class__.__name__}: {exc}",
         reason="filesystem_error",
-        hint="这是盘上的问题（路径不存在、无权限、盘满），不是收入决策本身；"
-             "页文件没有写到一半（先写临时文件再原子替换）",
+        hint=hint or ("这是盘上的问题（路径不存在、无权限、盘满），不是收入决策本身；"
+                      "页文件没有写到一半（先写临时文件再原子替换）"),
+    )
+
+
+# ---------------------------------------------------------------- 简报（#17 §10.5）
+
+
+def brief_missing(subject: str, *, at: str | None = None,
+                  available: list | None = None) -> ApiError:
+    """「这个科目还没有简报」→ **404 `brief_missing`**：那是「还没有」，不是「读不到」。
+
+    两者处置不同：**文件在盘上但读不出来**是 500（`brief._read_brief`），缺席才是这一条。
+    `details.subject` 让界面说得出是哪个科目；`details.available` 把这天之外**实际有哪几天**
+    列出来（ADR 0007 第 6 条：不许静默）。`?at=` 只按文件名里的日期**逐字**匹配——
+    绝不落到「最接近的一天」。
+    """
+    where = f"（{at}）" if at else ""
+    return ApiError(
+        404,
+        "not_found",
+        f"这个科目还没有简报{where}：{subject}",
+        reason="brief_missing",
+        hint="POST /api/brief/<科目> 生成一份；生成要花一次模型调用",
+        details={"subject": subject, "at": at, "available": available or []},
+    )
+
+
+def brief_unverifiable(subject: str, facts: list, *, note: str | None = None) -> ApiError:
+    """简报的数字闸门没过 → **502 `brief_unverifiable`**，且这一次**一个字节都不落盘**。
+
+    `facts` 逐条列出对不上的：`{label, path, claimed, actual, reason}`。比契约 §10.5 那四个键
+    多一个 `reason`，因为 `actual: null` 同时覆盖「`path` 解不出来」与「解出来正好是 `null`」
+    两种情形，不加 `reason` 这两档分不开。
+
+    **它与「模型没问成」（`model_unavailable`）处置完全不同**——这一条最要紧：
+
+      · `model_unavailable`：调用没成（网络／超时／缺密钥／上游 5xx），**可以直接重试**，
+        下一次可能就通了；
+      · `brief_unverifiable`：模型**答了话**，只是正文里的数字在索引里找不回来。
+        同一份提示词、同一个模型，**再问一次不会让编出来的数字变真**——重试无用，
+        要么改提示词，要么换模型（换模型就要重跑简报角色的验收）。
+
+    把两者混成一句「可以重试」会把人引去重试一个不会变好的东西。所以 `hint` 会把这句
+    明说出来，而 `details.facts` 指出到底哪一条对不上（解不出来，还是值不相等）。
+    """
+    if facts:
+        message = f"{subject}的这份简报有 {len(facts)} 条数字对不上本次索引，没有落盘"
+    else:
+        message = f"{subject}的这份简报没有可核对的数字，没有落盘"
+    details: dict = {"subject": subject, "facts": facts}
+    if note:
+        details["note"] = note
+    return ApiError(
+        502,
+        "brief_unverifiable",
+        message,
+        reason="brief_unverifiable",
+        hint="重试无用：模型答了话，只是数字编了，同一份提示词再问一次不会变真。"
+             "先看 details.facts 里哪一条对不上（path 解不出来，还是值不相等 / 种类不对），"
+             "再改提示词或换模型（换模型要重跑简报角色的验收）",
+        details=details,
     )

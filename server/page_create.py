@@ -41,7 +41,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import coords, errors, inbox, ink, intake, pages, segmentation
+from . import coords, errors, inbox, ink, intake, pages, segmentation, subjects
 from .model_client import ModelUnavailable
 from .warnings import _warn
 
@@ -121,6 +121,8 @@ def _existing_row(catalog, page_id: str, page: dict, warning: dict) -> tuple[dic
         "page_id": page_id,
         "page_path": str(pages.page_path(catalog, page_id)),
         "image": page.get("image"),
+        # 已经建过的那一页也要回显科目（同上：回执不回声，界面就只能靠再打一次索引去猜）
+        "subject": page.get("subject"),
         "created": False,
         "existing": True,
         "segmentation": "skipped_existing",
@@ -129,7 +131,82 @@ def _existing_row(catalog, page_id: str, page: dict, warning: dict) -> tuple[dic
     }, [warning]
 
 
-def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dict, list[dict]]:
+def _field_text(parts: list[dict], name: str) -> str | None:
+    """multipart 里的一个**文本**字段（没有文件名的那种）。空串算没给。"""
+    for part in parts:
+        if part.get("field") != name:
+            continue
+        raw = part.get("blob") or b""
+        try:
+            text = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            text = ""
+        return text or None
+    return None
+
+
+def _check_subject(catalog, subject: str | None) -> tuple[str | None, list[dict]]:
+    """科目由人在**录入时**指定（`CONTEXT.md`），取值必须来自受控词表。
+
+    三条规矩，按代价排：
+
+    1. **没给** → `None`，也就是未归类。那是一等状态，不是错误。
+    2. **词表在** → 取值必须在里面，否则 **400 带可选值**。受控词表那条纪律是
+       「AI 不得自造标签，找不到只能提名」；而人随时可以改词表，让一个表外的科目
+       在侧栏里长出一根孤立分支，比当场拒掉更难收拾。
+    3. **词表不在**（没建／读不了／空的）→ **收下这个科目**，但把那条词表级警告
+       一并带回去。**不许因为词表不在就把录入整个挡住**：录入摩擦是这类工具的头号死因
+       （ADR 0006 第 5 条），而人报的科目本身是权威读数——只是这一次没人能替它校验。
+       代价是词表缺席期间可能积下拼错的科目；那正是索引级 `subjects_vocab_missing`
+       要喊的事，也是词表补上之后 `subject_unknown` 会逐张指出来的事。
+    """
+    if not subject:
+        return None, []
+    vocabulary, vocab_warnings = subjects.load(catalog)
+    if not vocabulary.get("loaded"):
+        return subject, vocab_warnings
+    known = list(vocabulary["subjects"])
+    if subject not in known:
+        raise errors.bad_request(
+            f"科目 {subject!r} 不在受控词表里",
+            hint="先把它加进 <数据目录>/vocab/subjects.json，或改成表里的一个；"
+                 "不给这个字段也行——那就是「未归类」",
+            param="subject", value=subject, allowed=known,
+        )
+    return subject, []
+
+
+def _save_page_without_blocks(catalog, *, page_id, stored_as, part, subject, stamp, blob, note):
+    """切分没跑成 / 不可用时的页：**照片落盘、页文件照建、`blocks = null`**。
+
+    为什么这也建页（#23/#25）：切分不可用时最该发生的事是**让人在照片上自己画框**
+    ——机器切分只是**预设**，不是唯一来源。页文件不建、照片不落盘，人就没有东西可画；
+    那条「`null` 不是 `[]`」的纪律于是从「防误读」变成了「挡住唯一的出路」。
+
+    三态不动，另加一个**来源**：`null` 继续表示「不知道」，`[]` 继续表示「确实没有题」，
+    `segmentation.mode` 说这份块列表是谁给的。
+    """
+    page = {
+        "version": pages.PAGE_VERSION,
+        "id": page_id,
+        "image": stored_as,
+        "created_at": stamp,
+        "origin": {
+            "original_file": inbox._display_name(part.get("name")),
+            "sheet": None,          # 哪张卷子：由录入的人填
+            "page_number": None,    # 第几页：同上
+        },
+        "subject": subject,
+        "segmentation": {"mode": "unavailable", "at": stamp, "note": note},
+        "blocks": None,
+    }
+    _write_photo(catalog, stored_as, blob)
+    pages.save_page(catalog, page, page_id=page_id, apply=True)
+    return page
+
+
+def _create_one(catalog, part: dict, segmenter, moment, stamp: str,
+                subject: str | None = None) -> tuple[dict, list[dict]]:
     """一张照片 → 一页。返回 `(报告行, 警告)`。"""
     blob = part["blob"]
     page_id = page_id_for(blob)
@@ -141,6 +218,7 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
         # 页文件在却读不了 = 真矛盾：**不覆盖**、也不动照片（同回填那条纪律：先留证据）。
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
+            "subject": subject,
             "created": False, "existing": True, "segmentation": "unreadable_page_file",
             "blocks": None, "message": read_error,
         }, [_page_warn(
@@ -153,11 +231,18 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
             f"没有重复建，也没有重跑切分", "hint"))
 
     if segmenter is None:
+        # 切分不可用**也要建页**（#23、契约 §10.2.1）。理由写在 `_save_page_without_blocks`。
+        _save_page_without_blocks(
+            catalog, page_id=page_id, stored_as=stored_as, part=part, subject=subject,
+            stamp=stamp, blob=blob,
+            note="切分不可用：块列表是 null（不是「这一页没有题」），等人手动画框")
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
-            "created": False, "existing": False, "segmentation": "unavailable",
+            "subject": subject,
+            "created": True, "existing": False, "segmentation": "unavailable",
             "blocks": None,
-            "message": "切分不可用 → 没有建页文件、没有块列表（不是「这一页没有题」）",
+            "message": "切分不可用 → 页建好了、块列表是 null；请在这张照片上手动画框"
+                       "（不是「这一页没有题」）",
         }, []
 
     # 到这里才开始碰盘，而且碰的是**系统临时目录**：模型失败时数据目录一个字节都不留。
@@ -187,9 +272,15 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
     warnings.extend(parsed.get("warnings") or [])
     if not parsed.get("parsed", True):
         # 答了话却抠不出块：这是「切分没跑成」，**不是**「这一页没有题」。
+        # 但页**照建**（#23/#25）：模型切坏时人的出路正是自己画框，而画框要有照片和页。
+        _save_page_without_blocks(
+            catalog, page_id=page_id, stored_as=stored_as, part=part, subject=subject,
+            stamp=stamp, blob=blob,
+            note=f"切分跑了但抠不出块（{parsed.get('message')}）：块列表是 null，等人手动画框")
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
-            "created": False, "existing": False, "segmentation": "unparsed",
+            "subject": subject,
+            "created": True, "existing": False, "segmentation": "unparsed",
             "blocks": None, "message": parsed.get("message"),
         }, warnings
 
@@ -204,6 +295,11 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
             "sheet": None,          # 哪张卷子：由录入的人填（#13 的收件目录那条路也没有）
             "page_number": None,    # 第几页：同上
         },
+        "subject": subject,
+        # 这一份块列表的来源：机器切出来的**预设**（#25）。
+        # 人在上面增删改之后 `mode` 会变 `manual`（`page_edit` 负责），
+        # 重跑切分（`resegment`，语义是「重置为预设」）会把它变回 `model`。
+        "segmentation": {"mode": "model", "at": stamp, "note": None},
         "blocks": blocks,
     }
     reports = ink.page_block_reports(image, page) if image is not None else []
@@ -222,6 +318,9 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
         "page_id": page_id,
         "page_path": str(path),
         "image": stored_as,
+        # 回显科目：界面提交了科目就得在回执里看见它被收下了，否则「我填的科目到底进没进去」
+        # 只能靠再打一次索引去猜。没给就是 `null`（**未归类**，不是缺字段）。
+        "subject": subject,
         "created": True,
         "existing": False,
         "segmentation": "ran",
@@ -245,17 +344,22 @@ def create_pages(catalog, *, body, content_type, segmenter, at=None) -> tuple[di
     # 会在 `parse_multipart` 的字节拼接上抛 TypeError → 兜底 500，而 D1 要的是 400。
     if isinstance(body, str):
         body = body.encode("utf-8")
-    files = inbox.upload_files(inbox.parse_multipart(body, content_type))
+    parts = inbox.parse_multipart(body, content_type)
+    files = inbox.upload_files(parts)
+    # 科目在**录入时**由人指定（`CONTEXT.md`）：取值必须在受控词表里，不在就 400；
+    # 词表本身不在时收下并带警告（理由见 `_check_subject`）。
+    # 这一条判在**碰盘之前**——拒绝路径一个字节都不动（D9）。
+    subject, subject_warnings = _check_subject(catalog, _field_text(parts, "subject"))
     moment = at or datetime.now()
     stamp = _iso(moment)
     status = inbox.segmentation_status(segmenter)
 
     rows: list[dict] = []
-    warnings: list[dict] = []
+    warnings: list[dict] = list(subject_warnings)
     created: list[str] = []
     existing: list[str] = []
     for part in files:
-        row, more = _create_one(catalog, part, segmenter, moment, stamp)
+        row, more = _create_one(catalog, part, segmenter, moment, stamp, subject)
         rows.append(row)
         warnings.extend(more)
         if row.get("page_id"):

@@ -121,6 +121,9 @@ def _new_card(page: dict, block: dict, pid: str, at: str) -> dict:
     return {
         "id": pid,
         "created_at": at,
+        # 科目从**页**上带下来：录入时人已经指定过一次，入库时再问一遍是让同一件事
+        # 有两个答案。页上没有（老页文件／没给）→ `None` = 未归类，一等状态，不猜。
+        "subject": page.get("subject"),
         "source": {
             "page_image": _card_page_image(page),
             "bbox_norm": block.get("bbox_norm"),

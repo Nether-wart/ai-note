@@ -29,6 +29,34 @@ curl -s -X POST http://127.0.0.1:8765/api/attempt/p-20261004-41c86b \
      | python3 -m json.tool
 ```
 
+**切分角色是默认接上的**（#17 §8）：`main()` 起服务时会按配置构造一个真的
+`HttpSegmenter` 注入进去。注意这条接线**故意不放在 `build_server` 里**——
+`segmenter=None` 在本项目里有一个确切含义：**切分不可用**（那时页照建、`blocks` 是
+`null`、人在照片上自己画框，见契约 §10.2.1）。测试要造的就是那一档，所以「不注入」
+必须继续等于「不可用」。于是：**库的默认是「不可用」，产品（`python3 -m server.app`）
+的默认是「可用」。**
+
+连带的一件事：切分接缝上的**模型调用失败是 502**（契约 §10.3 与「最终修复 pass」那笔账），
+所以**没有配密钥时 `POST /api/page` 会 502，而不是退回手动画框**。想走手动画框那条路，
+要么配密钥，要么显式用不注入 segmenter 的库接口起服务（`build_server(..., segmenter=None)`）。
+`get /api/index` 与手机上传页不受影响。
+
+**存量题卡补科目**（#17 §10.4）：科目是导航的根，而旧卡没有这个字段。只认人给的映射表：
+
+```bash
+python3 -m server.subject_assign --data data --map 科目表.json           # 预演，一个字节都不写
+python3 -m server.subject_assign --data data --map 科目表.json --apply   # 真写
+# 映射表：{"p-20261004-41c86b": "数学"}；表里有一条不在 vocab/subjects.json 里就**一票否决**
+```
+
+**模型上岗验收**（`CONTEXT.md`「验收」：换模型就要重跑，不过考不许上岗）：
+
+```bash
+python3 -m pytest server/tests/test_acceptance_models.py -v
+# 三关：视觉探针（合成图，不需要私人内容）／真实照片上的人眼判定（本机 data/pages/*.png）／
+#       三条确定性对账判据。**没配密钥时是 skip 而不是 pass**——「没跑」不许看起来像「通过了」。
+```
+
 **手机上录入**（局域网，ADR 0007 第 4 条）：绑通配地址，并把**手机能打开的地址**显式给它——
 不给的话启动日志与索引里都会警告手机打不开（#13 验收 2）：
 
@@ -89,12 +117,17 @@ python3 -m pytest server/tests -q
 | `amend.py` | 定点修正（#6）：按 `attempt_at` 定位**那一次**既有重做（0 个 → 404、≥2 个 → 409，绝不猜），只改 `verdict`／`error_causes`，审计字段只有它能写。掌握**按 payload 是否改判据分流**（裁决 D10）：改判 → `recompute_mastery` 重放重算；只改错因 → 一个字都不重算，卡上 `mastery` 与 `attempts[i].note` 逐字保留 |
 | `config.py` | 装载处配置：provider 白名单、阈值校验一次（坏配置起不来）、`.env.local` 读取 |
 | `judge_client.py` | 判定角色的调用接缝：纯文本提示词（不发图）、HTTP transport 可注入、留档 `runs/`、失败抛 `ModelUnavailable` |
+| `segmenter_client.py` | **切分角色的调用接缝**（#17 §8）：整页照片 → 模型**原文**（**不解析**——解析归 `segmentation.parse_candidate_blocks` 一处）。提示词不在这里重写（`segmentation.SEGMENT_SYSTEM` 与解析它的代码必须一起改）。留档 tag `segment`。**前置一关是视觉探针**：纯文本模型收到图片不会报错，它会忽略图片、照着提示词**凭空编块**。一处已知的审计缺口记在它的 docstring 里：页文件的 `segmentation` 没有 provider/model/run_id，「这一页是哪个模型切的」目前只在留档里查得到 |
+| `brief.py` | **简报的生成与数字闸门的唯一实现**（#17 §10.5）：汇总读数 → 问 `brief` 角色 → 把正文用到的**每一个数字**落成 `window_facts`／`history_facts`（`path` 指向本次索引）→ **逐条解出来核对**。任何一条解不出或对不上 → **不落盘** + 502 `brief_unverifiable`。闸门是纯函数（`verify_facts`），脱网可测。它与 `model_unavailable` 是两个码：一个重试无用、一个可以重试 |
+| `brief_client.py` | `brief` 角色的调用接缝：**纯文本**（只看索引，一张图都不发），形状同 `judge_client`／`intake_client`；留档 tag `brief` |
 | `attempt.py` | 写端点：客户端不碰判定、调用 autojudge/judge/mastery、原子回写题卡、索引重建 |
 | `assets.py` | 题卡里的图片路径 → 磁盘文件 → 服务 URL。**一处实现**，顺带挡住路径穿越 |
 | `ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（#11）：`COLORED_SATURATION_MIN`（像素级：一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级：一个框里几个像素才算有红笔）是**两颗**回答不同问题的常量，筛选/体检/擦除三条路径都读它们；深色掩膜的两颗也在这里。只回答「有没有红笔、多少」，**不做语义判断**（勾还是订正归 #12 的模型）。PNG 读写也在这里，用**标准库**（`zlib`），不引入 PIL/numpy |
 | `warnings.py` | 会喊的检查（ADR 0007 第 6 条）：逐卡自检 + 索引级检查（串题、id 不一致） |
 | `records.py` | **Problem 记录的唯一构造函数**：列表与详情由它产出，详情是它的超集 |
 | `catalog.py` | 一个数据目录的访问：索引、一题、数据目录形状、对外地址拼法（`public_url`） |
+| `subjects.py` | **科目与考点大纲的唯一读取实现**（#17）：`<数据目录>/vocab/subjects.json` 是「有哪些科目」的唯一来源，大纲是 `科目 → 章 → 节 → 点`；卡上 `subject` 的判据（未归类 = `hint`，表外 = `warning`，且**只在词表真读出来时**才报）与按科目汇总（`stats.by_subject`／`unclassified`，那条「一道题都不许少」的不变式就落在这里）都在这一处。按 **mtime** 记忆：文件一动就重读，不重启服务、也不用旧值 |
+| `subject_assign.py` | 存量题卡 → 科目的**显式**迁移命令（`python3 -m server.subject_assign --map 表.json [--apply]`，默认预演）。只认人给的映射表，**不按考点去推**；映射表里有一条不在词表里就**一票否决**，`--apply` 一个字节都不写 |
 | `pages.py` | **页的唯一实现**（B1 / #9）：页文件读写、`page_binding`（旧卡缺绑定 = 提示 vs 页↔卡对不上账 = 警告）、`rebind`（重切按位置重合保留绑定，**匹配只有这一处**）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id） |
 | `segmentation.py` | **切分与对账**（B2 / #10）：模型候选块的解析与校验（拒块逐条给理由）、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。纯逻辑：不联网、不画图、不写题卡。警告一律是契约 §2 的 `Warning`（`{code, message, id, level}`，构造走 `warnings._warn` 那一处）；页级对账码表见契约 §8 |
 | `publicbase.py` | **对外可达地址的唯一实现**：显式优先、否则按绑定之后的 `host:port` 推导；推出来的地址打不开就喊（ADR 0007 第 5 条） |

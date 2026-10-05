@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -233,28 +234,62 @@ def test_the_self_check_has_no_side_effects():
     顺带钉住原型的那件具体的事：它跑完会多出一个 `data/index.json`。
     """
     before = snapshot(".")
+    # `data/index.json` 是 proto 遗留物，契约 §11 定它「在磁盘上保持原样——它是私人数据、
+    # 也是历史证据」（`data/README.md`、`server/README.md`、根 `README.md` 四处一致）。
+    # **所以这里不许断言它不存在**：盘上有它是设计，把证据判成故障会把人引去删掉证据。
+    # 这条测试要钉的是「自检没**创建**它」——那一半由下面那张快照比对负责；
+    # 这里负责"连改都没改"，也就是 `docs/walkthrough.md` 拿它当探针的那条用法。
+    leftover = ROOT / "data" / "index.json"
+    leftover_before = hashlib.md5(leftover.read_bytes()).hexdigest() if leftover.exists() else None
     done = run_node([SELFTEST])
     after = snapshot(".")
     assert done.returncode == 0, done.stdout + done.stderr
 
     violations = probe("checkNoSideEffects", {"before": before, "after": after})
     assert violations == [], f"自检动了东西：{violations}"
-    assert not (ROOT / "data" / "index.json").exists(), "自检生成了派生索引——原型就是这个病"
+    if leftover_before is None:
+        assert not leftover.exists(), "自检生成了派生索引——原型就是这个病"
+    else:
+        assert hashlib.md5(leftover.read_bytes()).hexdigest() == leftover_before, (
+            "自检改动了 proto 遗留物 data/index.json（契约 §11 要求它原地保留）"
+        )
     # 快照真的拍到了东西（空快照比出来的"没变"不算数）
     assert len(before["files"]) > 10
 
 
 @needs_render
-def test_the_self_check_needs_no_private_data_directory():
+def test_the_self_check_needs_no_private_data_directory(tmp_path):
     """它**不读** `data/`——所以 worktree 里天然跑得起来。
 
     原型相反：没有 `data/vocab` 时直接 `FileNotFoundError`（报的是环境缺文件，
     真因与界面无关）。所以这条断言不是闲聊：它钉住"自检不依赖私人数据"这条性质。
+
+    **怎么钉**：不断言仓库里恰好没有私人数据——`data/` 本来就是本仓库的**测试语料**
+    （`data/README.md` 第一句，ADR 0008 定死），那样断言等于拿设计判故障，
+    这条测试会随工作区里有没有语料时红时绿。改为**把数据目录指到一个空目录再跑一趟，
+    要求两趟结论一致**：自检哪天开始读 `data/`，两趟就会分叉。
     """
-    assert not (ROOT / "data" / "problems").exists() or not list((ROOT / "data" / "problems").glob("*.json"))
-    done = run_node([SELFTEST])
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "真实数据（`data/` 一眼都没看：夹具是手写的）" in done.stdout
+    def verdict(stdout):
+        for line in stdout.splitlines():
+            if line.startswith("本次跑了"):
+                return line
+        return None
+
+    empty = tmp_path / "no-data-here"
+    empty.mkdir()
+    lonely = run_node([SELFTEST], env={
+        "AI_NOTE_DATA": str(empty),
+        "AI_NOTE_INBOX": str(empty / "inbox"),
+    })
+    assert lonely.returncode == 0, lonely.stdout + lonely.stderr
+    assert "真实数据（`data/` 一眼都没看：夹具是手写的）" in lonely.stdout
+
+    ordinary = run_node([SELFTEST])
+    assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
+    assert verdict(lonely.stdout) is not None, f"读不出自检的结论行：\n{lonely.stdout}"
+    assert verdict(lonely.stdout) == verdict(ordinary.stdout), (
+        "数据目录空着时自检的读数变了 → 它开始读 data/ 了"
+    )
 
 
 def test_the_self_check_says_so_when_it_could_not_run(tmp_path):

@@ -295,3 +295,134 @@ def test_a_taken_port_says_so_instead_of_a_traceback(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "已被占用" in err
     assert "Errno" not in err and "Traceback" not in err
+
+
+# --------------------- #14「改」在**真 socket** 上必须通（曾经是 501 + text/html）
+
+PAGE_ID = "41c86bcfc007"
+
+
+def _write_page(root, blocks, page_id: str = PAGE_ID):
+    (root / "pages").mkdir(parents=True, exist_ok=True)
+    page = {
+        "version": 1,
+        "id": page_id,
+        "image": f"{page_id}.png",
+        "created_at": "2026-10-04T14:31:35+08:00",
+        "origin": {"original_file": "2.png", "sheet": None, "page_number": None},
+        # 这三个键是 #17 加上的（科目、切分来源、删除留痕）。夹具照**实现真正写出来的形状**给，
+        # 否则「读回来的就是页文件原样」这句话会在一份过期的夹具上被验成真。
+        "subject": "数学",
+        "segmentation": {"mode": "model", "at": "2026-10-04T14:31:35+08:00", "note": None},
+        "removed_blocks": [],
+        "blocks": blocks,
+    }
+    (root / "pages" / f"{page_id}.json").write_text(
+        json.dumps(page, ensure_ascii=False), encoding="utf-8"
+    )
+    return page
+
+
+def patch(url: str, payload: dict):
+    request = urllib.request.Request(
+        url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="PATCH",
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.status, response.headers, response.read()
+
+
+def test_a_real_socket_takes_the_page_patch_it_advertises(tmp_path):
+    """`PATCH /api/page/<id>` 在**真 socket** 上必须通，而且预检必须先答应它。
+
+    这条曾经是坏的：路由表（`Api._route`）与预检都答应 PATCH，但 `http.server` 那一层
+    没有 `do_PATCH`，于是真实浏览器拿到框架自带的 **501 + text/html**——不是契约 §2
+    要求的信封。它活了很久，因为唯一吃 PATCH 的测试直接调 `api.handle("PATCH", …)`，
+    **绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。
+
+    所以这条测试有两半，缺一不可：① **走真 socket**；② 顺手钉住**预检里列了 PATCH**
+    ——跨源预检不通过时，浏览器根本不会把这条请求发出去，那时候后一半永远看不到。
+    """
+    from server.app import serve
+
+    root = make_data_dir(tmp_path, [])
+    _write_page(root, [{
+        "id": "b1", "bbox_norm": [0.02, 0.02, 0.9, 0.2], "bbox_px": None,
+        "card_id": None, "keep": None, "ink": None, "decision": None,
+        "question_no": 1, "problem_type": None,
+    }])
+
+    with serve(root, port=0) as base_url:
+        # ① 预检：站点在 :3000、服务在 :8765，跨源是常态
+        request = urllib.request.Request(f"{base_url}/api/page/{PAGE_ID}", method="OPTIONS")
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 204
+            allowed = response.headers["Access-Control-Allow-Methods"]
+        assert "PATCH" in [m.strip() for m in allowed.split(",")], (
+            f"预检没答应 PATCH（{allowed}）→ 浏览器不会发出这条请求，切分修正页等于没有写路径"
+        )
+
+        # ② 真发一次 PATCH
+        status, headers, body = patch(f"{base_url}/api/page/{PAGE_ID}", {
+            "edits": [{"action": "move", "block_id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 0.25]}],
+        })
+
+        assert status == 200
+        assert headers["Content-Type"] == "application/json; charset=utf-8"
+        envelope = json.loads(body)
+        assert envelope["ok"] is True, envelope
+        assert envelope["data"]["changed"] is True
+
+        # ③ 盘上的页文件真的变了（不是只回了一封信封）
+        on_disk = json.loads((root / "pages" / f"{PAGE_ID}.json").read_text("utf-8"))
+        assert on_disk["blocks"][0]["bbox_norm"] == [0.0, 0.0, 1.0, 0.25]
+
+
+def test_a_real_socket_can_read_a_page_not_only_patch_it(tmp_path):
+    """`GET /api/page/<id>` 在**真 socket** 上必须通——界面打开一页来改，第一步是**读**。
+
+    这条路由以前**不存在**：`page_api` 只有 `PATCH`，于是「读一页」只能拿一次
+    **空修正的预演**去凑（`PATCH {dry_run: true, edits: []}`）。那是让**读**依赖一条
+    **写形状**的路由，下一个读代码的人得先花十分钟确认「它到底写不写」。
+
+    与 `PATCH` 那条同一个病根：唯一吃这条路的调用方是**注入 `pageData` 的测试**，
+    真实 socket 上拿到的是 405。所以这条也走真 socket，并且顺手钉住
+    「错方法的 `allowed` 里要有 `GET`」——漏一个真允许的方法就是一句误导。
+    """
+    from server.app import serve
+
+    root = make_data_dir(tmp_path, [])
+    _write_page(root, [{
+        "id": "b1", "bbox_norm": [0.02, 0.02, 0.9, 0.2], "bbox_px": None,
+        "card_id": None, "keep": None, "ink": None, "decision": None,
+        "question_no": 1, "problem_type": None,
+    }])
+
+    with serve(root, port=0) as base_url:
+        status, headers, body = fetch(f"{base_url}/api/page/{PAGE_ID}")
+        assert status == 200
+        assert headers["Content-Type"] == "application/json; charset=utf-8"
+        data = json.loads(body)["data"]
+        # 整份页都在：块列表、切分来源、科目——界面要拿它画框、也要拿它判「有没有人工改动」
+        assert data["page"]["id"] == PAGE_ID
+        assert [b["id"] for b in data["page"]["blocks"]] == ["b1"]
+        assert "segmentation" in data["page"]
+        assert data["image"]
+
+        # 不存在的页是 404（不是 500、也不是空对象）
+        try:
+            fetch(f"{base_url}/api/page/{'0' * 12}")
+            raise AssertionError("应该 404")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            assert json.loads(exc.read())["error"]["reason"] == "not_found"
+
+        # 错方法的 405 要把 GET 也列进去
+        request = urllib.request.Request(f"{base_url}/api/page/{PAGE_ID}", method="DELETE")
+        try:
+            urllib.request.urlopen(request)
+            raise AssertionError("应该 405")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 405
+            allowed = json.loads(exc.read())["error"]["details"]["allowed"]
+            assert "GET" in allowed and "PATCH" in allowed, allowed

@@ -23,19 +23,26 @@ from server import ink
 from test_ink import RED, white_with_blocks
 
 
-def data_root(tmp_path, *, make_pages: bool = False):
+def data_root(tmp_path, *, make_pages: bool = False, vocab: bool = True):
     root = tmp_path / "data"
     (root / "problems").mkdir(parents=True, exist_ok=True)
     (root / "assets").mkdir(parents=True, exist_ok=True)
     if make_pages:
         (root / "pages").mkdir(parents=True, exist_ok=True)
+    if vocab:
+        # 科目词表：科目在**录入时**由人指定，而取值必须来自这份表。
+        # 默认给一份，这些测试才跑在「真实的目录形状」上；`vocab=False` 专门造
+        # 「词表本身不在」那一档（那时是**先收下再喊**，不是 400）。
+        (root / "vocab").mkdir(parents=True, exist_ok=True)
+        (root / "vocab" / "subjects.json").write_text(
+            json.dumps({"科目": ["数学", "物理"]}, ensure_ascii=False), encoding="utf-8")
     return root
 
 
-def build_api(tmp_path, *, segmenter=None, make_pages: bool = False):
+def build_api(tmp_path, *, segmenter=None, make_pages: bool = False, vocab: bool = True):
     from server.http import Api
 
-    return Api(data_root(tmp_path, make_pages=make_pages), segmenter=segmenter)
+    return Api(data_root(tmp_path, make_pages=make_pages, vocab=vocab), segmenter=segmenter)
 
 
 def a_photo(tmp_path, *, w: int = 100, h: int = 60):
@@ -60,8 +67,8 @@ def static_segmenter(blocks):
     return run
 
 
-def post_page(api, blob: bytes, name: str = "page.png"):
-    body, content_type = multipart_body([(name, blob)])
+def post_page(api, blob: bytes, name: str = "page.png", fields=None):
+    body, content_type = multipart_body([(name, blob)], fields=fields)
     r = api.handle("POST", "/api/page", body, content_type=content_type)
     return r.status, json.loads(r.body)
 
@@ -181,37 +188,55 @@ def test_a_model_failure_leaves_not_one_byte_behind(tmp_path):
     assert list(api.catalog.problems_dir.glob("*.json")) == []
 
 
-def test_without_a_segmenter_the_page_is_not_created(tmp_path):
-    """切分不可用 → 页**不建**、`blocks` 给 `null`（不是 `[]`），并说清是哪一项没做。"""
+def test_without_a_segmenter_the_page_is_still_created_so_a_human_can_draw(tmp_path):
+    """切分不可用 → 页**照建**、`blocks` 给 `null`（不是 `[]`），人可以在照片上自己画框。
+
+    这是一次**有意的反转**（#23）：以前这里是不建页、照片也不落盘，理由是
+    「`[]` 会被读成『这一页没有题』」——那条理由今天仍然成立，所以 `blocks` 仍是 `null`。
+    变的是后半句：切分不可用时最该发生的事就是让人自己画，而页文件不建、照片不落盘，
+    人就没有东西可画。那条纪律于是从「防误读」变成了「挡住唯一的出路」。
+    """
     blob, _ = a_photo(tmp_path)
     api = build_api(tmp_path)
 
     status, envelope = post_page(api, blob)
 
     assert status == 200
-    assert envelope["data"]["created"] == []
     row = envelope["data"]["pages"][0]
-    assert row["blocks"] is None and row["created"] is False
+    assert row["created"] is True and row["blocks"] is None
+    assert row["segmentation"] == "unavailable"
     assert envelope["data"]["segmentation"]["available"] is False
     assert "segmentation_not_implemented" in {w["code"] for w in envelope["warnings"]}
-    assert not api.catalog.pages_dir.exists()
-    assert list(api.catalog.pages_dir.glob("*.png")) == []
+
+    # 照片与页文件都真的在盘上——人要有东西可画
+    assert len(list(api.catalog.pages_dir.glob("*.png"))) == 1
+    on_disk = json.loads((api.catalog.pages_dir / f"{row['page_id']}.json").read_text("utf-8"))
+    assert on_disk["blocks"] is None
+    assert on_disk["segmentation"]["mode"] == "unavailable"
+    assert on_disk["segmentation"]["note"]
 
 
 def test_a_segmentation_that_cannot_be_parsed_is_not_an_empty_page(tmp_path):
-    """模型答了话但抠不出块 → 这是「切分没跑成」，**不是**「这一页没有题」：页不建。"""
+    """模型答了话但抠不出块 → 这是「切分没跑成」，**不是**「这一页没有题」。
+
+    判据是 `blocks is None`（不是 `[]`）与 `segmentation.mode == "unavailable"`；
+    页**照建**（#23），因为模型切坏时人的出路正是自己画框。
+    """
     blob, _ = a_photo(tmp_path)
     api = build_api(tmp_path, segmenter=lambda path: "这一页我看不清，就不给 JSON 了")
 
     status, envelope = post_page(api, blob)
 
     assert status == 200
-    assert envelope["data"]["created"] == []
     row = envelope["data"]["pages"][0]
     assert row["blocks"] is None and row["segmentation"] == "unparsed"
     assert row["message"]
     assert "page_segmentation_unparsed" in {w["code"] for w in envelope["warnings"]}
-    assert not api.catalog.pages_dir.exists()
+    on_disk = json.loads((api.catalog.pages_dir / f"{row['page_id']}.json").read_text("utf-8"))
+    assert on_disk["blocks"] is None, "不许拿 `[]` 冒充「这一页没有题」"
+    assert on_disk["segmentation"]["mode"] == "unavailable"
+    # 那一句「为什么没有块」要留在页文件上：下一个人看页文件时才知道机器试过了
+    assert "抠不出块" in on_disk["segmentation"]["note"]
 
 
 def test_a_request_without_a_photo_is_400_and_creates_nothing(tmp_path):
@@ -453,3 +478,65 @@ def test_every_warning_the_create_path_emits_carries_an_explicit_level(tmp_path)
         envelope["warnings"]
     assert {w["level"] for w in envelope["warnings"]} == {"warning", "hint"}, \
         "两档都要出现过（题号缺口是 warning、没问模型是 hint），这条断言才不空转"
+
+
+# ------------------------------------------------- 科目在录入时由人指定（#17）
+
+
+def test_the_create_response_echoes_the_subject_it_accepted(tmp_path):
+    """回执要**回显**科目。不回显，「我填的科目到底进没进去」只能靠再打一次索引去猜。
+
+    没给这个字段时回显 `null`：那是**未归类**（一等状态），不是缺字段。
+    """
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    blob, _ = a_photo(tmp_path)
+    status, envelope = post_page(api, blob, fields=[("subject", "数学")])
+    assert status == 200
+    assert envelope["data"]["pages"][0]["subject"] == "数学"
+
+    # 换一张尺寸不同的图（内容哈希不同 → 是另一页），这次不给科目
+    other, _ = a_photo(tmp_path, w=120)
+    status, envelope = post_page(api, other, name="other.png")
+    assert status == 200
+    assert envelope["data"]["pages"][0]["subject"] is None
+
+
+def test_a_subject_outside_the_vocabulary_is_refused_with_the_allowed_list(tmp_path):
+    """词表在而取值不在 → **400 带可选值**，而且**一个字节都不写**（拒绝路径不动盘）。
+
+    受控词表那条纪律（`CONTEXT.md`：AI 不得自造标签，找不到只能提名）在这里落在**人**身上：
+    让一个表外的科目在侧栏里长出一根孤立分支，比当场拒掉更难收拾。
+    """
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+    blob, _ = a_photo(tmp_path)
+
+    status, envelope = post_page(api, blob, fields=[("subject", "化学")])
+
+    assert status == 400
+    assert envelope["ok"] is False
+    details = envelope["error"]["details"]
+    assert details["param"] == "subject"
+    assert details["value"] == "化学"
+    assert set(details["allowed"]) == {"数学", "物理"}
+    assert envelope["error"]["hint"], "拒绝要告诉人怎么办（改成表里的一个，或者不给）"
+    # 拒绝路径一个字节都不动：连 pages/ 都不该有东西
+    assert list(api.catalog.pages_dir.glob("*")) == [] if api.catalog.pages_dir.exists() else True
+
+
+def test_a_missing_vocabulary_does_not_block_entry_but_shouts(tmp_path):
+    """**词表本身不在**时：收下这个科目，但把词表级警告一并带回。
+
+    不许因为词表缺席就把录入整个挡住——录入摩擦是这类工具的头号死因
+    （ADR 0006 决定第 5 条）。代价是拼错的科目可能积下来，那正是索引级
+    `subjects_vocab_missing` 要喊的事。
+    """
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS), vocab=False)
+    blob, _ = a_photo(tmp_path)
+
+    status, envelope = post_page(api, blob, fields=[("subject", "数学")])
+
+    assert status == 200
+    assert envelope["data"]["pages"][0]["subject"] == "数学"
+    assert "subjects_vocab_missing" in {w["code"] for w in envelope["warnings"]}, \
+        "词表不在必须喊出来——否则侧栏会空掉而没人知道为什么"

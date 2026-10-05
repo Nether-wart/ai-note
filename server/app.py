@@ -17,10 +17,11 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .config import load_env_files, load_judge_config
+from .config import SEGMENTER_ROLE, load_env_files, load_judge_config, load_role_config
 from .http import Api
-from .paths import default_data_dir
+from .paths import default_data_dir, default_runs_dir
 from .publicbase import public_base_warning, resolve_public_base
+from .segmenter_client import HttpSegmenter
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -84,7 +85,11 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
             if response.body:
                 self.wfile.write(response.body)
 
-        def do_GET(self) -> None:  # noqa: N802（http.server 的命名约定）
+        # `do_*` 是 `http.server` 的命名约定，ruff 的 N802 看不惯它。
+        # 说明写在**上一行**，而不是塞在 noqa 指令后面：指令后面跟一段中文说明会被
+        # ruff 解析成非法的规则码，于是那个 noqa **从来没生效**，只留下一行每次跑
+        # ruff 都刷的警告——而噪声会训练人忽略输出。
+        def do_GET(self) -> None:  # noqa: N802
             self._respond("GET")
 
         def do_OPTIONS(self) -> None:  # noqa: N802
@@ -92,6 +97,30 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
 
         def do_POST(self) -> None:  # noqa: N802
             self._respond("POST")
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            # 页资源那条「改」（契约 §10.2.1b，`PATCH /api/page/<id>`）**必须在这里接上**：
+            # 路由表（`Api._route`）里挂着它、预检（`_options`）也答应它，但
+            # `BaseHTTPRequestHandler` 只认自己有的 `do_*` 方法——没这一个，真实 socket
+            # 会拿框架自带的 501「Unsupported method」+ `text/html` 回答，
+            # 而契约要求每个响应都是同一个 JSON 信封（§2）。
+            #
+            # 这个缺口活了很久，因为唯一吃 PATCH 的测试是直接调 `api.handle("PATCH", …)`
+            # 的纯函数接缝，**绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。
+            # 现在有一条真 socket 的测试盯着它（`test_server_smoke.py`）。
+            self._respond("PATCH")
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            # 同一件事的**另一半**：路由表里没有哪条路收 `DELETE`／`PUT`，所以它们该得到
+            # **405 带 `allowed`**（契约 §5.1）。但 `http.server` 只认自己有的 `do_*`——
+            # 没这几个的话，真实 socket 上拿到的是框架自带的 **501 + `text/html`**，
+            # 又一次违反「每个响应都是同一个信封」（§2）。
+            # 写在这里的三个方法自己不做路由：它们只是把请求送进 `Api._route`，
+            # 由那一层按 `_require` 决定 405 还是 404——**方法清单只有一处实现**。
+            self._respond("DELETE")
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._respond("PUT")
 
         def log_message(self, fmt: str, *args) -> None:  # 别把访问日志吞掉
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -186,8 +215,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        # 切分角色的接线（#17 §8）。**接在这里，不接在 `build_server` 里**：
+        # `segmenter=None` 在本项目里有一个确切含义——**切分不可用**，那时页照建、
+        # `blocks` 是 `null`、人在照片上自己画框（契约 §10.2.1）。测试要造的就是那一档，
+        # 所以「不注入」必须继续等于「不可用」，不能被一个默认值悄悄改掉。
+        # 于是：**库的默认是「不可用」，产品（这一条路径）的默认是「可用」。**
+        segmenter = HttpSegmenter(load_role_config(SEGMENTER_ROLE), default_runs_dir())
         httpd = build_server(data_dir, args.host, args.port, public_base=args.public_base,
-                             inbox=args.inbox)
+                             inbox=args.inbox, segmenter=segmenter)
     except ValueError as exc:
         # 坏配置**起不来**（阈值 NaN/越界、provider 不在白名单）——不许静默降级
         print(f"配置有问题，服务不启动：{exc}", file=sys.stderr)
