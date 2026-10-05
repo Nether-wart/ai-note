@@ -56,8 +56,7 @@ COMMIT_NOTHING_KEPT = "page_commit_nothing_kept"              # hint：这一页
 COMMIT_BLOCKS_SKIPPED = "page_commit_blocks_skipped"          # hint：没收的块不进库
 COMMIT_BLOCK_WITHOUT_BOX = "page_commit_block_without_box"    # warning：边界读不出来 → 没建卡
 COMMIT_CARD_UNREADABLE = "page_commit_card_unreadable"        # warning：卡在却读不了 → 不覆盖
-# 页指向的整页照片不在：**同一个事实、同一个码**（#9 的回填与 #15 的审计也用这个码，
-# 只是回填那处手搓 dict、漏了 `level`——已记进报告，留给最终修复 pass 收）。
+# 页指向的整页照片不在：**同一个事实、同一个码**（#9 的回填与 #15 的审计也用这个码）。
 PAGE_PHOTO_MISSING = "page_photo_missing"                     # warning：整页照片不在
 
 

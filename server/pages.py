@@ -331,7 +331,7 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
         page["blocks"].append(block)
         dirty.add(page_id)
         for note in notes:
-            warnings.append(_warn("block_box_fallback", f"{pid}：{note}", pid))
+            warnings.append(_warn(BLOCK_WITHOUT_BOX, f"{pid}：{note}", pid))
         reports.append(_card_report(
             pid, "created" if fresh else "appended", page_id,
             "建了页文件，块 = 这张卡的边界" if fresh else "页文件已存在，追加一个块"))
@@ -372,6 +372,11 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
 
 # 「这张卡有没有页绑定」的两个码与两个级别（#9 验收 2；#15 的审计在它上面扩展）。
 # 级别只有服务能定（契约 §2），界面不许自行升降级。
+# 块级事实的码（契约 §8 的页级对账码表）：**同一件事只有这一个码**。回填（卡上
+# 没记可用的 bbox_norm → 块退化为整页）与重切（旧/新块没有可用 bbox_norm）说的是
+# 同一件事，所以不许各造一个码——曾给同一事实造过第二个码（码表里没有它），
+# 于是同一个事实有了两个说法。
+BLOCK_WITHOUT_BOX = "block_without_box"         # 警告级：边界缺/退化
 PAGE_BINDING_MISSING = "page_binding_missing"   # 提示级：旧数据（页文件还没建）
 PAGE_BINDING_LOST = "page_binding_lost"         # 警告级：页实体在场却对不上账
 
@@ -564,7 +569,7 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
                                   f"旧块列表里有一项不是对象：{old!r}", None))
             continue
         if _xywh(old.get("bbox_norm")) is None:
-            warnings.append(_warn("block_without_box",
+            warnings.append(_warn(BLOCK_WITHOUT_BOX,
                                   f"旧块 {old.get('id')!r} 没有可用的 bbox_norm"
                                   f"（整页归一化边界）→ 无法按位置匹配", old.get("id")))
         old_list.append(old)
@@ -576,7 +581,7 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
                                   f"新块列表里有一项不是对象：{new!r}", None))
             continue
         if _xywh(new.get("bbox_norm")) is None:
-            warnings.append(_warn("block_without_box",
+            warnings.append(_warn(BLOCK_WITHOUT_BOX,
                                   f"新块 {new.get('id')!r} 没有可用的 bbox_norm"
                                   f" → 无法按位置匹配", new.get("id")))
         new_list.append(new)

@@ -259,7 +259,7 @@ def test_backfill_warnings_carry_an_explicit_level(api_for):
     """回填报告是**对外出口**（`python3 -m server.backfill`）——5 条警告也必须有 `level`。
 
     它们和 #15 审计面对同样的码（`page_file_unreadable`/`page_id_mismatch`/
-    `page_image_unsafe`/`page_photo_missing`/`block_box_fallback`），两面给出的级别
+    `page_image_unsafe`/`page_photo_missing`/`block_without_box`），两面给出的级别
     必须一致；手搓 dict 漏掉 `level` 就是「同一个码，两面说法不同」。
     """
     from conftest import PNG_1X1
@@ -271,7 +271,7 @@ def test_backfill_warnings_carry_an_explicit_level(api_for):
         card = make_card(pid)
         card["source"]["page_image"] = f"data/pages/{pid[-6:]}.png"  # 6 位 → 页 id
         cards.append(card)
-    # 回填要拿掉 E 的边界，才会报 block_box_fallback
+    # 回填要拿掉 E 的边界，才会报 block_without_box
     cards[4]["source"]["bbox_norm"] = None
     api = api_for(cards)
     pages_dir = api.catalog.pages_dir
@@ -286,14 +286,18 @@ def test_backfill_warnings_carry_an_explicit_level(api_for):
     (pages_dir / "dddddd.json").write_text(json.dumps({
         "version": 1, "id": "dddddd", "image": "dddddd.png", "blocks": [],
     }, ensure_ascii=False), encoding="utf-8")
-    (pages_dir / "eeeeee.png").write_bytes(PNG_1X1)   # 照片在 → 只报 block_box_fallback
+    (pages_dir / "eeeeee.png").write_bytes(PNG_1X1)   # 照片在 → 只报 block_without_box
 
     report = pages.backfill_pages(api.catalog, apply=False)
 
     found = _walk_warnings(report)
     codes = {item.get("code") for _, item in found}
     assert codes == {"page_file_unreadable", "page_id_mismatch", "page_image_unsafe",
-                     "page_photo_missing", "block_box_fallback"}, found
+                     "page_photo_missing", "block_without_box"}, found
+    # R2：同一事实（bbox_norm 缺/退化）在**重切**那条路上也是这个码——同一个码、同一件事。
+    # 曾经给同一事实造过第二个码（码表里没有它），同一件事于是有了两个说法。
+    rebound = pages.rebind([{"id": "b1", "bbox_norm": None}], [])
+    assert [w["code"] for w in rebound["warnings"]] == ["block_without_box"], rebound["warnings"]
     bad = [(where, item) for where, item in found
            if not isinstance(item, dict) or item.get("level") not in ("warning", "hint")]
     assert not bad, f"回填报告里没有显式 level 的警告：{bad}"
