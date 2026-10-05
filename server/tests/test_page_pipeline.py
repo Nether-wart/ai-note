@@ -120,8 +120,12 @@ def test_the_whole_page_pipeline_from_a_photo_to_an_audited_library(tmp_path):
     assert report["findings"] == [], report["findings"]
     assert report["ok"] is True
 
-    # ---- 5) 重切：同一页同样的候选块 → 已入库的块是「保留」，不是「替换」；一个字节都不写
-    page_before = (api.catalog.pages_dir / f"{page_id}.json").read_bytes()
+    # ---- 5) 重切：同一页同样的候选块 → 已入库的块是「保留」，不是「替换」
+    #
+    # **本版（#17 / #31）改动**：重切不再是「只给对照、一个字节都不写」，它的语义改成
+    # 「**重置为预设**」——预设落进页文件（`blocks` ＋ `segmentation.mode = "model"`），
+    # 没进新列表的旧块进 `removed_blocks[]`。这一页三块都按位置配上了，所以留痕是空的。
+    # **题卡仍然一个字节都不写**（`wrote_cards` 恒为 False）：重置动的是页，不是库。
     cards_before = {p.name: p.read_bytes() for p in api.catalog.problems_dir.glob("*.json")}
     status, envelope = post(api, f"/api/page/{page_id}/resegment")
 
@@ -130,8 +134,11 @@ def test_the_whole_page_pipeline_from_a_photo_to_an_audited_library(tmp_path):
     assert states == ["kept", "kept", "kept"], envelope["data"]["matches"]
     assert envelope["data"]["summary"]["replaced"] == 0
     assert envelope["data"]["wrote_cards"] is False
-    assert envelope["data"]["wrote_page"] is False
+    assert envelope["data"]["wrote_page"] is True, "重置为预设是真的重置，落盘"
     after = {b["id"]: b["card_id"] for b in envelope["data"]["blocks"]}
     assert [after["b1"], after["b2"]] == created, "重切不许给已入库的卡改名"
-    assert (api.catalog.pages_dir / f"{page_id}.json").read_bytes() == page_before
+    on_disk = json.loads((api.catalog.pages_dir / f"{page_id}.json").read_text("utf-8"))
+    assert on_disk["segmentation"]["mode"] == "model"
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1", "b2", "b3"]
+    assert on_disk["removed_blocks"] == [], "三块都还在，没有东西被丢掉"
     assert {p.name: p.read_bytes() for p in api.catalog.problems_dir.glob("*.json")} == cards_before

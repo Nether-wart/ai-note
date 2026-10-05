@@ -243,7 +243,9 @@ class Api:
         match = re.fullmatch(r"/api/page/(?P<pid>.*?)/resegment", path)
         if match:
             self._require(method, "POST")
-            data, warnings = self.pages.resegment(match.group("pid"))
+            # body 一路带进去：`{"confirm_discard_manual": true}` 是「重置为预设」的确认
+            # （#31 的破坏性动作）。空 body／不是 JSON 不算确认，由 `PageEndpoint` 判。
+            data, warnings = self.pages.resegment(match.group("pid"), body)
             return json_response(200, data=data, warnings=warnings)
 
         match = re.fullmatch(r"/api/page/(?P<pid>.*?)/image", path)

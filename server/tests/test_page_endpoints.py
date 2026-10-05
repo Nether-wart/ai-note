@@ -125,6 +125,8 @@ def test_an_unknown_edit_action_is_a_400_that_lists_the_allowed_ones(tmp_path):
     assert envelope["error"]["code"] == "bad_request"
     assert envelope["error"]["reason"] == "bad_request"
     assert "move" in envelope["error"]["details"]["allowed"]
+    # 本版（#17）加的两条也在同一个闭集里（加动作 = 一行，清单免费继承）
+    assert {"add", "delete"} <= set(envelope["error"]["details"]["allowed"])
     assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
 
 
@@ -189,14 +191,103 @@ def test_the_page_route_only_answers_the_methods_it_declares(tmp_path):
     assert "PATCH" in envelope["error"]["details"]["allowed"]
 
 
+# ------------------------------------------------ 新增一块 / 删块（本版 #17 / #24 #30）
+
+
+def test_adding_a_block_over_patch_writes_it_and_defaults_to_keep(tmp_path):
+    """PATCH 的 `add`：新块落进页文件、`keep` 省略时落「收」（#26）、回执报两个增删数。
+
+    契约 §10.2.1b 第 3 条：`blocks_added` 与 `blocks_removed` **每一次回执都带**（0 也报），
+    增删对称——只报一头等于让另一头偷偷发生。
+    """
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+
+    status, envelope = patch_json(api, f"/api/page/{PAGE_ID}", {
+        "edits": [{"action": "add", "bbox_norm": [0.02, 0.6, 0.9, 0.2], "question_no": 4}]})
+
+    assert status == 200, envelope
+    assert envelope["data"]["changed"] is True
+    assert envelope["data"]["blocks_added"] == 1
+    assert envelope["data"]["blocks_removed"] == 0
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1", "b2"]
+    added = on_disk["blocks"][-1]
+    assert added["keep"] is True
+    assert added["decision"]["source"] == "human"
+    assert added["decision"]["rule"] == "human_include"
+    assert added["question_no"] == 4
+    assert added["bbox_px"] is None and added["card_id"] is None
+    assert on_disk["segmentation"]["mode"] == "manual"
+
+
+def test_adding_a_block_with_an_unusable_box_is_refused_with_the_box_code(tmp_path):
+    """D9：读不出来的框 → 与 `move` **同一个拒绝形状**（`page_block_box_unusable`），页文件不动。"""
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    status, envelope = patch_json(api, f"/api/page/{PAGE_ID}", {
+        "edits": [{"action": "add", "bbox_norm": [0.02, 0.6, 0.9, 0.0]}]})
+
+    assert status == 200, envelope
+    assert envelope["data"]["changed"] is False
+    hits = [w for w in envelope["warnings"] if w["code"] == "page_block_box_unusable"]
+    assert hits and hits[0]["level"] == "warning"
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
+def test_deleting_a_block_bound_to_a_card_is_a_400_that_names_the_card(tmp_path):
+    """**硬约束 1 的 HTTP 面**：已绑 `card_id` 的块永远不许删。
+
+    → **400** `bad_request` ＋ `reason = block_delete_bound_to_card`，`details.card_id`
+    点名是哪张卡拦住的；拒绝就该**一个字节都不动**（D9）。
+    """
+    api = build_api(tmp_path, pages=[page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], card_id="p-20261004-aaaaaa")])])
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    status, envelope = patch_json(api, f"/api/page/{PAGE_ID}", {
+        "edits": [{"action": "delete", "block_id": "b1"}]})
+
+    assert status == 400
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["reason"] == "block_delete_bound_to_card"
+    assert envelope["error"]["details"]["card_id"] == "p-20261004-aaaaaa"
+    assert "drop" in envelope["error"]["hint"], "要「不要它」的出路要说清楚"
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
+def test_deleting_a_never_committed_block_reports_blocks_removed_and_leaves_a_trace(tmp_path):
+    """**硬约束 2 的 HTTP 面**：删掉了要报数（`blocks_removed == 1`）并留痕，绝不静默消失。"""
+    api = build_api(tmp_path, pages=[page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], question_no=1),
+        block("b2", [0.02, 0.24, 0.9, 0.2], question_no=2)])])
+
+    status, envelope = patch_json(api, f"/api/page/{PAGE_ID}", {
+        "edits": [{"action": "delete", "block_id": "b2"}]})
+
+    assert status == 200, envelope
+    assert envelope["data"]["blocks_removed"] == 1
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1"]
+    assert [e["block_id"] for e in on_disk["removed_blocks"]] == ["b2"]
+    assert "card_id" not in on_disk["removed_blocks"][0]
+
+
 # ---------------------------------------------------------------- 重切（resegment）
 
 
 def test_resegment_returns_the_three_state_reconciliation_without_writing_cards(tmp_path):
-    """**验收 1**：重切返回**逐块对照**（新增／保留），且**不写题卡、不写页文件**。
+    """**验收 1**：重切返回**逐块对照**（新增／保留），且**不写题卡**。
 
     界面要能显示这三态，而不是只显示「重切完成」——所以对照在 `data.matches` 里，
     `summary.replaced` 恒为 0（#10 已裁决是结构性的，不是「还没做」）。
+
+    **本版（#17 / #31）改动**：这一页没有人工改动（它是机器预设），所以不需要确认；
+    但「重置为预设」本来就**会写页文件**——预设落进 `blocks`、来源写回 `mode = "model"`、
+    没进新列表的旧块进 `removed_blocks[]`。所以这条测试里 `wrote_page` 从 `False` 改成
+    `True`，并且断的不再是「页文件逐字节不变」，而是「页文件真的换成了新预设」。
+    **`wrote_cards` 仍然是 `False`**：重置动的是页，不是库。
     """
     existing = page([block("b1", [0.02, 0.02, 0.9, 0.2], card_id="p-20261004-aaaaaa",
                            keep=True, question_no=1)])
@@ -210,7 +301,6 @@ def test_resegment_returns_the_three_state_reconciliation_without_writing_cards(
         }
 
     api = build_api(tmp_path, pages=[existing], segmenter=segmenter)
-    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
 
     status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
 
@@ -219,11 +309,15 @@ def test_resegment_returns_the_three_state_reconciliation_without_writing_cards(
     assert [m["state"] for m in data["matches"]] == ["kept", "new"]
     assert data["summary"] == {"kept": 1, "new": 1, "replaced": 0, "removed": 0,
                                "needs_human": False, "human_work_checked": False}
-    assert data["wrote_cards"] is False and data["wrote_page"] is False
+    assert data["wrote_cards"] is False and data["wrote_page"] is True
     # 已入库的那一块**卡片 id 不变**（验收 1 的后半）
     assert data["blocks"][0]["card_id"] == "p-20261004-aaaaaa"
     assert data["blocks"][1]["card_id"] is None
-    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+    # 预设真的落了盘：块列表换成新预设、来源回到 model、没有旧块被丢掉
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1", "b2"]
+    assert on_disk["segmentation"]["mode"] == "model"
+    assert on_disk["removed_blocks"] == []
 
 
 def test_resegment_shouts_when_a_block_with_a_card_would_disappear(tmp_path):
@@ -301,6 +395,122 @@ def test_a_segmenter_that_fails_is_a_502_and_leaves_the_page_untouched(tmp_path)
     assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
 
 
+# ------------------------------------------------ 重置为预设（本版 #17 / #31）
+
+
+def manual_page():
+    """一份「有人工改动」的页：块列表是人给的（`segmentation.mode == "manual"`）。"""
+    return page([block("b1", [0.02, 0.02, 0.9, 0.2], question_no=1)],
+                segmentation={"mode": "manual", "at": "2026-10-04T15:00:00+08:00",
+                              "note": None})
+
+
+def one_narrow_block(image_path):
+    """一个新预设：一块，比原来那块矮（位置重合 → 「保留」）。"""
+    return {"blocks": [{"id": "b1", "bbox_norm": [0.02, 0.02, 0.9, 0.1], "question_no": 1}],
+            "parsed": True, "rejected": [], "warnings": []}
+
+
+def test_resegment_without_confirmation_on_a_human_touched_page_is_a_409(tmp_path):
+    """**破坏性动作要先问人**（#31）：没带确认 → 409 `resegment_needs_confirmation`。
+
+    `details.discarded` 报清**将**丢掉什么（块列表里人给的块数／留痕里的条数／原来的来源），
+    而且**一个字节都不写**。这一条还判在**模型调用之前**：切分器被调用就会炸，测试会红。
+    """
+    def boom(image_path):
+        raise AssertionError("没确认就不该跑模型（更不该先算一遍再来问人）")
+
+    api = build_api(tmp_path, pages=[manual_page()], segmenter=boom)
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 409
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "resegment_needs_confirmation"
+    assert envelope["error"]["reason"] == "resegment_needs_confirmation"
+    assert envelope["error"]["details"]["discarded"] == {
+        "manual_blocks": 1, "removed_blocks": 0, "mode_before": "manual"}
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
+def test_resegment_with_confirmation_discards_and_reports_the_real_numbers(tmp_path):
+    """带确认 → **真的重置**：新预设落盘、来源回 `model`、丢掉的块进留痕。
+
+    回执的 `discarded` 用 409 那份同一个形状，但报的是**真的**丢了几块：这一页两块人工块，
+    新预设只配上一块（另一块位置差得远）→ 真的丢掉 1 块。
+    """
+    api = build_api(tmp_path, pages=[page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], question_no=1),
+        block("b2", [0.02, 0.24, 0.9, 0.2], question_no=2),
+    ], segmentation={"mode": "manual", "at": None, "note": "手画的"})],
+        segmenter=one_narrow_block)
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment",
+                                 {"confirm_discard_manual": True})
+
+    assert status == 200, envelope
+    data = envelope["data"]
+    assert data["discarded"] == {"manual_blocks": 1, "removed_blocks": 1,
+                                 "mode_before": "manual"}
+    assert data["wrote_page"] is True
+    assert data["wrote_cards"] is False
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1"]
+    assert on_disk["segmentation"]["mode"] == "model"
+    assert [e["block_id"] for e in on_disk["removed_blocks"]] == ["b2"]
+
+
+def test_an_empty_or_non_json_body_is_no_confirmation_and_does_not_crash(tmp_path):
+    """空 body／不是 JSON／不是对象／`"true"` 都**不算确认**（也不许崩）：该 409 就 409。"""
+    api = build_api(tmp_path, pages=[manual_page()], segmenter=one_narrow_block)
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    for body in (b"", b"not json at all", b"[1, 2, 3]", b'{"confirm_discard_manual": "true"}'):
+        r = api.handle("POST", f"/api/page/{PAGE_ID}/resegment", body,
+                       content_type="application/json")
+        envelope = json.loads(r.body)
+        assert r.status == 409, (body, envelope)
+        assert envelope["error"]["code"] == "resegment_needs_confirmation"
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
+def test_resegment_asks_first_when_the_only_human_work_is_a_deletion(tmp_path):
+    """「有人工改动」的第二条判据：**删过块**（留痕不空）也要先问——哪怕列表本来是机器给的。
+
+    这时 `manual_blocks` 是 0（没有手工块），报出来的是留痕条数。
+    """
+    trimmed = page([block("b1", [0.02, 0.02, 0.9, 0.2])],
+                   segmentation={"mode": "model", "at": None, "note": None},
+                   removed_blocks=[{"block_id": "b9", "bbox_norm": [0.5, 0.5, 0.1, 0.1],
+                                    "question_no": 9,
+                                    "removed_at": "2026-10-04T15:00:00+08:00"}])
+    api = build_api(tmp_path, pages=[trimmed], segmenter=one_narrow_block)
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 409
+    assert envelope["error"]["details"]["discarded"] == {
+        "manual_blocks": 0, "removed_blocks": 1, "mode_before": "model"}
+
+
+def test_an_old_page_without_a_segmentation_key_is_not_human_work(tmp_path):
+    """旧页文件没有 `segmentation` 键 → 按 `model` 读：**不是**人工改动，不需要确认。
+
+    「旧数据必须继续能用」：这条路照旧跑得通，`checks`／`reconciliation` 两键照旧在。
+    """
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])],
+                    segmenter=one_narrow_block)
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    assert envelope["data"]["discarded"]["mode_before"] == "model"
+    assert "checks" in envelope["data"] and "reconciliation" in envelope["data"]
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert on_disk["segmentation"]["mode"] == "model"
+
+
 # ------------------------------------------------ 对账接进生产路径（R1）
 #
 # 重切这条路上也要跑 `segmentation.reconcile` 的三条判据（题号连续性／块重叠／覆盖率），
@@ -344,14 +554,18 @@ def test_resegment_reconciles_the_new_blocks_and_is_quiet_when_all_is_well(tmp_p
 
 
 def test_resegment_shouts_about_ink_that_no_new_block_covers(tmp_path):
-    """新切分的块只框住上半页，下半页那片墨迹没人框 → 覆盖率当场报警（只报不改）。"""
+    """新切分的块只框住上半页，下半页那片墨迹没人框 → 覆盖率当场报警（只报不改）。
+
+    **本版（#17 / #31）改动**：这条测试原来断的是「重切一个字节都不写」。现在重切是
+    「重置为预设」，它**会**写页文件——但**对账本身仍然只报不改**：这一页唯一那块按位置
+    配上了，所以 `removed_blocks[]` 是空的、块也没被丢掉；变的只是这份列表的来源与几何。
+    """
     existing = page([block("b1", [0.0, 0.0, 1.0, 0.5], card_id="p-20261004-aaaaaa",
                            keep=True, question_no=1)])
     api = build_api(tmp_path, pages=[existing],
                     segmenter=lambda path: {"blocks": [dict(UPPER)], "parsed": True,
                                             "rejected": [], "warnings": []})
     a_black_patch_page(api, [(0, 40, 100, 60, (20, 20, 20))])
-    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
 
     status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
 
@@ -359,8 +573,11 @@ def test_resegment_shouts_about_ink_that_no_new_block_covers(tmp_path):
     assert "page_ink_uncovered" in [w["code"] for w in envelope["warnings"]]
     assert envelope["data"]["checks"]["coverage"]["ok"] is False
     assert envelope["data"]["reconciliation"]["alarms"] == ["page_ink_uncovered"]
-    # 对账只报不改：页文件一个字节都没动
-    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+    # 对账只报不改：它一个块都没拿走（块还是那一块、留痕还是空的）
+    on_disk = json.loads((api.catalog.pages_dir / f"{PAGE_ID}.json").read_text("utf-8"))
+    assert [b["id"] for b in on_disk["blocks"]] == ["b1"]
+    assert on_disk["removed_blocks"] == []
+    assert on_disk["blocks"][0]["card_id"] == "p-20261004-aaaaaa"
 
 
 def test_resegment_shouts_when_the_new_cut_skips_a_question_number(tmp_path):

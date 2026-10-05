@@ -1,9 +1,12 @@
 """页资源的「改」动作 —— 手动修正的最小集合（spec #2、工单 #14）。
 
 **最小集合**（spec #2 定死，别顺手加）：拖边界、合并两块、拆分一块、整块丢弃、
-切换收入／丢弃、改题型、改题号。**不做**：旋转校正、透视矫正、双栏自动分区。
+切换收入／丢弃、改题型、改题号。**本版（前端重构 / #17）加两条**（#24/#30）：
+**新增一块**（`add`——人自己在照片上画框，机器切分只是预设）与**删块**（`delete`
+——受控的删口子：已绑卡的块永远不许删，未入库的块删了必须留痕）。**不做**：
+旋转校正、透视矫正、双栏自动分区。
 
-三条纪律贯穿本模块：
+四条纪律贯穿本模块：
 
 1. **页文件是真相，界面是它的视图**：每次修正都写回页文件（`pages.save_page`），
    不是只存在界面里——「切分结果与收入决策一旦只存在于界面的内存里，『漏了一题』
@@ -11,7 +14,11 @@
 2. **人动过的决策走 #12 的入口**：切换收入／丢弃调 `intake.set_keep_by_human`，
    **不另立一套「收不收」的判断**（spec #2 的跨单元表：收入决策只有一处实现）。
 3. **不许静默**：合并／拆分／丢弃有歧义时明确报出来（拆出来的两块题号怎么给、
-   丢弃块上已有题卡绑定怎么办），而不是猜一个。
+   丢弃块上已有题卡绑定怎么办），而不是猜一个。人一改块列表，这份列表的来源就
+   记成 `manual`（`segmentation.mode`）——机器预设不再是它的来源。
+4. **「重置为预设」是破坏性动作**（#31）：它会把人的劳动覆盖掉，所以**必须先问人**
+   （`has_human_work` + `confirm_discard_manual`，HTTP 层是 409），而且丢掉的块要
+   进 `removed_blocks[]` 留痕。**不许不声不响地覆盖人的劳动。**
 
 **「改」不改题卡**：本模块只动页文件。题卡只在「入库」动作里生成（#15），
 重切也不写题卡（#10）。所以一次修正之后，页文件变了、索引没变——这是对的，
@@ -49,6 +56,22 @@ EDIT_EMPTY = "page_edit_empty"                        # hint：这次请求里�
 # 与 #9/#10 共用的两个码（形状同那里，本模块只复用字面量，不重复定义实现）
 BLOCK_NOT_AN_OBJECT = "block_not_an_object"           # warning：列表里混进了非对象
 
+# 两条**会拒绝**的形状（契约 §9）。名字只在这里拼一遍，改它就是改历史读数：
+# `delete` 的 `reason`（code 仍是 `bad_request`）、`resegment` 的 409（code 与 reason 同名）。
+DELETE_BOUND_TO_CARD = "block_delete_bound_to_card"
+RESEGMENT_NEEDS_CONFIRMATION = "resegment_needs_confirmation"
+
+# 页文件的 `segmentation.mode`（契约 §10.2.1）。三件事不是一回事：
+# `model` = 机器切出来的**预设**；`manual` = 人给的（含在预设上增删改之后）；
+# `unavailable` = 还没有块列表，等人手动画框。
+MODE_MODEL = "model"
+MODE_MANUAL = "manual"
+MODE_UNAVAILABLE = "unavailable"
+
+# 「没给 `keep`」与「明确给了 `null`」是两件事：前者落「收」（#26），后者是「待定」。
+# 所以子句默认值不能是 `None`——`None` 在这条路上是有含义的值。
+_KEEP_UNSET = object()
+
 # 题型枚举（契约 §3 `Problem.type` 的三取值 + 未定）。
 # `None` = 「还没人定过」，与 `"solution"`（解答题）是两件事——
 # 未定会让「解答题没有标准答案属正常」这条判据失效，所以不许拿它冒充任何一种。
@@ -58,7 +81,10 @@ TYPE_SOLUTION = "solution"
 PROBLEM_TYPES = (TYPE_CHOICE, TYPE_FILLIN, TYPE_SOLUTION)
 
 # 修正动作的名字（报告里的 `action`，stable：审计要按它分类）。
-EDITABLE_ACTIONS = ("move", "merge", "split", "drop", "keep", "type", "question_no")
+# **#17 加的两条**（`add`／`delete`）与前面七条同一个闭集：加一条动作 = 一条分派 +
+# 一行枚举（`dry_run`／拒绝形状／`details.allowed` 三样免费继承）。
+EDITABLE_ACTIONS = ("move", "merge", "split", "drop", "keep", "type", "question_no",
+                    "add", "delete")
 
 
 def _page_warn(code: str, message: str, level: str = "warning", *,
@@ -108,15 +134,102 @@ def _bad_box(block: dict) -> bool:
     return not pages.usable_box(block.get("bbox_norm"))
 
 
-def _replace(page: dict, blocks: list[dict], *, at, action: str, note: str) -> dict:
+def segmentation_of(page: dict) -> dict:
+    """页的 `segmentation`（契约 §10.2.1）：`{mode, at, note}`。**旧页没有这个键也读得出来**。
+
+    ADR 0008 时代的页文件根本没有这个键，而「旧的页文件不许因为新字段变成脏数据」
+    是这个项目的老规矩（#9 验收 2）。所以缺键／坏值一律按 `mode = "model"` 读：
+    那些页的块列表就是当年机器切出来的**预设**——这正是事实。
+    """
+    seg = page.get("segmentation")
+    if not isinstance(seg, dict):
+        return {"mode": MODE_MODEL, "at": None, "note": None}
+    return {
+        "mode": seg.get("mode") or MODE_MODEL,
+        "at": seg.get("at"),
+        "note": seg.get("note"),
+    }
+
+
+def removed_ledger(page: dict) -> list:
+    """页文件的 `removed_blocks[]`（删块的留痕，契约 §10.2.1）：**一份可以安全追加的副本**。
+
+    没建过这个键（旧页）或者里面是个坏值 → 空账本。删块那条路不许因为一个坏键就崩：
+    那会让这一页「再也删不掉切分器多切出来的空框」，而删块正是它存在的理由。
+    """
+    raw = page.get("removed_blocks")
+    return list(raw) if isinstance(raw, list) else []
+
+
+def has_human_work(page: dict) -> bool:
+    """这一页上有没有**人的劳动**（#31：「重置为预设」跑之前要先问的那种）。
+
+    两条判据，故意简单：**这份块列表是人给的**（`mode == "manual"`），或者
+    **删过块**（`removed_blocks[]` 不空）。不去逐块溯源——我们没有每块的来历，
+    一个说得清口径的粗判据好过一个听着精确、其实是编出来的判据。
+    """
+    return segmentation_of(page)["mode"] == MODE_MANUAL or bool(removed_ledger(page))
+
+
+def discarded_manual_work(page: dict) -> dict:
+    """「重置为预设」**会**丢掉什么（409 的 `details.discarded`，契约 §9、§10.2.1b）。
+
+    `manual_blocks` 的口径**故意粗糙**：我们**不跟踪每一块的来历**（哪一块是模型切的、
+    哪一块是人画的），所以它取「`mode == "manual"` 时页上的块数」，否则 0。
+    一个把口径说清楚的粗数，好过一个听着精确、其实是编出来的数。
+    另外两个数：`removed_blocks` = 留痕里已有几条（已经删掉的块）、`mode_before` = 这份
+    块列表原来的来源。
+    """
+    mode = segmentation_of(page)["mode"]
+    blocks = [b for b in (page.get("blocks") or []) if isinstance(b, dict)]
+    return {
+        "manual_blocks": len(blocks) if mode == MODE_MANUAL else 0,
+        "removed_blocks": len(removed_ledger(page)),
+        "mode_before": mode,
+    }
+
+
+def _manual_segmentation(page: dict, at: str) -> dict:
+    """人动过块列表之后，这份列表的来源就是人（`manual`），时刻刷成这一次。
+
+    `note` 保留原样：它记的是「当初为什么没有机器预设」那件事，不是来源。
+    缺 `segmentation` 键的旧页在这里**懒建**它，而不是把旧数据判成坏数据
+    （见 `segmentation_of`）。
+    """
+    return {"mode": MODE_MANUAL, "at": at, "note": segmentation_of(page)["note"]}
+
+
+def _removed_entry(block: dict, stamp: str) -> dict:
+    """删块留痕里的一行（契约 §10.2.1）：哪一块、原来什么框、原来什么题号、什么时候。
+
+    **不带 `card_id`**——那不是「忘了写」，是硬规矩：留痕里出现带 `card_id` 的块就等于
+    「删块那道闸破了」（已绑卡的块根本走不到这里）。读不出来的框写 `None`，不编一个零框。
+    """
+    box = block.get("bbox_norm")
+    return {
+        "block_id": block.get("id"),
+        "bbox_norm": [float(v) for v in box] if pages.usable_box(box) else None,
+        "question_no": block.get("question_no"),
+        "removed_at": stamp,
+    }
+
+
+def _replace(page: dict, blocks: list[dict], *, at, action: str, note: str,
+             mode: str = MODE_MANUAL) -> dict:
     """把改完的块列表装回页文件。**只动 `blocks`**：页的身份、来源、照片都不碰。
 
     `updated_at` 与 `last_edit` 是审计面：页文件是真相，那它必须回答
     「上一次是谁在什么时候改了它、改的什么」——否则「漏了一题」查不出来。
+
+    `segmentation` 顺带写上：人一改块列表，这份列表的来源就是人（`mode = "manual"`，
+    缺键的旧页就地懒建）——**这份块列表从此是人给的，机器预设不再是它的来源**。
+    只有「重置为预设」那条路显式传 `mode="model"` 走另一档（`reset_to_preset`）。
     """
     return {
         **page,
         "blocks": blocks,
+        "segmentation": (_manual_segmentation(page, at) if mode == MODE_MANUAL
+                         else {"mode": mode, "at": at, "note": None}),
         "updated_at": at,
         "last_edit": {"action": action, "at": at, "note": note},
     }
@@ -516,6 +629,206 @@ def set_question_no(page: dict, block_id, question_no, *, at=None) -> dict:
                    blocks_changed=[block_id])
 
 
+# ---------------------------------------------------------------- 新增一块 / 删块
+
+
+def _next_block_id(blocks: list[dict]) -> str:
+    """新块的 id：与 `page_create._page_blocks` 命名机器块的方式**完全同一套**（`b<序号>`，从 1 数）。
+
+    序号取页上已有那些 `b<序号>` 里**最大的 + 1**：两套编号空间就是两本账；
+    而重复用一个刚删掉的号，会让 `removed_blocks[]` 里的留痕看起来像在说一个还活着的块
+    （「漏了一题」正是这么变成查不出来的）。
+    """
+    highest = 0
+    for block in blocks:
+        bid = block.get("id")
+        if isinstance(bid, str) and bid.startswith("b") and bid[1:].isdigit():
+            highest = max(highest, int(bid[1:]))
+    return f"b{highest + 1}"
+
+
+def _human_keep_decision(keep: bool, stamp: str) -> dict:
+    """手工块那条**人的去留决策**（形状与 `intake._human_keep` 写的一模一样）。
+
+    为什么非记这一条不可（#12 的纪律）：`intake.plan_decisions` 只保留 `source == "human"`
+    的决策。手工块的「默认收」是一次**人的判断**——不记下来，下一次 `intake --apply`
+    就会拿像素统计重判它：#26 那句「人已经看着图自己画了框，就不再拿像素统计否决他」
+    当场作废，一道手画的错题会被静默改成「不收」（静默丢题是这个项目最怕的失败）。
+    """
+    return {
+        "keep": keep,
+        "rule": intake.RULE_HUMAN_INCLUDE if keep else intake.RULE_HUMAN_DROP,
+        "source": intake.SOURCE_HUMAN,
+        "semantics": None,
+        "reason": ("人自己画的框就是他要的题（手工块默认「收」，红笔统计只展示、不当闸门）"
+                   if keep else "人自己画的框，但他明确说了「不收」"),
+        "confidence": None,
+        "provider": None,
+        "model": None,
+        "run_id": None,
+        "at": stamp,
+    }
+
+
+def add_block(page: dict, box, *, question_no=None, problem_type=None,
+              keep=_KEEP_UNSET, at=None) -> dict:
+    """**新增一块**：人在整页照片上自己画了一个框（#24/#25/#26）。
+
+    机器切分只是**预设**，人画的框是一等来源，所以这一块：
+
+    - `bbox_px` 为 `None`：人画的框没有盘上的像素原值，**不许拿 `bbox_norm` 反推一个假的**
+      （D5 的口径：像素框是加过 1.5% pad 的盘上原值，不是归一化框的像素化）；
+    - `card_id` 为 `None`：还没入库（分配在入库那一刻，#15）；
+    - `ink` 为 `None`：红笔统计照带、只展示、不当闸门（#26），这里没有图可算；
+    - `decision`：给了去留就记一条**人的决策**（`source = "human"`），没给（`keep = null`，
+      「待定」）就留 `None`——「待定」就是还没有人做决定，那条留给 `intake` 去判。
+
+    `keep` **省略时落 `true`**：人自己画的框就是他要的题（`#26`：手工块默认「收」，
+    红笔统计只展示、不当闸门）。**明确给了 `null`／`false` 就照给**——那是人自己说的
+    「待定」／「不收」，与「没给」是两件事。
+
+    拒绝一律**复用既有的形状**（一类错误只有一种说法）：`bbox_norm` 读不出来 → 同 `move`
+    的 `BOX_NOT_USABLE`；题号不是正整数 → 同 `set_question_no` 的 `QUESTION_NO_INVALID`；
+    题型不在枚举里 → 同 `set_problem_type` 的 `TYPE_UNKNOWN`。后两条不是多此一举：
+    拼错的值会**静默**让下游判据失效（最强的题号连续性检查、解答题那条判据）。
+    """
+    moment = at or datetime.now()
+    stamp = _iso(moment)
+    blocks, warnings = _blocks(page)
+    if not pages.usable_box(box):
+        warnings.append(_page_warn(
+            BOX_NOT_USABLE,
+            f"新增的块边界读不出来（{box!r}）→ 这一块没新增"))
+        return _result(page, at=stamp, action="add", warnings=warnings, changed=False)
+    if question_no is not None and not _is_question_no(question_no):
+        warnings.append(_page_warn(
+            QUESTION_NO_INVALID,
+            f"新增块的题号 {question_no!r} 不是一个正整数（题目上印着的那个号，或空着不填）"
+            f" → 这一块没新增"))
+        return _result(page, at=stamp, action="add", warnings=warnings, changed=False)
+    if problem_type is not None and problem_type not in PROBLEM_TYPES:
+        warnings.append(_page_warn(
+            TYPE_UNKNOWN,
+            f"新增块的题型 {problem_type!r} 不在枚举里（可取值：{list(PROBLEM_TYPES)}）"
+            f" → 这一块没新增"))
+        return _result(page, at=stamp, action="add", warnings=warnings, changed=False)
+
+    block_id = _next_block_id(blocks)
+    # 人自己画的框就是他要的题（#26：手工块默认「收」，红笔统计只展示、不当闸门）。
+    # 明确给了 null／false 就照给——那是人自己说的「待定」／「不收」。
+    keep_value = True if keep is _KEEP_UNSET else keep
+    block = {
+        "id": block_id,
+        "bbox_norm": [float(v) for v in box],
+        "bbox_px": None,
+        "card_id": None,
+        "keep": keep_value,
+        "ink": None,
+        # 「待定」（`null`）是**还没有人做决定**，所以那条决策留给 `intake` 判；
+        # 人给了去留就记下那条判断本身（理由见 `_human_keep_decision`）。
+        "decision": None if keep_value is None else _human_keep_decision(keep_value, stamp),
+        "question_no": question_no,
+        "problem_type": problem_type,
+    }
+    # 新块加在**列表末尾**：不改动已有块的相对顺序（页文件的块序是稳定的事实）。
+    blocks = blocks + [block]
+    page = _replace(page, blocks, at=stamp, action="add",
+                    note=f"新增块 {block_id}：边界 {block['bbox_norm']}")
+    return _result(page, at=stamp, action="add", warnings=warnings, changed=True,
+                   blocks_changed=[block_id])
+
+
+def delete_block(page: dict, block_id, *, at=None) -> dict:
+    """**删块**：把一块从页文件的块列表里拿掉——页文件里唯一一条真能把块拿掉的路径（#30）。
+
+    两条硬约束：
+
+    1. **已绑 `card_id` 的块永远不许删** → **400** `block_delete_bound_to_card`。那张卡
+       已经存在，删块会造出**孤儿绑定**；要「不要它」只能用既有的 `drop`（不收，块留在
+       页文件里、带 `decision.rule = "human_drop"`，可审计）。
+    2. **未入库的块可以删，但必须留痕**：往 `removed_blocks[]` 追加一条
+       `{block_id, bbox_norm, question_no, removed_at}`（契约 §10.2.1）。**绝不静默消失**。
+       这一条把既有的「删掉它才是静默丢题」**收窄**成「已绑卡的块不许删，未入库的块删了
+       要留痕」，不是取消它；留痕里**永远不许**出现带 `card_id` 的块——那是「删块那道闸
+       破了」的直接证据。
+
+    点名的块不在这一页上 → 与 `move`／`drop` 同一个拒绝形状（`BLOCK_UNKNOWN` 警告、
+    `changed=False`、一个字节不动）。
+    """
+    moment = at or datetime.now()
+    stamp = _iso(moment)
+    blocks, warnings = _blocks(page)
+    target = _require_blocks(blocks, [block_id], warnings)
+    if not target:
+        return _result(page, at=stamp, action="delete", warnings=warnings, changed=False)
+    block = target[0]
+    if block.get("card_id"):
+        raise block_delete_bound_to_card_error(block_id, block["card_id"])
+
+    ledger = removed_ledger(page)
+    index = _index_of(blocks, block_id)
+    blocks = blocks[:index] + blocks[index + 1:]
+    page = _replace(page, blocks, at=stamp, action="delete",
+                    note=f"删块 {block_id}（原来在 {block.get('bbox_norm')}）")
+    page = {**page, "removed_blocks": ledger + [_removed_entry(block, stamp)]}
+    return _result(page, at=stamp, action="delete", warnings=warnings, changed=True,
+                   blocks_removed=[block_id])
+
+
+# ---------------------------------------------------------------- 重置为预设
+
+
+def reset_to_preset(page: dict, report: dict, *, at=None) -> dict:
+    """**重置为预设**：把页的块列表换回机器刚切出来的那一份（#31 的破坏性动作）。
+
+    为什么这个能力要留：模型切分最坏的失败是把**整页并成一块**，那时从零手画十道题
+    比重摇一次预设差得远。但它既然是「重置预设」，就必须按破坏性动作对待——
+    **不许不声不响地覆盖人的劳动**：调用方**必须先拿到人的确认**
+    （`has_human_work` + `confirm_discard_manual`），这个函数只负责「重置」本身。
+
+    - 新块列表就是 `report["blocks"]`（`classify_resegment` 的产物：几何是新的，
+      `card_id`／`keep` 由 `pages.rebind` 按位置重合保留）——**这就是「回到预设」**。
+      `report["matches"][].matched_from` 是「哪一块活下来了」的唯一判据：块的 id 会被
+      预设重新编号，拿 id 对比会把同一个块认成两个。
+    - 旧块里没进新列表的那些**绝不静默消失**：没有卡片的记进 `removed_blocks[]`
+      （与 `delete` **同一本账、同一个形状**）；**带着卡片的进不了留痕**
+      （契约 §10.2.1 第 2 条：留痕里永远不许出现带 `card_id` 的块），由
+      `classify_resegment` 的 `block_removed_with_card` 另外喊。
+    - `segmentation.mode` 写回 `model`：这份块列表从此又是机器给的预设
+      （人再动一条就变回 `manual`）。
+
+    返回 `{page, discarded}`：`page` 是**改完之后**的那一页（**还没写盘**——`save_page`
+    仍只有一处实现，与「改」动作同一条纪律）；`discarded` 用 409 那份同一个形状，
+    但报的是**真的**丢了几块（成功回执要的是实数，不是预估值）。
+    """
+    moment = at or datetime.now()
+    stamp = _iso(moment)
+    mode_before = segmentation_of(page)["mode"]
+    old_blocks, _ = _blocks(page)
+    surviving = {m.get("matched_from") for m in report.get("matches") or []}
+    ledger = removed_ledger(page)
+    dropped = 0
+    for block in old_blocks:
+        if block.get("id") in surviving or block.get("card_id"):
+            continue
+        ledger.append(_removed_entry(block, stamp))
+        dropped += 1
+    new_blocks = [dict(b) for b in report.get("blocks") or [] if isinstance(b, dict)]
+    page = _replace(page, new_blocks, at=stamp, action="resegment", mode=MODE_MODEL,
+                    note=f"重置为预设：块列表换成机器刚切出来的 {len(new_blocks)} 块，"
+                         f"丢掉 {dropped} 块没进新列表的旧块")
+    page = {**page, "removed_blocks": ledger}
+    return {
+        "page": page,
+        "discarded": {
+            # 成功回执报**真的**丢了几块：就是这一次进留痕的条数（409 那份是粗估）。
+            "manual_blocks": dropped,
+            "removed_blocks": len(ledger),
+            "mode_before": mode_before,
+        },
+    }
+
+
 # ---------------------------------------------------------------- 统一的报告形状
 
 
@@ -614,6 +927,14 @@ def apply_edit(catalog, page_id, edits, *, at=None, apply: bool = True) -> dict:
         page = result["page"]
 
     changed = any(r["changed"] for r in results)
+    # 「这一次增删了几块」**只数 `add` / `delete` 两条动作显式的增删**（契约 §10.2.1b 第 3 条）。
+    # `merge`（两块并一块）与 `split`（一块拆几块）引起的块数变化**不在里面**：那两样的结果
+    # 在 `edits[]` 与块列表里报，混进这两个数会让「这一块是谁删的」重新变模糊。
+    # **0 也报**：增删对称，只报一头等于让另一头偷偷发生（同 §8「M＝0 也报」）。
+    blocks_removed = sum(len(r.get("blocks_removed") or [])
+                         for r in results if r.get("action") == "delete")
+    blocks_added = sum(len(r.get("blocks_changed") or [])
+                       for r in results if r.get("action") == "add")
     if edits:
         # **每一次修正都写回页文件**（不是只存在界面里）——但只在真的有改动时写，
         # 免得「幂等重复提交」把页文件的 mtime 与审计面刷成新的一次。
@@ -634,6 +955,9 @@ def apply_edit(catalog, page_id, edits, *, at=None, apply: bool = True) -> dict:
         "apply": bool(apply),
         "preview": not apply,
         "changed": changed,
+        # 这一次真的增删了几块（0 也报，契约 §10.2.1b 第 3 条）。
+        "blocks_removed": blocks_removed,
+        "blocks_added": blocks_added,
         "edits": results,
         "page": page,
         "warnings": warnings,
@@ -656,6 +980,12 @@ DISPATCH = {
                                                    edit.get("problem_type"), at=at),
     "question_no": lambda page, edit, at: set_question_no(page, edit.get("block_id"),
                                                           edit.get("question_no"), at=at),
+    "add": lambda page, edit, at: add_block(
+        page, edit.get("bbox_norm"),
+        # 「没给 keep」与「给了 null」是两件事：前者落「收」（#26），后者是「待定」
+        keep=edit["keep"] if "keep" in edit else _KEEP_UNSET,
+        question_no=edit.get("question_no"), problem_type=edit.get("problem_type"), at=at),
+    "delete": lambda page, edit, at: delete_block(page, edit.get("block_id"), at=at),
 }
 
 
@@ -683,4 +1013,40 @@ def bad_request_unknown_action(action):
         f"不认识的修正动作：{action!r}",
         hint=f"可取值：{list(EDITABLE_ACTIONS)}",
         param="action", value=action, allowed=list(EDITABLE_ACTIONS),
+    )
+
+
+def block_delete_bound_to_card_error(block_id, card_id) -> errors.ApiError:
+    """HTTP 层用它把「已绑卡的块不许删」变成 400（D1：拒绝一律 JSON 信封）。
+
+    **不手搓 dict**：走 `errors` 的信封形状。`code` 是 `bad_request`、`reason` 是
+    `block_delete_bound_to_card`（契约 §9 的 `bad_request` 那一档），`details.card_id`
+    点名是哪张卡拦住了这一删——调用方要能一眼看出「要它消失只能用 `drop`」。
+    """
+    return errors.ApiError(
+        400, "bad_request",
+        f"块 {block_id!r} 绑着题卡 {card_id!r}，不许删：那张卡已经存在，删块会造出孤儿绑定",
+        reason=DELETE_BOUND_TO_CARD,
+        hint="要「不要它」只能用 drop（不收：块留在页文件里、带 decision.rule = "
+             "\"human_drop\"，可审计）",
+        details={"param": "block_id", "value": block_id, "card_id": card_id},
+    )
+
+
+def resegment_needs_confirmation_error(page_id, discarded) -> errors.ApiError:
+    """HTTP 层用它把「重置为预设要先问人」变成 409（契约 §9、§10.2.1b）。
+
+    **不是 400**：参数没写错，是这次操作会**毁掉人的劳动**；与 `ambiguous_attempt_at`
+    同一档——不许替人做不可逆的决定。`details.discarded` 报清**将**丢掉什么
+    （`discarded_manual_work` 一份实现，界面照它显示、不许自己重算）。
+    """
+    return errors.ApiError(
+        409, RESEGMENT_NEEDS_CONFIRMATION,
+        f"页 {page_id} 上有人工改动（块列表来源 {discarded['mode_before']}、"
+        f"手工块 {discarded['manual_blocks']}、删除留痕 {discarded['removed_blocks']} 条），"
+        f"「重置为预设」会把它们丢掉",
+        reason=RESEGMENT_NEEDS_CONFIRMATION,
+        hint='确实要丢掉就带 {"confirm_discard_manual": true} 再来一次；只想动某几块就用 '
+             "PATCH 的动作（add／delete／move／merge／split／drop／keep／type／question_no）",
+        details={"id": page_id, "discarded": discarded},
     )

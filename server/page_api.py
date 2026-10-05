@@ -7,7 +7,7 @@ spec #2 把界面的所有读写都收在**一个**接缝上：**模型调用与
 |---|---|---|
 | **建** | `POST /api/page` | 照片进 → 存图 + 建页文件 + 跑切分（**#15 已落地**，`server/page_create.py`） |
 | **改** | `PATCH /api/page/<id>` | **#14**（`server/page_edit.py`），本模块接线 |
-| **重切** | `POST /api/page/<id>/resegment` | 跑切分 → 逐块**新增／保留**对照，**不写题卡**（#10 的 `classify_resegment`），本模块接线 |
+| **重切** | `POST /api/page/<id>/resegment` | **本版（#17 / #31）起语义 = 「重置为预设」**：破坏性动作，要显式确认（`server/page_edit.reset_to_preset`），本模块接线；三态对照仍来自 #10 的 `classify_resegment` |
 | **入库** | `POST /api/page/<id>/commit` | 按当前块列表生成题卡并回写绑定（**#15 已落地**，`server/page_commit.py`） |
 
 **本模块自己不实现任何一条规则**，只做「HTTP 形状 ↔ 服务层」的翻译：
@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import assets, errors, ink, page_commit, page_create, page_edit, segmentation
+from . import assets, errors, ink, page_commit, page_create, page_edit, pages, segmentation
 from .intake import _load_page
 from .model_client import ModelUnavailable
 from .warnings import _warn
@@ -71,6 +71,33 @@ def parse_json_body(body) -> dict:
             param="body", value=str(data)[:200],
         )
     return data
+
+
+def _confirm_discard_manual(body) -> bool:
+    """`resegment` 的 body 里带没带 `{"confirm_discard_manual": true}`。
+
+    「重置为预设」是破坏性动作（#31），这一条问的是「人点没点确认」。**空 body、不是 JSON、
+    不是对象都不算确认**，但**也不许崩**：没带就是没点，于是该 409 的地方照常 409
+    （不许替人做不可逆的决定）。只认**严格的那个 `true`**——`"true"`／`1` 都是别人在猜。
+    """
+    raw = (body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray))
+           else (body or ""))
+    if not raw.strip():
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("confirm_discard_manual") is True
+
+
+def _nothing_discarded(page: dict) -> dict:
+    """没跑成的那两条路上回执里的 `discarded`：**什么都没被丢掉**（`manual_blocks` 是 0）。
+
+    形状与成功那条路**一模一样**（契约 §10.2.1b），只是数字说的不是「将会丢掉多少」，
+    而是「这一次没有重置，所以没丢东西」——把 409 那份粗估抄过来就是报了个假的。
+    """
+    return {**page_edit.discarded_manual_work(page), "manual_blocks": 0}
 
 
 def _require_edits(payload: dict) -> list:
@@ -127,19 +154,40 @@ class PageEndpoint:
 
     # ------------------------------------------------------------ 重切
 
-    def resegment(self, page_id: str) -> tuple[dict, list[dict]]:
-        """`POST /api/page/<id>/resegment`：重跑切分 → 逐块**新增／保留**对照。
+    def resegment(self, page_id: str, body=b"") -> tuple[dict, list[dict]]:
+        """`POST /api/page/<id>/resegment`：**重置为预设**（#17 / #31 起语义变了）。
 
-        **不写题卡、不写页文件**（spec #2 原话：「重切返回的是逐块对照」；
-        #10 的 `classify_resegment` 把 `wrote_cards` / `wrote_page` 显式写进报告）。
-        界面照 `matches[].state` 显示三态，而不是只显示「重切完成」。
+        语义不再是「重跑一次切分、只给对照」，而是一次**破坏性**动作：它会把人的劳动
+        （人画的块、人拖过的边界、删过块的留痕）覆盖掉。所以：
+
+        - 请求体带 `{"confirm_discard_manual": true}` 才算**确认**；这一页只要有人工改动
+          （`page_edit.has_human_work`：块列表来源是 `manual`，或删过块），没带确认就是
+          **409 `resegment_needs_confirmation`**，`details.discarded` 报清**将**丢掉什么。
+          **空 body／不是 JSON 都不算确认**（也不崩）——没带就是没点（`_confirm_discard_manual`）。
+        - 确认过（或本来就没有人工改动）才真跑：新预设落进页文件（`blocks`）、
+          `segmentation.mode` 回到 `"model"`、没进新列表的旧块进 `removed_blocks[]`
+          （`page_edit.reset_to_preset`），回执 `data.discarded` 用同一形状报**真的**丢了几块。
+        - **为什么这个能力要留**：模型切分最坏的失败是把整页并成一块，那时从零手画十道题
+          比重摇一次预设差得远；但它既然是「重置预设」，就必须按破坏性动作对待——
+          **不许不声不响地覆盖人的劳动**。
+        - 对手顺序有讲究：确认这一条判在**模型调用之前**（没确认就不该花钱，更不该先算一遍
+          再问人）。
+
+        `checks` / `reconciliation` **照旧跑**（三条确定性判据，只报不改）：这次改动只动
+        语义与回执，那两键一个字段都不动。`wrote_cards` 恒为 `False`（重切从不建卡）。
 
         没注入切分器 = **切分不可用**（#10 的接缝口径，与 #13 的收件管道同一句话）：
         `blocks` 给 `null`（**不是 `[]`**——「还没切」与「切出 0 块」是两件事），
-        并报 `segmentation_not_implemented`。**绝不编一个块列表。**
+        并报 `segmentation_not_implemented`。**绝不编一个块列表**，也**一个字节都不写**
+        （没有新预设可以重置）。
         """
         page = _load_page(self.catalog, page_id)
         page_edit.assert_page_payload_matches_id(self.catalog, page, page_id)
+
+        # 破坏性动作先问人（#31）：它判在模型调用之前，也在写盘之前。
+        if page_edit.has_human_work(page) and not _confirm_discard_manual(body):
+            raise page_edit.resegment_needs_confirmation_error(
+                page_id, page_edit.discarded_manual_work(page))
 
         if self.segmenter is None:
             return {
@@ -149,6 +197,7 @@ class PageEndpoint:
                 "blocks": None,          # 不是 []：没切 ≠ 切出 0 块
                 "matches": None,
                 "removed": None,
+                "discarded": _nothing_discarded(page),
                 "summary": None,
                 "wrote_cards": False,
                 "wrote_page": False,
@@ -169,7 +218,8 @@ class PageEndpoint:
         parsed = page_create.as_candidates(outcome)
         warnings = list(parsed.get("warnings") or [])
         if not parsed.get("parsed", True):
-            # 答了话但解析不出块 → 明确的报告（不是「这一页没有题」）
+            # 答了话但解析不出块 → 明确的报告（不是「这一页没有题」）。没有新预设可重置，
+            # 所以页文件仍然一个字节都不动。
             return {
                 "page_id": page_id,
                 "segmentation": "unparsed",
@@ -177,6 +227,7 @@ class PageEndpoint:
                 "blocks": None,
                 "matches": None,
                 "removed": None,
+                "discarded": _nothing_discarded(page),
                 "summary": None,
                 "message": parsed.get("message"),
                 "wrote_cards": False,
@@ -188,9 +239,20 @@ class PageEndpoint:
             page, parsed["blocks"], cards={card["id"]: card for card in cards})
         # 对账（R1）：三条确定性判据跑在**这次重切给出的块列表**上——题号连续性／
         # 块重叠是纯几何，覆盖率读页文件旁边那张整页照片（读不出来就明说「没查」）。
-        # **只报不改**：重切本来就不写盘（见 docstring）。
+        # 这两键**只报不改**：重置要改的是 `blocks`／`segmentation`／`removed_blocks` 三样。
         reconciliation = segmentation.reconcile_response(
             report["blocks"], self._ink_regions(page))
+        # 预设回到页上时，新几何要一份**按照片真实像素尺寸推的** `bbox_px`（整页像素 xyxy）：
+        # 与 `page_create._page_blocks` 是**同一件事**（那是新页的初值），所以复用那一处实现，
+        # 不写第二份换算。推不出来（照片不在／读不了）就留空——像素框宁可空着，也不许拿
+        # `bbox_norm` 反推一个假的（D5：`bbox_px` 是加过 pad 的盘上原值）。
+        pixel_boxes = page_create._page_blocks(parsed["blocks"], self._image(page))
+        for block, laid_out in zip(report["blocks"], pixel_boxes):
+            block["bbox_px"] = laid_out["bbox_px"]
+        # 确认过了（或本来就没有人工改动）→ **真的重置**：换块列表、来源回 `model`、
+        # 丢掉的旧块进留痕。写盘路径仍然只由 page_id 决定（`save_page` 里那一道）。
+        reset = page_edit.reset_to_preset(page, report)
+        pages.save_page(self.catalog, reset["page"], page_id=page_id, apply=True)
         return {
             "page_id": page_id,
             "segmentation": "ran",
@@ -199,7 +261,11 @@ class PageEndpoint:
             "message": parsed.get("message"),
             "checks": reconciliation["checks"],
             "reconciliation": reconciliation["reconciliation"],
+            "discarded": reset["discarded"],
             **report,
+            # 这一次真的写了页文件（`report["wrote_page"]` 是那个**纯函数**自己的口径：
+            # 它不写盘；写盘是这一层做的——两个数说的是两件事，别合并成一个）。
+            "wrote_page": True,
         }, (warnings + card_warnings + list(report.get("warnings") or [])
             + reconciliation["warnings"])
 
@@ -291,16 +357,25 @@ class PageEndpoint:
                 cards.append(card)
         return cards, warnings
 
+    def _image(self, page: dict):
+        """页文件旁边那张整页照片 → 解码后的整页图；不在／读不了 → `None`。
+
+        「读不出来」与「查过没问题」必须长得不一样：拿到 `None` 的调用方要么明说
+        **这一条没查**（覆盖率对账），要么把那一项**留空**（像素框），不许冒充查过。
+        """
+        try:
+            return ink.read_png(self._image_path(page))
+        except (OSError, ink.UnsupportedImage):
+            return None
+
     def _ink_regions(self, page: dict):
         """页文件旁边那张整页照片 → 墨迹区域（覆盖率对账的输入，契约 §8）。
 
         读不了 / 不在 → `None`：`check_coverage` 会明说**这一条没查**（hint），
         而不是冒充「没有未覆盖的墨迹」——「没查」与「查过没问题」必须长得不一样。
         """
-        try:
-            return ink.page_ink_regions(ink.read_png(self._image_path(page)))
-        except (OSError, ink.UnsupportedImage):
-            return None
+        image = self._image(page)
+        return ink.page_ink_regions(image) if image is not None else None
 
 
 __all__ = ["PageEndpoint", "parse_json_body", "SEGMENTATION_NOT_IMPLEMENTED",
