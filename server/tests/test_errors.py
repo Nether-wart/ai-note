@@ -107,3 +107,50 @@ def test_an_empty_image_kind_blames_the_kind_not_the_id(api_for):
     assert body["error"]["details"]["param"] == "kind"
     assert body["error"]["details"]["value"] == ""
     assert "图片类型" in body["error"]["message"]
+
+
+# ---------------------------------------------------------------- 兜底 500 的 reason（R5）
+
+
+def test_the_last_resort_500_is_an_envelope_whose_reason_is_registered(api_for):
+    """R5/D9：`Api.handle` 最后那一档（没预料到的异常）也必须是 §2 的信封。
+
+    它的输入是「谁都不该这么调」——这一档存在的意义正是：真出了没预料到的异常时，
+    出口仍是一个带 `reason` 的 JSON 信封（D1：绝不许裸回溯、绝不许空响应体），
+    而 `reason` 还得是 §9 登记过的取值（否则下游照码表写分支就会漏掉真正的兜底）。
+    """
+    api = api_for([])
+
+    r = api.handle("POST", "/api/page", 12345,
+                   content_type="multipart/form-data; boundary=----x")
+    body = json.loads(r.body)
+
+    assert r.status == 500
+    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["reason"] == "internal_error"
+    assert body["error"]["message"], "message 要带异常类名（不许空响应体）"
+    assert ":" in body["error"]["message"], "形状是 `<异常类名>: <说明>`"
+    assert body["error"]["hint"], "hint 指向服务日志"
+    assert "Traceback" not in r.body.decode("utf-8")
+
+
+def test_the_500_reason_values_in_the_contract_match_the_code():
+    """R5：§9 为 `internal_error` 登记的 `reason` 取值，与代码里真会发的那些一致。
+
+    两个方向都要红：契约里多一个没人发的取值 = 文档撒谎；代码里多一个没登记的取值 =
+    下游照码表写分支时漏掉真兜底（这次漏的就是兜底那一档）。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]                     # server/
+    contract = (Path(__file__).resolve().parents[2]
+                / "docs" / "contracts" / "http-api-v0.md").read_text(encoding="utf-8")
+    section = contract.split("`internal_error` 下的 `reason` 取值")[1]
+    block = section.split("`bad_request` 下的")[0]
+    registered = set(re.findall(r"^- `([a-z_]+)`", block, re.M))
+    sources = "\n".join(path.read_text(encoding="utf-8") for path in root.glob("*.py"))
+
+    assert registered == {"page_file_unreadable", "filesystem_error", "internal_error"}, block
+    assert {name for name in registered if f'"{name}"' in sources} == registered, \
+        f"契约登记了但代码里没人发的取值：{ {n for n in registered if f'\"{n}\"' not in sources} }"

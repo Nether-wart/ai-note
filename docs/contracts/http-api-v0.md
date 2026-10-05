@@ -767,8 +767,14 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 没有**那一次重做**（`reason == "attempt_not_found"`，#6，`details.available` 列出实际有哪些时刻）、
 没有这张图（`reason == "not_found"`）。
 
-`internal_error` 下的 `reason` 取值（都是 500，`code` 不变）：页文件读不了（`page_file_unreadable`）、
-盘上操作失败（`filesystem_error`，`message` 带异常类名）——**不许用裸回溯代替信封**（D1）。
+`internal_error` 下的 `reason` 取值（都是 500，`code` 不变）：
+
+- `page_file_unreadable`：页文件在却读不了；
+- `filesystem_error`：盘上操作失败，`message` 带异常类名；
+- `internal_error`：**兜底**——代码里没有更细的原因时 `reason` 落到 `code` 本身
+  （`http.Api.handle` 最后那一档未预期的异常、题卡读不了、上传页文件读不了）。
+  **不许用裸回溯代替信封**（D1）：这一档的 `message` 也带异常类名，`hint` 指向服务日志。
+
 `bad_request` 下的 `reason` 取值（都是 400，`code` 不变，`details.param` 点名字段）：
 页里的 `id` 与目标页 id 不一致（`page_id_mismatch`）、页里的 `image` 不是纯文件名
 （`page_image_unsafe`）——写盘路径只认调用方给的页 id，页里的 `id`/`image` 只用于对账（§8）；
