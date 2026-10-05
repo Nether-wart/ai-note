@@ -408,7 +408,7 @@ def test_every_edit_is_written_back_to_the_page_file_not_just_the_ui(api_for):
     """
     api = api_for([])
     api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
-    pages.save_page(api.catalog, three_blocks(), apply=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
 
     report = page_edit.apply_edit(
         api.catalog, PAGE_ID,
@@ -427,7 +427,7 @@ def test_a_preview_writes_nothing_but_reports_the_same_thing(api_for):
     """预演一个字节都不写，但报告里说得出「真改会改成什么」（同一条代码路径）。"""
     api = api_for([])
     api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
-    pages.save_page(api.catalog, three_blocks(), apply=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
     before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
 
     preview = page_edit.apply_edit(
@@ -445,7 +445,7 @@ def test_an_empty_edit_list_is_reported_and_the_page_is_untouched(api_for):
     """D9：空请求是「明确报出来」，不是一次静默的成功。"""
     api = api_for([])
     api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
-    pages.save_page(api.catalog, three_blocks(), apply=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
     before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
 
     report = page_edit.apply_edit(api.catalog, PAGE_ID, [], at=AT, apply=True)
@@ -596,7 +596,7 @@ def test_a_chain_of_edits_is_applied_in_order_to_one_page(api_for):
     """一串修正是**按顺序**累加的（先合并再拖边界 ≠ 先拖再合并）。"""
     api = api_for([])
     api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
-    pages.save_page(api.catalog, three_blocks(), apply=True)
+    pages.save_page(api.catalog, three_blocks(), page_id=PAGE_ID, apply=True)
 
     report = page_edit.apply_edit(
         api.catalog, PAGE_ID,
@@ -620,7 +620,7 @@ def test_the_edit_does_not_touch_any_card_file(api_for):
     api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
     pages.save_page(api.catalog, page([
         block("b1", [0.02, 0.02, 0.9, 0.2], card_id="p-20261004-aaaaaa"),
-    ]), apply=True)
+    ]), page_id=PAGE_ID, apply=True)
     card_path = api.catalog.problems_dir / "p-20261004-aaaaaa.json"
     before = card_path.read_bytes()
 
@@ -647,7 +647,7 @@ def test_edited_blocks_still_reconcile_as_kept_after_a_resegment(api_for):
         block("b1", [0.02, 0.02, 0.9, 0.2], card_id="p-20261004-aaaaaa", keep=True,
               question_no=1),
     ])
-    pages.save_page(api.catalog, blocks, apply=True)
+    pages.save_page(api.catalog, blocks, page_id=PAGE_ID, apply=True)
 
     # 人改题号（不动边界）
     page_edit.apply_edit(api.catalog, PAGE_ID,

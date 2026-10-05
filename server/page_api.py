@@ -139,7 +139,7 @@ class PageEndpoint:
         并报 `segmentation_not_implemented`。**绝不编一个块列表。**
         """
         page = _load_page(self.catalog, page_id)
-        page_edit.assert_page_payload_matches_id(page, page_id)
+        page_edit.assert_page_payload_matches_id(self.catalog, page, page_id)
 
         if self.segmenter is None:
             return {
@@ -207,7 +207,7 @@ class PageEndpoint:
         而不是给一张替身图（同 D4 的口径：不许回退成别的东西）。
         """
         page = _load_page(self.catalog, page_id)
-        page_edit.assert_page_payload_matches_id(page, page_id)
+        page_edit.assert_page_payload_matches_id(self.catalog, page, page_id)
         path = self._image_path(page)
         if not path.is_file():
             raise errors.not_found(

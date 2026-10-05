@@ -547,49 +547,33 @@ def _result(page: dict, *, at: str, action: str, warnings: list[dict], changed: 
     }
 
 
-def assert_page_payload_matches_id(page: dict, page_id: str) -> None:
-    """写回**之前**的不变式：载荷里的 `id`／`image` 不许决定写到哪、读到哪。
+def assert_page_payload_matches_id(catalog, page: dict, page_id: str) -> None:
+    """写回/读图**之前**的不变式：页载荷里的 `id`／`image` 不许决定读写到哪。
 
-    **为什么必须有这一条**（#12 的独立验证发现的真实攻击路径）：
+    **判据不在这里实现**——`pages.require_page_identity`（#12 的数据安全修复）是唯一实现，
+    本函数只是本模块的调用点，并且**把 `image` 也一起验掉**（那是同一条漏洞的派生症状：
+    页文件里的 `image` 可以穿越到 `pages/` 外面去读文件）。
 
-    `pages.save_page` 用 `page["id"]` 拼写盘路径。一份文件名正常、载荷里
-    `id = "../problems/p-xxx"` 的页文件，会让一次"改页"**覆盖一张真题卡**——
-    而且报告里的 `page_path` 是**假的**（指向那份没被碰过的页文件），零警告。
-    派生症状：`image` 字段同样可穿越（能去 `pages/` 外读文件）。
+    ⚠ 两个形状都必须是**纯文件名**（D5：页文件与照片同目录并列）：
 
-    所以写回路径**只能由「我加载时用的那个页 id」决定**，绝不由载荷内容决定。
-    本函数把这条不变式在一次写之前验掉，不一致就**明确拒绝**（D1 的信封，`param: page_id`），
-    而不是写完再说。
+    - `id` 恒等于**加载时用的那个 page_id**（`pages.page_identity_ok` 判，且要求它是
+      一个安全的文件名片段）；
+    - `image` 是纯文件名：`basename == 它自己`（同时挡掉绝对路径、`..`、`a/b.png`），
+      且能过 `pages.page_hash_from_image`（照片必须有后缀、不是隐藏文件）。
 
-    形状上要求（D5：页文件与照片**同目录并列**）：
-
-    - `page["id"]` 恒等于文件名主干 = 加载时用的 `page_id`；
-    - `page["image"]` 是一个**纯文件名**（没有路径分隔符、没有 `..`、不是绝对路径）。
-
-    两者都用**公开的校验器**（`pages.is_page_id`、`page_hash_from_image`），不另写一套
-    路径拼接——将来 `save_page` 强制这条不变式时，这里也不会被它挡到。
+    为什么必须验：`pages.save_page` 曾经用 `page["id"]` 拼路径，于是一份文件名正常、
+    载荷里 `id: "../problems/p-xxx"` 的页文件会让一次「改页」**覆盖一张真题卡**，
+    而且报出的 `page_path` 是假的、零警告（#12 的独立验证发现，本工单复现并修掉）。
+    现在 `save_page` 自己也强制这条不变式（`require_page_identity`）——**这里先验一道**，
+    好在碰盘之前就给出本模块自己的 400，而不是等写到一半。
     """
-    payload_id = page.get("id")
-    if payload_id != page_id:
-        raise errors.bad_request(
-            f"页文件里的 id 与它自己的文件名对不上：加载的是 {page_id!r}，"
-            f"载荷里写的是 {payload_id!r}",
-            hint="页文件里的 `id` 必须恒等于文件名主干（D5）。写回路径只由**加载时用的页 id**"
-                 "决定，绝不由载荷里的字段决定——否则一份改坏了的页文件会让写回覆盖别的文件",
-            param="page_id", value=page_id, payload_id=payload_id,
-        )
-    if not pages.is_page_id(payload_id):
-        raise errors.bad_request(
-            f"页文件里的 id 不是一个安全的文件名片段：{payload_id!r}",
-            hint="只允许字母、数字、点、下划线与连字符，且不许出现 '..'",
-            param="page_id", value=payload_id,
-        )
+    # 这一条判据的唯一实现在 `pages`（#12 收口）。它抛 400 `page_id_mismatch`。
+    pages.require_page_identity(catalog, page, page_id)
     image = page.get("image")
-    # 同目录并列 → `image` 只能是纯文件名。`basename == 它自己` 同时挡掉
-    # 绝对路径、`..`、以及 `a/b.png` 这类带目录的写法。
-    if image is not None and (not isinstance(image, str)
-                              or Path(image).name != image
-                              or not pages.page_hash_from_image(image)):
+    if image is None:
+        return
+    if (not isinstance(image, str) or Path(image).name != image
+            or not pages.page_hash_from_image(image)):
         raise errors.bad_request(
             f"页文件里的 image 不是一个纯文件名：{image!r}",
             hint="页文件与整页照片同目录并列（D5），所以 `image` 只能是照片的文件名，"
@@ -619,7 +603,7 @@ def apply_edit(catalog, page_id, edits, *, at=None, apply: bool = True) -> dict:
     page = _load_page(catalog, page_id)
     # **写回路径只由「加载时用的 page_id」决定**：载荷里的 id／image 一旦对不上，
     # 就在这里拒绝（而不是让 save_page 按载荷里的 id 写到别处去）。
-    assert_page_payload_matches_id(page, page_id)
+    assert_page_payload_matches_id(catalog, page, page_id)
     moment = at or datetime.now()
     results: list[dict] = []
     warnings: list[dict] = []
@@ -637,8 +621,9 @@ def apply_edit(catalog, page_id, edits, *, at=None, apply: bool = True) -> dict:
         # 写之前**再验一次**：上面的编辑链不该动到 `id`／`image`（它们不在任何动作的
         # 可改字段里），但"不该"不是证明。这里验的是**真正要写下去的那份载荷**，
         # 所以哪怕将来某个动作顺手改了 `id`，也不会写到 `pages/` 外面去。
-        assert_page_payload_matches_id(page, page_id)
-        pages.save_page(catalog, page, apply=bool(apply and changed))
+        assert_page_payload_matches_id(catalog, page, page_id)
+        # **写盘路径只由这个 page_id 决定**（`save_page` 的 `page_id` 是关键字、必填）
+        pages.save_page(catalog, page, page_id=page_id, apply=bool(apply and changed))
     else:
         warnings.append(_page_warn(
             EDIT_EMPTY, "这次请求里一条修正都没有（`edits` 是空的）→ 页文件没动", "hint"))
