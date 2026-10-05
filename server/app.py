@@ -93,6 +93,18 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
         def do_POST(self) -> None:  # noqa: N802
             self._respond("POST")
 
+        def do_PATCH(self) -> None:  # noqa: N802
+            # 页资源那条「改」（契约 §10.2.1b，`PATCH /api/page/<id>`）**必须在这里接上**：
+            # 路由表（`Api._route`）里挂着它、预检（`_options`）也答应它，但
+            # `BaseHTTPRequestHandler` 只认自己有的 `do_*` 方法——没这一个，真实 socket
+            # 会拿框架自带的 501「Unsupported method」+ `text/html` 回答，
+            # 而契约要求每个响应都是同一个 JSON 信封（§2）。
+            #
+            # 这个缺口活了很久，因为唯一吃 PATCH 的测试是直接调 `api.handle("PATCH", …)`
+            # 的纯函数接缝，**绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。
+            # 现在有一条真 socket 的测试盯着它（`test_server_smoke.py`）。
+            self._respond("PATCH")
+
         def log_message(self, fmt: str, *args) -> None:  # 别把访问日志吞掉
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 

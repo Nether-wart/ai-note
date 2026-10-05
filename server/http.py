@@ -146,13 +146,22 @@ class Api:
             raise method_not_allowed(method, [*allowed, "OPTIONS"])
 
     def _options(self) -> Response:
+        """预检。**PATCH 必须在这里列出来**：跨源预检不通过时，浏览器根本不会把
+        `PATCH /api/page/<id>` 发出去（`Access-Control-Allow-Methods` 里没有它），
+        而这条请求恰恰是切分修正页唯一的写路径。站点在 :3000、服务在 :8765，
+        跨源是常态，所以这不是理论问题。
+
+        这份清单是**全局**的（预检不带路由上下文），比逐路由精确更松一档：
+        在只读端点上答应 PATCH，真发过来仍然是 405 带 `allowed`（契约 §5.1）。
+        松一档的代价是「预检过了、真请求 405」；紧一档的代价是「改不了」。
+        """
         return Response(
             204,
             b"",
             "text/plain; charset=utf-8",
             headers={
-                "Allow": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Allow": "GET, POST, PATCH, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
                 "Access-Control-Max-Age": "600",
             },
