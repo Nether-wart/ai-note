@@ -25,3 +25,5 @@ data/index.json
 # 仓库外记录：公开文档里被摘除的具体题目内容、学生的错答与订正过程。
 # docs/acceptance-log.md 是公开版，全本在这里。
 data/private/
+
+.worktree
