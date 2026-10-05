@@ -433,3 +433,23 @@ def test_create_says_which_ink_it_excluded_as_a_full_page_draft(tmp_path):
     assert excluded["reason"] == "page_span"
     assert excluded["px"] == 98 * 58
     assert coverage["ok"] is True, "排除之后没有可对账的墨迹——这不是「没覆盖」"
+
+
+def test_every_warning_the_create_path_emits_carries_an_explicit_level(tmp_path):
+    """R1：新接的对账警告也要带显式 `level`（契约 §2）——整封信封逐条走一遍。
+
+    逐条断言只有「我想到的那几条」；这条**遍历信封**，所以将来新加的码漏了 `level`
+    会当场红（`level` 有默认值却不出现在响应里，界面只能靠猜）。
+    """
+    blob, _ = a_photo(tmp_path)
+    blocks = [{"id": "b1", "bbox_norm": [0.0, 0.0, 0.4, 1 / 3], "question_no": 17},
+              {"id": "b2", "bbox_norm": [0.6, 0.0, 0.4, 1 / 3], "question_no": 19}]
+    api = build_api(tmp_path, segmenter=static_segmenter(blocks))
+
+    _, envelope = post_page(api, blob)
+
+    assert envelope["warnings"], "这组夹具本来就该有警告，否则这条测试空转"
+    assert all(w.get("level") in ("warning", "hint") for w in envelope["warnings"]), \
+        envelope["warnings"]
+    assert {w["level"] for w in envelope["warnings"]} == {"warning", "hint"}, \
+        "两档都要出现过（题号缺口是 warning、没问模型是 hint），这条断言才不空转"
