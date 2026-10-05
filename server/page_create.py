@@ -121,6 +121,8 @@ def _existing_row(catalog, page_id: str, page: dict, warning: dict) -> tuple[dic
         "page_id": page_id,
         "page_path": str(pages.page_path(catalog, page_id)),
         "image": page.get("image"),
+        # 已经建过的那一页也要回显科目（同上：回执不回声，界面就只能靠再打一次索引去猜）
+        "subject": page.get("subject"),
         "created": False,
         "existing": True,
         "segmentation": "skipped_existing",
@@ -216,6 +218,7 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str,
         # 页文件在却读不了 = 真矛盾：**不覆盖**、也不动照片（同回填那条纪律：先留证据）。
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
+            "subject": subject,
             "created": False, "existing": True, "segmentation": "unreadable_page_file",
             "blocks": None, "message": read_error,
         }, [_page_warn(
@@ -235,6 +238,7 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str,
             note="切分不可用：块列表是 null（不是「这一页没有题」），等人手动画框")
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
+            "subject": subject,
             "created": True, "existing": False, "segmentation": "unavailable",
             "blocks": None,
             "message": "切分不可用 → 页建好了、块列表是 null；请在这张照片上手动画框"
@@ -275,6 +279,7 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str,
             note=f"切分跑了但抠不出块（{parsed.get('message')}）：块列表是 null，等人手动画框")
         return {
             "page_id": page_id, "page_path": str(path), "image": stored_as,
+            "subject": subject,
             "created": True, "existing": False, "segmentation": "unparsed",
             "blocks": None, "message": parsed.get("message"),
         }, warnings
@@ -313,6 +318,9 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str,
         "page_id": page_id,
         "page_path": str(path),
         "image": stored_as,
+        # 回显科目：界面提交了科目就得在回执里看见它被收下了，否则「我填的科目到底进没进去」
+        # 只能靠再打一次索引去猜。没给就是 `null`（**未归类**，不是缺字段）。
+        "subject": subject,
         "created": True,
         "existing": False,
         "segmentation": "ran",
