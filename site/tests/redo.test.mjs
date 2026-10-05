@@ -384,5 +384,13 @@ test('attemptResult / creditLine：判定与掌握读数一律照服务给的原
   assert.equal(result.run_id, '20261004-090000-000-judge.json');
 
   assert.equal(creditLine(result).text, '已计入 1/2');
-  assert.equal(creditLine({credited: false, streak: 1}).text, '只热身，不计入掌握');
+  // R7：按 verdict 分流，两句话不许同时出现（渲染层见 redo-result-render.test.mjs）
+  assert.deepEqual(creditLine({credited: true, streak: 1, verdict: 'correct'}),
+    {kind: 'credited', text: '已计入 1/2'});
+  assert.deepEqual(creditLine({credited: false, streak: 1, verdict: 'correct'}),
+    {kind: 'warmup', text: '只热身，不计入掌握'});
+  assert.deepEqual(creditLine({credited: false, streak: 0, verdict: 'wrong'}),
+    {kind: 'reset', text: '判错：清零回池'});
+  assert.deepEqual(creditLine({credited: false, streak: 0, verdict: 'unclear'}),
+    {kind: 'unchanged', text: '既不推进也不清零'});
 });

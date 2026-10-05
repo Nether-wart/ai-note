@@ -212,8 +212,13 @@ function ErrorPanel({title, error, onRetry}) {
   );
 }
 
-/** 判定结果区：`note` 与两句掌握读数（契约 §10.1）都照服务给的原话。 */
-function ResultPanel({result}) {
+/** 判定结果区：`note` 与掌握读数（契约 §10.1）都照服务给的原话。
+ *
+ * 具名导出是**给渲染测试的接缝**（`site/tests/redo-result-render.test.mjs` 用
+ * `ssr.mjs` 的台子把它渲成 HTML）：面板里那两句读数必须按判定分流，而这件事
+ * 只有把真组件渲出来才断言得了（R7）。
+ */
+export function ResultPanel({result}) {
   const credit = creditLine(result);
   return (
     <div

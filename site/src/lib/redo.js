@@ -299,10 +299,23 @@ export function attemptResult(data) {
   };
 }
 
-/** 契约 §10.1 给 #7 的两句读数（故事 8/9）：计入掌握还是只热身。 */
-export function creditLine({credited, streak} = {}) {
+/** 契约 §10.1 给 #7 的掌握读数（故事 8/9/10）：**按判定分流**，两句话不许同时出现。
+ *
+ * 修前只分 `credited`，于是判错时面板上同时出现服务给的「判错：清零回池」与
+ * 界面补的「只热身，不计入掌握」——而「热身」只限**判对但仍在冷却期**（spec #1
+ * 故事 9），判错要的是**清零回池**（故事 10）。两句并排会让人以为判错没有代价。
+ */
+export function creditLine({credited, streak, verdict} = {}) {
+  if (verdict === 'wrong') {
+    return {kind: 'reset', text: '判错：清零回池'};
+  }
   if (credited === true) {
     return {kind: 'credited', text: `已计入 ${streak ?? 0}/2`};
   }
-  return {kind: 'warmup', text: '只热身，不计入掌握'};
+  if (verdict === 'correct') {
+    return {kind: 'warmup', text: '只热身，不计入掌握'};
+  }
+  // 判不清（`unclear`）：服务说的是「既不推进也不清零」——界面不许自称「热身」，
+  // 更不许自称「清零」（那两句都是替服务下结论，而判定只有服务能做）。
+  return {kind: 'unchanged', text: '既不推进也不清零'};
 }

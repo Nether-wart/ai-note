@@ -52,8 +52,8 @@ function transformJsx(source, filename, transformSync, presetReact) {
 /**
  * 起台子：装钩子、转 JSX、把两个真组件 import 进来。
  *
- * @returns {Promise<{renderQuestion: Function, renderPage: Function, renderBroken: Function,
- *                    note: string}>}
+ * @returns {Promise<{renderQuestion: Function, renderPage: Function, renderResult: Function,
+ *                    renderBroken: Function, note: string}>}
  */
 export async function createHarness() {
   let transformSync;
@@ -101,7 +101,7 @@ export async function createHarness() {
 
   const {default: SplitEditor} = await import('../src/components/SplitEditor.js');
   const {default: RedoQuestion} = await import('../src/components/RedoQuestion.js');
-  const {default: RedoPage} = await import('../src/components/RedoPage.js');
+  const {default: RedoPage, ResultPanel} = await import('../src/components/RedoPage.js');
   const {default: RedoHeader} = await import('../src/components/RedoHeader.js');
   const broken = await import('./fixtures/broken.js');
 
@@ -132,6 +132,9 @@ export async function createHarness() {
     /** 同上，但**不给页**（渲染出「正在读…」那一刻）。 */
     renderSplitLoading: ({pageId = 'aaaabbbbcccc'} = {}) =>
       renderToStaticMarkup(createElement(SplitEditor, {apiBase: '', pageId})),
+    /** 判定结果面板（R7：掌握读数按 verdict 分流）。`result` 是 `attemptResult` 的形状。 */
+    renderResult: (result) =>
+      renderToStaticMarkup(createElement(ResultPanel, {result})),
     /** 页头（裁决 D3 的 N/M 显示）。 */
     renderHeader: (header) => renderToStaticMarkup(createElement(RedoHeader, {header})),
     /** 故意做坏的那三个组件——自检的报警能力靠它们证明。 */
