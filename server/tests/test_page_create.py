@@ -181,37 +181,55 @@ def test_a_model_failure_leaves_not_one_byte_behind(tmp_path):
     assert list(api.catalog.problems_dir.glob("*.json")) == []
 
 
-def test_without_a_segmenter_the_page_is_not_created(tmp_path):
-    """切分不可用 → 页**不建**、`blocks` 给 `null`（不是 `[]`），并说清是哪一项没做。"""
+def test_without_a_segmenter_the_page_is_still_created_so_a_human_can_draw(tmp_path):
+    """切分不可用 → 页**照建**、`blocks` 给 `null`（不是 `[]`），人可以在照片上自己画框。
+
+    这是一次**有意的反转**（#23）：以前这里是不建页、照片也不落盘，理由是
+    「`[]` 会被读成『这一页没有题』」——那条理由今天仍然成立，所以 `blocks` 仍是 `null`。
+    变的是后半句：切分不可用时最该发生的事就是让人自己画，而页文件不建、照片不落盘，
+    人就没有东西可画。那条纪律于是从「防误读」变成了「挡住唯一的出路」。
+    """
     blob, _ = a_photo(tmp_path)
     api = build_api(tmp_path)
 
     status, envelope = post_page(api, blob)
 
     assert status == 200
-    assert envelope["data"]["created"] == []
     row = envelope["data"]["pages"][0]
-    assert row["blocks"] is None and row["created"] is False
+    assert row["created"] is True and row["blocks"] is None
+    assert row["segmentation"] == "unavailable"
     assert envelope["data"]["segmentation"]["available"] is False
     assert "segmentation_not_implemented" in {w["code"] for w in envelope["warnings"]}
-    assert not api.catalog.pages_dir.exists()
-    assert list(api.catalog.pages_dir.glob("*.png")) == []
+
+    # 照片与页文件都真的在盘上——人要有东西可画
+    assert len(list(api.catalog.pages_dir.glob("*.png"))) == 1
+    on_disk = json.loads((api.catalog.pages_dir / f"{row['page_id']}.json").read_text("utf-8"))
+    assert on_disk["blocks"] is None
+    assert on_disk["segmentation"]["mode"] == "unavailable"
+    assert on_disk["segmentation"]["note"]
 
 
 def test_a_segmentation_that_cannot_be_parsed_is_not_an_empty_page(tmp_path):
-    """模型答了话但抠不出块 → 这是「切分没跑成」，**不是**「这一页没有题」：页不建。"""
+    """模型答了话但抠不出块 → 这是「切分没跑成」，**不是**「这一页没有题」。
+
+    判据是 `blocks is None`（不是 `[]`）与 `segmentation.mode == "unavailable"`；
+    页**照建**（#23），因为模型切坏时人的出路正是自己画框。
+    """
     blob, _ = a_photo(tmp_path)
     api = build_api(tmp_path, segmenter=lambda path: "这一页我看不清，就不给 JSON 了")
 
     status, envelope = post_page(api, blob)
 
     assert status == 200
-    assert envelope["data"]["created"] == []
     row = envelope["data"]["pages"][0]
     assert row["blocks"] is None and row["segmentation"] == "unparsed"
     assert row["message"]
     assert "page_segmentation_unparsed" in {w["code"] for w in envelope["warnings"]}
-    assert not api.catalog.pages_dir.exists()
+    on_disk = json.loads((api.catalog.pages_dir / f"{row['page_id']}.json").read_text("utf-8"))
+    assert on_disk["blocks"] is None, "不许拿 `[]` 冒充「这一页没有题」"
+    assert on_disk["segmentation"]["mode"] == "unavailable"
+    # 那一句「为什么没有块」要留在页文件上：下一个人看页文件时才知道机器试过了
+    assert "抠不出块" in on_disk["segmentation"]["note"]
 
 
 def test_a_request_without_a_photo_is_400_and_creates_nothing(tmp_path):

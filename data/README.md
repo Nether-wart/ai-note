@@ -17,13 +17,14 @@ python3 -m server.app --data data --host 127.0.0.1 --port 8765
 cp -r data/. ~/.local/share/ai-note/          # Windows 换成 %APPDATA%\ai-note
 ```
 
-**只有两个文件进仓库**：`vocab/error-causes.json` 与 `vocab/topic-outline.seed.json`（词表种子）。
+**只有三个文件进仓库**：`vocab/subjects.json`、`vocab/error-causes.json` 与
+`vocab/topic-outline.seed.json`（词表种子）。
 其余全部被 `.gitignore` 拦住——这个仓库是公开的，而这里放的是真实学生的手写作业。那几条忽略
 规则现在是**安全网**：即使你显式 `--data data`，也绝不许把私人数据写进公开仓库。
 
 | 路径 | 是什么 | 进仓库 |
 |---|---|---|
-| `vocab/` | 词表种子：错因清单、知识点大纲 | ✅ 只有这两个 |
+| `vocab/` | 词表种子：**科目**清单、错因清单、考点大纲 | ✅ 只有这三个 |
 | `problems/` | 题卡：`p-<日期>-<hash6>.json` | ❌ |
 | `assets/` | 每道题的图：`-problem.png`（原图）、`-clean.png`（擦除手写后）、`-cleanmask.png`（掩膜） | ❌ |
 | `pages/` | 页：整页照片 `<hash12>.png` ＋ 页文件 `<hash12>.json`（切分结果与「哪张卡在哪一块」的家） | ❌ |
@@ -31,6 +32,17 @@ cp -r data/. ~/.local/share/ai-note/          # Windows 换成 %APPDATA%\ai-note
 | `inbox/` | 收件目录：手机上传／同步盘落进来的地方，**放一个文件就是一次录入** | ❌ |
 | `index.json` | proto 留下的派生索引。新服务**不读它、不写它、不删它**（索引每次请求现算）；形状基准是 [`docs/contracts/http-api-v0.md`](../docs/contracts/http-api-v0.md)，不是这个文件 | ❌ |
 | `private/` | 公开文档里被摘除的具体题目内容与订正过程（`docs/acceptance-log.md` 的全本在这里） | ❌ |
+
+### 两份词表的形状
+
+- `vocab/subjects.json`：`{"科目": ["数学", …]}`——**科目是导航的根**（[`CONTEXT.md`](../CONTEXT.md)），
+  所以「有哪些科目」只有这一份来源。卡上的科目不在表里会被报出来（`subject_unknown`），
+  不替你改；卡上没有科目是**未归类**（`subject_missing`，`hint` 级），在侧栏的「未归类」下看得见。
+- `vocab/topic-outline.seed.json`：`{"大纲": {<科目>: {<章>: {<节>: [<点>, …]}}}}`——
+  大纲挂在科目下，是侧栏的第三层。**这是一份种子**（只为验证受控词表机制，不是完整大纲），
+  旧形状 `{"name": …, "nodes": […]}` **不再兼容**。
+- 数据目录里没有这两份词表时，服务**照样起得来**，但会喊一条 `subjects_vocab_missing`：
+  一声不响地返回空科目表会让整个侧栏空掉，那是这个项目最怕的静默。
 
 ## 有些目录 clone 下来是空的，不是坏了
 

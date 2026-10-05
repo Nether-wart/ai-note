@@ -56,7 +56,7 @@ def test_the_whole_page_pipeline_from_a_photo_to_an_audited_library(tmp_path):
     api = build_api(tmp_path, segmenter=segmenter)
 
     # ---- 1) 建：照片进来，切出三块，其中两块有红笔 → 建议收，第三块没有红笔 → 不入库
-    body, content_type = multipart_body([("page.png", blob)])
+    body, content_type = multipart_body([("page.png", blob)], fields=[("subject", "数学")])
     status, envelope = post(api, "/api/page", body, content_type)
     assert status == 200, envelope
     page_id = envelope["data"]["created"][0]

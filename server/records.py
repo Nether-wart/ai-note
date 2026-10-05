@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from . import assets, autojudge, warnings as warnings_mod
+from . import assets, autojudge, subjects, warnings as warnings_mod
 from .autojudge import REASONS
 from .mastery import (
     DEFAULT_CELLS,
@@ -86,6 +86,9 @@ def problem_record(card: dict, catalog, at: datetime | None = None) -> dict:
     return {
         "id": pid,
         "created_at": card.get("created_at"),
+        # 科目是导航的根（CONTEXT.md、ADR 0009）：`null` = **未归类**，是一等状态，
+        # 不是缺字段。读数是卡上的原值，不在这里做任何回退或猜测。
+        "subject": subjects.card_subject(card),
         "type": problem.get("type"),
         "type_cn": TYPE_CN.get(problem.get("type"), problem.get("type")),
         "transcript": problem.get("transcript"),

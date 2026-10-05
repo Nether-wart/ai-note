@@ -20,6 +20,7 @@
 |---|---|
 | 有 | 三个只读端点：读索引、读一题、读图片。全部 JSON（图片字节是唯一例外，见 §7.1） |
 | 有 | `GET /upload`（后端托管的**单文件**手机上传页）、`POST /api/inbox`（往收件目录放文件）、`POST /api/inbox/scan`（目录监视失效时的手动等价入口）——#13，见 §10.3 |
+| 有 | `GET /api/brief/<科目>` 与 `POST /api/brief/<科目>`（**本版（前端重构 / #17）新增**）：读该科目最近一份简报、按需生成一份。生成走 `brief` 角色，且必须先过**数字闸门**（每个数字都要能在索引里逐字找回），见 §10.5 |
 | 有 | 每个响应带 `warnings[]`，以及「我跳过了什么」的 `skipped[]`（ADR 0007 第 6 条：不许静默） |
 | 有 | 屏幕重做的硬闸门读数（有擦除图 **且** 可自动判定）与「另有 N/M 道进不来」的两个显式数字（§6.1） |
 | 有 | 「这道题能不能走自动判定」的**唯一一份**实现（三拒绝理由，见 §6）——#5 直接复用，不许另写 |
@@ -52,6 +53,20 @@
   下面的 `inbox/`（`--data <dir>` → `<dir>/inbox/`）。它**跟着 `--data` 走**：
   换了数据目录却还往仓库里的 `data/inbox` 写，就是往真数据里写。
   「往这里放一个文件」是录入的唯一入口（ADR 0007 第 4 条）。上传、扫描与上传页见 §10.3。
+- **模型角色的配置**：每个角色一对 `<角色>_PROVIDER` / `<角色>_MODEL` 环境变量
+  （`.env.local` 可覆盖；读法只有 `server/config.py: load_role_config` 一处）。
+  provider 不在白名单里是**坏配置**：服务拒绝启动，不是每个请求里再验一遍。
+
+  | 角色 | 环境变量 | 默认 | 上岗闸门 |
+  |---|---|---|---|
+  | 抽取 `extract` | `EXTRACT_PROVIDER` / `EXTRACT_MODEL` | `deepseek` / `deepseek-flash` | 先过视觉探针，再看真实照片上的直接可用率 |
+  | 判定 `judge` | `JUDGE_PROVIDER` / `JUDGE_MODEL`（另有 `JUDGE_THRESHOLD`） | `deepseek` / `deepseek-flash` | 等价性考卷**全对**（模型自出的与人手写的两份都跑） |
+  | 切分 `segmenter`（**本版（前端重构 / #17）新增**） | `SEGMENTER_PROVIDER` / `SEGMENTER_MODEL` | **沿用抽取角色的默认值** | 三条**都**必须过：视觉探针 + 固定照片集上的人工判定 + `server/segmentation.py` 的三条确定性对账判据，见 §12.1 |
+  | 简报 `brief`（**本版（前端重构 / #17）新增**） | `BRIEF_PROVIDER` / `BRIEF_MODEL` | **沿用抽取角色的默认值** | 数字闸门（每个数字都要能在索引里逐字找回），见 §10.5 |
+
+  密钥**不在这里**要求：缺密钥是调用那一刻的 502 `model_unavailable`（可以重试），
+  不是启动失败。**换模型就要重跑那个角色的验收，不过考不许上岗**（`CONTEXT.md`「验收」；
+  验收脚本与跑法见 §12.1）。简报**不复用抽取角色**：复用会让换模型时两个用途互相绑死（#17 §7）。
 
 ### 时间与 id
 
@@ -138,7 +153,7 @@
 | `code` | str | 稳定标识，界面按它决定怎么显示，测试按它断言 |
 | `message` | str | **给人看的完整句子**，不是错误码的复述——界面照原话显示，不改写、不吞掉 |
 | `id` | str \| null | 属于哪张卡；索引级的为 `null` |
-| `level` | `"warning"` \| `"hint"` | 严重度。`"warning"` = 这里有东西不对，要看；`"hint"` = 提示级（例如「旧卡缺页绑定」，旧数据不该因为新结构变成脏数据）。**级别只有服务能定**，界面不许自行降级。这个键**总是显式发出来**（v0 现有的码一律 `"warning"`，`hint` 级的 `page_binding_missing` 归 #9）——有默认值却不出现在响应里，下游只能靠猜 |
+| `level` | `"warning"` \| `"hint"` | 严重度。`"warning"` = 这里有东西不对，要看；`"hint"` = 提示级（例如「旧卡缺页绑定」，旧数据不该因为新结构变成脏数据）。**级别只有服务能定**，界面不许自行降级。这个键**总是显式发出来**（`hint` 级的码见 §8：`page_binding_missing`、`subject_missing`，以及解答题上的 `standard_answer_missing` 与本版按实现订正的那句说明）——有默认值却不出现在响应里，下游只能靠猜 |
 
 **`skipped` 与 `warnings` 的分工（不要混）**：
 
@@ -168,7 +183,21 @@
     "cooling": 2,
     "graduated": 0,
     "auto_judge_eligible": 1,
-    "auto_judge_ineligible": 1
+    "auto_judge_ineligible": 1,
+    "by_subject": {
+      "数学": { "problems": 1, "in_default_list": 0, "cooling": 1,
+                "graduated": 0, "auto_judge_eligible": 1, "unreviewed": 1 }
+    },
+    "unclassified": 1
+  },
+  "subjects": ["数学"],
+  "outline": {
+    "数学": { "函数与导数": { "导数与单调性": ["含参单调性"], "极值与最值": [] } }
+  },
+  "briefs": {
+    "数学": { "latest_date": "2026-10-04",
+              "generated_at": "2026-10-04T09:39:57+00:00",
+              "stale": true, "new_problems": 1 }
   },
   "screen_redo": {
     "default_basis": "in_default_list",
@@ -212,6 +241,41 @@
   与 §6.1 里 `screen_redo` 的分母**不是一回事**（那个是某个候选总体）。两处名字相近，
   口径不同，看数字时先看它属于哪一段。
   它是**便利读数，不是第二个真源**：有任何不一致，以 `problems` 为准（测试断言两者一致）。
+  逐科目那一层（**本版（前端重构 / #17）新增**）：
+
+  | 键 | 类型 | 含义 |
+  |---|---|---|
+  | `by_subject` | object | 键是科目名，值是 `{problems, in_default_list, cooling, graduated, auto_judge_eligible, unreviewed}`——六个读数与整表**同名同口径**，只是分母收到一个科目 |
+  | `unclassified` | int | **未归类**的**道数**：`subject` 是 `null`／缺字段／空串／纯空白那些卡（那是一等状态，不是缺字段） |
+
+  **不变式（它就是「没有一张卡悄悄没有科目」那条检查）**：
+  `sum(stats.by_subject[*].problems) + stats.unclassified == stats.problems`。
+  `by_subject` 的键是**词表里的科目 ∪ 卡上出现过的科目**：词表里的科目哪怕 0 道也要有键
+  （侧栏要能画出空科目，不然人以为它丢了）；卡上那个不在词表里的科目**也要有键**——
+  它已经带着 `subject_unknown` 喊过一声，再从汇总里把它丢掉就是第二次静默，不变式当场就断。
+- `subjects`：字符串数组，受控词表的科目清单（`<数据目录>/vocab/subjects.json` 的取值，见 §10.4）。
+  **这是「有哪些科目」的唯一来源**（不从文件目录推、不从考点派生，见 §3.1 的 `subject` 行）；
+  词表读不出来时给 `[]` 并报词表级警告（§8），**不是**一个安静的空侧栏。
+- `outline`：考点大纲的树，形状 `{<科目>: {<章>: {<节>: [<点>, …]}}}`——**点 = 叶子**，
+  是字符串数组，**可以是空数组**（空数组 = 这一节还没有点，与「这一节不在大纲里」不是一回事）。
+  **只有出现在 `subjects` 里的科目才允许出现在 `outline` 里**，否则报一条 `warning`
+  （`outline_subject_unknown`，§8）：两份词表打架要喊出来，不许悄悄以一边为准。
+- `briefs`：`{<科目>: {"latest_date": "YYYY-MM-DD"|null, "generated_at": ISO|null, "stale": bool, "new_problems": int}}`。
+
+  | 字段 | 含义 |
+  |---|---|
+  | `latest_date` / `generated_at` | 最近那一份简报的日期与生成时刻。**这个科目一份简报都没有时两者都是 `null`**——「有没有」由它回答 |
+  | `stale` | **这份简报生成之后又有题录进来了**。判据是硬的：该科目里 `created_at` 晚于那份简报的 `covers_until`（它读的那份索引快照，§10.5）的道数 > 0 |
+  | `new_problems` | 就是那几道的**道数** |
+
+  侧栏要能显示「简报已过期：有 N 道新题没进去」——**这一句话不许靠界面自己算**，
+  所以 `stale` 与 `new_problems` 都由服务给（与 §6.1 第 5 条「那句话由服务给」同一条规矩）。
+  没有简报的科目 `stale` 为 `false`、`new_problems` 为 `0`：「还没有简报」与「简报过期了」
+  是两件事，混起来侧栏就会对一份不存在的简报喊过期。
+- **为什么词表挂在索引里（本版（前端重构 / #17））**：侧栏要一次请求就画出整棵树
+  （科目 → 〔简报｜细则｜考点大纲｜今日重做〕），而 `/api/index` 已经是那个「一次拿全」的读端点。
+  分成两次请求会露出一个中间态——**有科目但没有大纲**（或反过来），界面那一刻画出来的是半棵树。
+  所以不新开端点：受控词表与大纲随索引一起来（形状与来源见 §10.4）。
 - `screen_redo`：屏幕重做的两个显式数字（§6.1）。**两套候选总体都算好**摆在 `bases` 里，
   界面按「显示冷却中的题」开关**取**，不许自己重算。
 - `server`：服务的自述（ADR 0007 第 6 条要的就是「我做了什么、我没做什么」）。
@@ -238,6 +302,7 @@
 |---|---|---|---|
 | `id` | str | `id` | |
 | `created_at` | str | `created_at` | 录入时刻 |
+| `subject` （**本版（前端重构 / #17）新增**） | str \| null | `subject`（**题卡顶层字段**） | 这道题的**科目**，取自受控词表 `<数据目录>/vocab/subjects.json`（§10.4）；`null` 表示**未归类**——那是一等状态，不是缺字段。缺字段／空串／纯空白一律算未归类。值是记录的原值：不在词表里也**不许静默改写成 `null`**，只报 `subject_unknown`（§8） |
 | `type` | `"choice"` \| `"fillin"` \| `"solution"` | `problem.type` | **题型枚举就是这三个英文词**。写中文键会静默退回默认值——这个坑真踩过 |
 | `type_cn` | str | 派生 | 选择 / 填空 / 解答 |
 | `transcript` | str | `problem.transcript` | 题面转录 |
@@ -573,11 +638,13 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 `code` 稳定；`message` 是给人看的原话，允许打磨；`level` 见 §2。
 **每一条码都对应一个会喊的检查**（ADR 0007 第 6 条：每个由人填写的字段都要有一个会喊的检查）。
 
-逐卡（出现在 `Problem.warnings` 里。v0 的码 `level` 全是 `"warning"`，且**每个警告对象都显式带这个键**；下表中标注 `hint` 的那条归 #9 落地）：
+逐卡（出现在 `Problem.warnings` 里。**每个警告对象都显式带 `level` 这个键**；级别只有服务能定：
+真矛盾是 `"warning"`，预期状态／「我这一条没查全」是 `"hint"`——下表里 `hint` 级的码逐条标出，
+其余为 `"warning"`）：
 
 | `code` | 触发 | `message` |
 |---|---|---|
-| `standard_answer_missing` | 标准答案为空 | 标准答案为空 → 不能走自动判定，只能人工确认 |
+| `standard_answer_missing` （`problem.type == "solution"` 时 `level: "hint"`，其余 `"warning"`——本版按实现改文档，见 #17 §3.9） | 标准答案为空 | 标准答案为空 → 不能走自动判定，只能人工确认 |
 | `standard_answer_not_choice_letter` | 选择题的标准答案不是单个选项字母 | 选择题的标准答案不是选项字母：'…' |
 | `standard_answer_choice_letter_on_non_choice` | 非选择题的标准答案是单个字母 | 题型是解答，标准答案却只有一个字母 'A' ——像是把选择题的答案填到这道题上了 |
 | `original_answer_choice_letter_on_non_choice` | 非选择题的原答是单个字母 | 题型是解答，原答却是一个选项字母 'A' |
@@ -590,14 +657,34 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `original_image_file_missing` | 卡里记了题面图，文件不在 | 同上 |
 | `page_binding_missing` （`level: "hint"`） | 卡没有页文件绑定（`source.page_image` 缺，或按 §10.2 推出来的页文件不在） | **落地于 #9**（B1）。#9 验收第 2 条：旧卡缺页绑定要报**提示**而不是错误——旧数据不该因为新结构变成脏数据。回填（`python3 -m server.backfill --apply`）之后这条消失 |
 | `page_binding_lost` （`level: "warning"`，**B1 新增**） | 页文件**在**，却读不了／不是 JSON 对象，或里面没有任何块绑定这张卡 | 页实体已经在场却对不上账，这是矛盾不是旧数据，所以要**警告**。与上一条同一个判据（`server/pages.py: page_binding`），只有级别不同——**两种缺绑定不许混成一个级别**（#9 验收 2、#15 在它上面扩展） |
+| `subject_missing` （`level: "hint"`，**本版（前端重构 / #17）新增**） | 卡上没有科目（**未归类**）：缺 `subject` 字段／`null`／空串／纯空白 | 这张卡还没有科目（未归类）→ 它在侧栏的「未归类」下，不在任何科目的简报里。与 `page_binding_missing` **同级**：录入中途没有科目是**预期状态**，报成 `warning` 会把它淹在噪声里。但它必须在界面上有一栏兜底、把**道数**写出来，**不许把它藏起来**——藏起来就是静默丢题 |
+| `subject_unknown` （`level: "warning"`，**本版（前端重构 / #17）新增**） | `subject` 的值不在受控词表里（§10.4） | 科目 '…' 不在科目词表里 → **不许静默把它改写成 `null`**：读数是记录的原值，谁改的谁喊。**只在词表真的读出来时才报**——词表本身读不出来是下面那组词表级警告的事；那时对每张卡喊这一条会把一条真问题淹在一千条噪声里 |
 
-索引级警告（出现在 `data.warnings` 与信封 `warnings` 里，`level` 全是 `"warning"`）：
+索引级警告（出现在 `data.warnings` 与信封 `warnings` 里；级别逐条标出，没标的为 `"warning"`）：
 
 | `code` | 触发 | 为什么值得单独响 |
 |---|---|---|
 | `duplicate_transcript` | 两张卡的题干**逐字相同** | `CONTEXT.md`「串题」：两道不同的题不可能有同一段题干，这条**没有例外**。第八轮那次污染就是这么被抓出来的 |
 | `problem_id_mismatch` | 文件名与卡内 `id` 不一致 | 改名事故或复制粘贴事故 |
 | `public_base_not_reachable` | 服务绑在通配地址（说明想让别的设备连），而 `data.server.public_base` 是通配／环回地址 | ADR 0007 第 5 条那处**已查明的债**的可见化：绑 `0.0.0.0` 时印 `http://0.0.0.0:8765`，手机打不开。默认只监听本机（`127.0.0.1` + 环回地址）**不**报这条——那是设计如此，报它会训练人忽略警告 |
+
+**受控词表与大纲（本版（前端重构 / #17）新增）**——出现在 `data.warnings` 与信封 `warnings` 里
+（索引级，`id` 为 `null`）。词表读不出来**不是 500**，也不许装作「词表就是空的」：
+给的是一份空词表 + 这一组里的一条警告——一声不响地给空科目表会让整个侧栏空掉，
+而那正是这个项目最怕的静默。
+
+| `code` | `level` | 触发 | 为什么值得单独响 |
+|---|---|---|---|
+| `subjects_vocab_unreadable` | `warning` | `<数据目录>/vocab/subjects.json` 在却读不了（JSON 解析失败等），`message` 带异常原话 | 侧栏第一级整个空掉；「词表坏了」与「还没建词表」必须分得开 |
+| `subjects_vocab_missing` | `warning` | 没有这个文件（形状 `{"科目": ["数学", …]}`，与 `error-causes.json` 同形） | 没有第一级就没有侧栏；`message` 里给出形状，好照它建 |
+| `subjects_vocab_empty` | `warning` | 文件在、形状对，但一个科目都没有 | 同上，而这一档更容易被当成「本来就是这样」 |
+| `outline_vocab_unreadable` | `warning` | `<数据目录>/vocab/topic-outline.seed.json` 在却读不了 | 考点大纲那一层整个空着（考点本身仍可打在卡上） |
+| `outline_vocab_missing` | `hint` | 没有这个文件 | 「还没建大纲」是预期状态，但**要说出来**，不许给一棵安静的树 |
+| `outline_subject_unknown` | `warning` | 大纲里的科目不在 `subjects` 里 | 两份词表打架：那个科目下的章／节／点谁都看不到（它不在侧栏的科目下）。以哪边为准是人的决定，服务只负责喊 |
+
+词表级的毛病**一条都不重复到每张卡上**：词表没读出来的时候，逐卡的 `subject_unknown` 一条都不发
+（`server/subjects.py: load` 的 `loaded` 就是这道闸）；按 mtime 记住上一次的结果，文件一动就重读
+——既不为一千张卡读两千次盘，也不会悄悄一直用旧词表。
 
 收件目录（#13；出现在 §10.3 那两个端点的 `warnings` 里）：
 
@@ -642,7 +729,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `code` | `level` | 触发 |
 |---|---|---|
 | `page_block_unknown` | `warning` | 点名要改的块不在这一页上 → 那几块一个字节没动 |
-| `page_block_box_unusable` | `warning` | 新边界读不出来（形状同 #9 的 `block_without_box`）→ 这一块没动 |
+| `page_block_box_unusable` | `warning` | 新边界读不出来（形状同 #9 的 `block_without_box`）→ 这一块没动（`add` 那条路上它是「这一块没新增」，同一个码、同一件事） |
 | `page_block_box_changed` | `hint` | 边界真的动了；`bbox_px`（加了 pad 的盘上原值）已作废置 `null` |
 | `page_block_edit_noop` | `hint` | 这一次改的成本来就是这个样子（重复提交幂等）→ **说出来**，不许显示成成功 |
 | `page_merge_needs_two_blocks` | `warning` | 合并至少两块，给少了 → 页文件没动 |
@@ -764,12 +851,16 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | `internal_error` | 500 | 服务自己出错。`message` 带异常类名，`hint` 指向服务日志。**不允许用 500 表达「输入不对」** |
 | `payload_too_large` | **413** | 一次上传的 body 超过上限（默认 32MB，见 §10.3）。`details` 给 `{param, value, max}`。**判在读 body 之前**：上限要在声明长度上就判掉，读一个百 MB 的 body 再拒绝不是拒绝。这个响应之后连接会关闭（body 没读完，keep-alive 会串味） |
 | `not_auto_judgeable` | **422** | **#5，已实现**：`reason` ∈ §6 的三个码之一，`message` 就是那句中文原话，`warnings[]` 带该卡的自检警告。**不是 400，更不是 500**（编排裁决 D1） |
-| `model_unavailable` | **502** | **#5，已实现**：判定角色调用失败（网络／超时／缺密钥）。同一个信封，`reason = "model_unavailable"`。**这一次重做不留下任何记录**——「我们没能问成」不是「看不清」，记成看不清会凭空造出一条没发生过的重做，并静默重置冷却。界面可以直接重试 |
+| `model_unavailable` | **502** | **#5，已实现**：判定角色调用失败（网络／超时／缺密钥）。同一个信封，`reason = "model_unavailable"`。**这一次重做不留下任何记录**——「我们没能问成」不是「看不清」，记成看不清会凭空造出一条没发生过的重做，并静默重置冷却。界面可以直接重试。**本版（前端重构 / #17）起简报生成与切分也走同一个形状**（§10.5、§10.2.1b） |
 | `ambiguous_attempt_at` | **409** | **#6，已实现**：定点修正的 `attempt_at` 定位到**不止一次**重做（同一秒里做了两次）。`details.candidates` 列出命中的索引。**不是 404**：那几次确实存在，只是这个参数区分不了它们；挑一个就是「猜」 |
+| `resegment_needs_confirmation` | **409** | **本版（前端重构 / #17）新增**：`POST /api/page/<id>/resegment` 是**重置为预设**（破坏性），这一页存在人工改动而请求没带 `{"confirm_discard_manual": true}`。`details.discarded` = `{manual_blocks, removed_blocks, human_edited_blocks}`（将丢掉什么）。**不是 400**：参数没写错，是这次操作会毁掉人的劳动；与 `ambiguous_attempt_at` 同一档——**不许替人做不可逆的决定**（§10.2.1b） |
+| `brief_unverifiable` | **502** | **本版（前端重构 / #17）新增**：简报的**数字闸门**没过——生成出来的每一个数字都必须在**本次索引**里逐字找回，任何一条对不上**这份简报就不落盘**。`details.facts` 列出对不上的那些（`{label, path, claimed, actual}`；`actual` 为 `null` 表示那条 `path` 在索引里**解不出来**，与「解出来不相等」是两档）。理由：这个项目最怕的失败是一段读起来很顺、**数字却是编的**总结，而能自动判的只有「数字对不对」（§10.5） |
 
 `not_found` 下的 `reason` 取值（都是 404，`code` 不变）：没有这道题（`reason == "not_found"`）、
 没有**那一次重做**（`reason == "attempt_not_found"`，#6，`details.available` 列出实际有哪些时刻）、
-没有这张图（`reason == "not_found"`）。
+没有这张图（`reason == "not_found"`）、
+这个科目**还没有简报**（`reason == "brief_missing"`，本版（前端重构 / #17）新增；`?at=` 要的那一天没有则
+`details` 里给出**实际有哪几天**，见 §10.5——**不是**「这个科目不存在」，那个是 400）。
 
 `internal_error` 下的 `reason` 取值（都是 500，`code` 不变）：
 
@@ -782,7 +873,12 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 `bad_request` 下的 `reason` 取值（都是 400，`code` 不变，`details.param` 点名字段）：
 页里的 `id` 与目标页 id 不一致（`page_id_mismatch`）、页里的 `image` 不是纯文件名
 （`page_image_unsafe`）——写盘路径只认调用方给的页 id，页里的 `id`/`image` 只用于对账（§8）；
-写端点的 body 超过**显式上限**（`body_too_large`，见 §10.1）。
+写端点的 body 超过**显式上限**（`body_too_large`，见 §10.1）；
+要删的块已经绑了题卡（`block_delete_bound_to_card`，**本版（前端重构 / #17）新增**，
+`details` 带 `card_id`——那张卡已经存在，删块会造出孤儿绑定，要「不要它」只能用 `drop`）；
+科目不在受控词表里（`subject_not_in_vocabulary`，本版新增，`details` 给
+`{param:"subject", value, allowed}`；它与卡级那条 `subject_unknown` 警告**不是一回事**——
+那是「卡上的值不在词表」，这是「请求点名了一个不存在的科目」，所以另起一个名字，见 §10.5）。
 
 **写端点 body 的显式上限（64 KiB）**：`POST /api/attempt/*` 的 body 合法形状只有
 `{channel, answer}`（或定点修正那三个键），所以上限远小于上传那一档——
@@ -808,8 +904,10 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | 小节 | 状态 |
 |---|---|
 | §10.1 `POST /api/attempt/<pid>` | **已实现**：屏幕重做（#5）与定点修正（#6）；`channel:"paper"`（人工确认）仍是预留 |
-| §10.2 `/api/page*` | **已实现**（四个动作都有路由）：「改」（`PATCH`，#14）、「重切」（`POST …/resegment`，#10/#14）、`GET …/image`（画块框要整页照片，#14）、「建」（`POST /api/page`，#15）、「入库」（`POST …/commit`，#15）。页文件的块已长出 `question_no`（#10）／`ink`（#11）／`decision`（#12）／`problem_type`（#14）／`card_id`（#15 的入库写入） |
+| §10.2 `/api/page*` | **已实现**（四个动作都有路由）：「改」（`PATCH`，#14；**本版（前端重构 / #17）加了 `add`／`delete` 两条动作、回执加 `blocks_removed`**）、「重切」（`POST …/resegment`，#10/#14；**本版语义改成「重置为预设」，要显式确认**）、`GET …/image`（画块框要整页照片，#14）、「建」（`POST /api/page`，#15；**本版起切分不可用也建页**）、「入库」（`POST …/commit`，#15）。页文件的块已长出 `question_no`（#10）／`ink`（#11）／`decision`（#12）／`problem_type`（#14）／`card_id`（#15 的入库写入）；页文件本身长出 `segmentation`／`removed_blocks`（本版） |
 | §10.3 收件目录与手机上传页 | **已实现**（#13） |
+| §10.4 受控词表与大纲（**数据文件，不是端点**） | **本版（前端重构 / #17）新增**：`<数据目录>/vocab/subjects.json` 与改形后的 `<数据目录>/vocab/topic-outline.seed.json` 的形状，以及它们怎么进 `/api/index`（§3） |
+| §10.5 `/api/brief/<科目>` | **本版（前端重构 / #17）新增**（形状先钉住）：读最近一份简报、按需生成一份（走 `brief` 角色，过数字闸门） |
 
 ### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
 
@@ -950,6 +1048,11 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
     "sheet": null,                 // 哪张卷子；未填为 null
     "page_number": null            // 第几页；未填为 null
   },
+  "segmentation": {                // 本版（前端重构 / #17）新增：当前这份块列表是从哪来的
+    "mode": "model",               // model（机器切出来的**预设**）｜manual（人画的，含在预设上增删改之后）｜unavailable（还没有块列表，等人来画）
+    "at": "2026-10-04T14:31:35+08:00",  // 这份块列表是什么时候定下来的；unavailable 时为 null
+    "note": null                   // 一句话说明（例如「切分不可用：那一层没接上」）；没有为 null
+  },
   "blocks": [
     {
       "id": "b1",                                   // 页内唯一、稳定的块 id
@@ -972,9 +1075,41 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
         "at": "2026-10-04T19:00:00+08:00"
       }
     }
+  ],
+  "removed_blocks": [              // 本版（前端重构 / #17）新增：**被删掉的块**的留痕
+    {
+      "block_id": "b3",            // 删掉的那一块原来的 id
+      "bbox_norm": [0.05, 0.62, 0.9, 0.18],  // 它原来在哪（整页归一化 xywh）
+      "question_no": 7,            // 它原来的题号；没给过为 null
+      "removed_at": "2026-10-04T15:02:00+08:00"
+    }
   ]
 }
 ```
+
+**`segmentation` 与 `removed_blocks`（本版（前端重构 / #17）新增）**：
+
+| 键 | 形状 | 含义 |
+|---|---|---|
+| `segmentation` | `{"mode": "model" \| "manual" \| "unavailable", "at": ISO \| null, "note": str \| null}` | `mode` 记的是**当前这份块列表的来源**：`model` = 机器切出来的**预设**；`manual` = 人画的（含在预设上增删改之后）；`unavailable` = **还没有块列表，等人来画** |
+| `removed_blocks` | `[{block_id, bbox_norm, question_no, removed_at}]` | **被删掉的块**的留痕（`delete` 动作与「重置为预设」往这里追加，见 §10.2.1b）。删掉的块**必须**在这里，**绝不静默消失** |
+
+三条硬规矩：
+
+1. **`blocks: null` 与 `[]` 的既有语义一个字都没变**（#13 定的那一条）：`null` = 还没切／
+   没有列表，`[]` = 确实切出 0 块。`segmentation.mode` 是把「这块列表是谁定的」**说出来**，
+   不是替代它。`mode == "unavailable"` 时 `blocks` **必须是 `null`**——
+   「不知道」不许被写成 `[]`（那看起来像「这一页没有题」）。
+2. **`removed_blocks[]` 里永远不许出现带 `card_id` 的块**。这一条是硬的：**已绑 `card_id` 的块
+   永远不许删**（§10.2.1b 的 `delete`），所以留痕里出现 `card_id` 就等于「删块那道闸破了」——
+   那是孤儿绑定的直接证据。要「不收它」只能用 `drop`（块留在 `blocks` 里、带
+   `decision.rule = "human_drop"`，可审计）。
+3. **切分不可用时也要建页**（**本版（前端重构 / #17）改动，推翻一条旧裁决**）：照片落盘、
+   页文件照建，`segmentation.mode = "unavailable"`、`blocks = null`、`removed_blocks = []`。
+   理由两条：①**切分不可用不等于「这一页没有题」**——前者是「我不知道」，后者是事实，
+   两件事必须分得开；②人要能在这张页上**手动画框**，而**页文件不建，人就没有东西可画**。
+   旧裁决（ADR 0005 / #15 交付时）是「切分不可用 → 页文件不建、照片也不落盘」，
+   它让界面无从下手；推翻它这件事记在 §11 的两张表里（#17 §3.6、§11.3）。
 
 **两个边界的形状不一样，别当成同一件事**：
 
@@ -985,7 +1120,8 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 
 回填时 `bbox_px` **照抄盘上的原值**，不用 `bbox_norm` 重算。
 下游扩展键**先占名字**：`question_no`（#10 落地）、`ink`（#11 定义、#12 写入）、
-`decision`（#12 新增）、`type`（#14）。
+`decision`（#12 新增）、`type`（#14）；**本版（前端重构 / #17）新增的两个是页级的**：
+`segmentation` 与 `removed_blocks`（上面那张表）。
 
 **`keep` 与 `decision` 是一对**（#12 验收 3）：`keep` 只说去留，`decision` 说**为什么**。
 `decision` 的每个块都要有（`rule` + `reason` + `source` + `semantics`），因为「切分结果与
@@ -1016,8 +1152,8 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 
 | 动作 | 路由 | 请求 | 响应 `data` | 状态 |
 |---|---|---|---|---|
-| 改 | `PATCH /api/page/<id>` | `{dry_run?: bool, edits: [{action, …}]}` | `{page_id, page_path, apply, preview, changed, edits[], page, wrote_cards, wrote_page}` | **已实现** |
-| 重切 | `POST /api/page/<id>/resegment` | 无 body | `{page_id, segmentation, ran, blocks\|null, matches[]\|null, removed[]\|null, summary\|null, rejected[], wrote_cards, wrote_page, checks, reconciliation}` | **已实现** |
+| 改 | `PATCH /api/page/<id>` | `{dry_run?: bool, edits: [{action, …}]}` | `{page_id, page_path, apply, preview, changed, blocks_removed, edits[], page, wrote_cards, wrote_page}` | **已实现** |
+| 重切（**本版（前端重构 / #17）起语义 = 重置为预设**） | `POST /api/page/<id>/resegment` | `{"confirm_discard_manual": true}`（**本版新增**；没带而这一页又存在人工改动 → **409**） | `{page_id, segmentation, ran, blocks\|null, matches[]\|null, removed[]\|null, discarded, summary\|null, rejected[], wrote_cards, wrote_page, checks, reconciliation}` | **已实现（语义本版改动）** |
 | 整页照片 | `GET /api/page/<id>/image` | — | 图片字节（失败仍是 JSON 信封） | **已实现** |
 | 建 | `POST /api/page` | `multipart/form-data`，字段名 `file`（与 `POST /api/inbox` 同一形状；一个文件 = 一页） | `{pages: [{page_id, page_path, image, created, existing, segmentation, blocks\|null, rejected?, message, counts?, not_kept?, checks?, reconciliation?}], created[], existing[], segmentation{available,reason,message}, wrote_pages}` | **已实现（#15，`server/page_create.py`）** |
 | 入库 | `POST /api/page/<id>/commit` | 无 | `{page_id, page_path, at, blocks{total,kept,dropped,pending,not_an_object}, created[], reused[], skipped[], refused[], wrote_page, wrote_cards, index{count,card_ids,built_at,warnings,skipped}}` | **已实现（#15，`server/page_commit.py`）** |
@@ -1042,8 +1178,11 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 2. **模型失败 → 502 且 `data/` 里一个字节都不留**：照片先在**系统临时目录**里跑切分，
    成功之后才写进数据目录（D1/D9「拒绝就该一个字节都不动」——#13 曾经先 `ensure()`
    建目录再判空）。
-3. **切分不可用／解析不出块都不是「这一页没有题」**：页文件**不建**、`blocks` 给 `null`
-   （不是 `[]`），报 `segmentation_not_implemented`／`page_segmentation_unparsed`。
+3. **切分不可用／解析不出块都不是「这一页没有题」**：`blocks` 给 `null`（不是 `[]`），
+   报 `segmentation_not_implemented`／`page_segmentation_unparsed`。
+   **本版（前端重构 / #17）改动：页文件照建、照片照落盘**（`segmentation.mode = "unavailable"`，
+   §10.2.1）——旧裁决是「切分不可用 → 页文件不建、照片也不落盘」，那让界面**无从下手**
+   （人手动画框要有页文件可画）；这条推翻与理由记在 §10.2.1 第 3 条与 §11 两张表里。
 4. **统计与去留不在这里判**：块上的 `ink` 来自 #11 的 `ink.page_block_reports`，
    建议去留来自 #12 的 `intake.plan_decisions`（这一趟 `semantics` 为空 → 有红笔的块
    按「判不准 → 收」落向收，并报 `intake_semantics_fallback`）。**建只花一次模型调用：
@@ -1071,7 +1210,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
    新卡因此在两处被挡住，而这两处读的是**同一份实现**：`server/autojudge.py`
    （未审核 → 不参与自动判定）与 §6.1 的硬闸门（缺擦除图 → 不进屏幕重做）。
 
-`edits` 的 `action` 是**闭集**（spec #2 的最小集合，stable）：
+`edits` 的 `action` 是**闭集**（spec #2 的最小集合，stable；**本版（前端重构 / #17）加了两条**）：
 
 | `action` | 字段 | 语义 |
 |---|---|---|
@@ -1081,6 +1220,47 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | `drop` / `keep` | `block_id` | 整块丢弃／切换收入——**走 #12 的 `set_keep_by_human`**，不另立判断 |
 | `type` | `block_id`, `problem_type`（`choice`\|`fillin`\|`solution`\|`null`） | 改题型 |
 | `question_no` | `block_id`, `question_no`（正整数或 `null`） | 改题号 |
+| `add` （**本版（前端重构 / #17）新增**） | `bbox_norm`（整页 xywh）, `question_no?`（正整数或 `null`）, `problem_type?`（`choice`\|`fillin`\|`solution`\|`null`）, `keep?`（bool 或 `null`） | **新增一块**。新块的 `id` 由服务分配，与模型切出来的块**共用同一套分配**（**不许两套编号空间**）。`keep` 省略时落 `true`（#26：**手工块默认「收」**——人已经看着图自己画了框，就不再拿像素统计否决他），并记 `decision.source = "human"`／`rule = "human_include"`；红笔读数（`ink`）**照带、只展示、不当闸门**。`bbox_norm` 非法 → 与 `move` **同一个拒绝形状**（`page_block_box_unusable` 那条既有码，§8）→ **这一块没新增** |
+| `delete` （**本版（前端重构 / #17）新增**） | `block_id` | **删块**。两道硬约束见下；删掉的块往页文件的 `removed_blocks[]` 追加留痕，**绝不静默消失** |
+
+**`add` 与 `delete` 的三条硬约束（本版（前端重构 / #17））**：
+
+1. **已绑 `card_id` 的块永远不许删**——那张卡已经存在，删块会造出一条**孤儿绑定**。
+   要「不要它」只能用既有的 `drop`（不收，块留在页文件里、带 `decision.rule = "human_drop"`，可审计）。
+   违者 → **400** `bad_request`（`reason = "block_delete_bound_to_card"`），`details` 里带 `card_id`（§9）。
+2. **从未入库的块可以删，但必须留痕**：往 `removed_blocks[]` 追加一条
+   `{block_id, bbox_norm, question_no, removed_at}`（§10.2.1）。**绝不静默消失**——
+   「删掉它才是静默丢题」这条既有裁决本版**收窄**（不再一律禁止删，改为：已绑卡的不许删、
+   未入库的删了要留痕），不是取消（§11 偏离表）。
+3. **每一次删除都要报数**：`delete` 成功时 `data.blocks_removed` = 这次请求删掉了几块；
+   **每一次 PATCH 回执都带这个键**（0 也报），不许只在 `changed: true` 里含糊带过
+   （与 §8「M＝0 也报」同一纪律）。`dry_run` 预演走**同一套**动作实现，所以预演也报这个数。
+
+**为什么新增走 `PATCH` 而不是新开端点（本版（前端重构 / #17））**：`page_edit.py` 的分派表
+（`DISPATCH` / `EDITABLE_ACTIONS`）的设计意图就是「**加动作只改这里**」，加一条 = 一行。
+新端点等于把 `dry_run` 预演、拒绝形状、`EDITABLE_ACTIONS` 清单、回执形状**再实现一遍**，
+而这个项目最怕两处实现慢慢漂移（#17 §3.5、§24）。两条动作进的是同一个闭集，
+所以 `details.allowed` 里就有它们。
+
+**`resegment` = 重置为预设（本版（前端重构 / #17）改动）**：
+
+- 语义从「重跑一次切分」改成「**重置为预设**」：它是一次**破坏性**动作，**会丢掉人工的改动**。
+- 请求体要**显式确认**：`{"confirm_discard_manual": true}`。没带这个键、而这一页又存在
+  **任何**人工改动时 → **409** `resegment_needs_confirmation`，`details.discarded` 说明会丢掉什么：
+  `{"manual_blocks": int, "removed_blocks": int, "human_edited_blocks": int}`
+  （块列表里人加的／留痕里的条数／人的动作改过的块数）——**先把「将丢弃 N 处人工改动」报清**。
+  这三个数的口径**只有一处实现**（`page_edit` 那个分派表旁边），界面照它显示、不许自己重算。
+- 成功时：`segmentation.mode` 回到 `"model"`；`data.discarded` 用**同一个形状**报清**真的**丢了几块
+  （不是预估值）；被删掉的块进 `removed_blocks[]` 留痕。
+- **为什么这个能力要留**：模型切分最坏的失败是把**整页并成一块**，那时从零手画十道题
+  比重摇一次预设差得远。但它既然是「重置为预设」，就必须**按破坏性动作对待**——
+  **不许不声不响地覆盖人的劳动**（#17 §3.7、§31）。
+- `checks` / `reconciliation` **照旧跑**（`segmentation.reconcile` 的三条判据，只报不改，见上表）：
+  这次改动只动语义与回执，那两键一个字段都不动。
+- ⚠ **两个名字相近、口径不同，别混**：响应里的 `removed[]` 是重切对账里「旧块在新切分里
+  找不到位置重合的块」的对照（`classify_resegment`）；页文件里的 `removed_blocks[]` 是
+  **人删过的块**的留痕。同一个响应里同时出现 `removed[]` 与 `discarded.removed_blocks`
+  ——前者是机器对账的事实，后者是人的劳动被丢掉的读数。
 
 **偏离与记账**（BRIEF 硬规则 3）：
 
@@ -1202,6 +1382,117 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 `GET`/`POST` 到预留路径返回 404，且 `message` 明说「这条路由是预留的、v0 还没实现」，
 并带 `details.reserved`——含糊的 404 会让人以为是打错了字。
 
+### 10.4 受控词表与大纲 —— 数据文件形状，**不是端点**（本版（前端重构 / #17）新增）
+
+`CONTEXT.md`「科目」：科目是层级大纲的根（科目 → 章 → 节 → 点），也是错题分组的凭据；
+它取自一份**受控词表**（`CONTEXT.md`「受控词表」：AI 不得自造标签，找不到合适项只能**提名**）。
+这一节只写两份**数据文件**的形状——它们是「有哪些科目」「有哪些考点」的唯一来源，
+经 `/api/index` 的 `subjects`／`outline` 给界面（§3）。**不新开端点**。
+
+| 文件（**在数据目录下**） | 形状 | 是什么 |
+|---|---|---|
+| `<数据目录>/vocab/subjects.json` | `{"科目": ["数学", "物理", …]}`（与 `error-causes.json` **同形**） | 「有哪些科目」的唯一来源；`/api/index` 的 `subjects` 就是它的取值 |
+| `<数据目录>/vocab/topic-outline.seed.json` | `{"大纲": {<科目>: {<章>: {<节>: [<点>, …]}}}` | 考点大纲的树；`/api/index` 的 `outline` 就是 `"大纲"` 里的那棵树 |
+
+四条规矩：
+
+1. **科目只有一个真源**：不从文件目录推、不从考点派生、也不许 AI 自造。
+   卡上的 `subject` 不在表里 → `subject_unknown`（`warning`，§8）：读数是记录的原值，
+   **不许静默改写成 `null`**。
+2. **旧文件不兼容，这是破坏性改形**（本版）：`topic-outline.seed.json` 原来的形状是
+   `{"name": …, "nodes": [{id, children}, …]}`，现在是 `{"大纲": {科目: {章: {节: [点]}}}}`。
+   `name` 里那句「不是真实大纲」的自我否定**一并删掉**：那份自我否定是把「没大纲」写进了
+   文件名与内容里，而新形状把它变成了真正的层级数据。
+   **理由**：科目是导航的**根**（`CONTEXT.md`「科目」），大纲必须挂在科目下；
+   一棵没有根的树在两级侧栏里没有地方可放（#17 §3.2、§18）。旧文件不改形就读不出来，
+   所以这条改形要**明说**、要留痕（§11 变更记录），不许当兼容读取悄悄兜住。
+3. **词表住在数据目录，不随仓库走**：`<数据目录>/vocab/`（与 §1 的 `--data` 一起走）。
+   仓库里的 `data/vocab/` 是**测试语料与种子**——把词表当仓库文件读，就等于让
+   「换数据目录」这件事在词表上失效。**读不出来不是 500**：读到的是一份空词表 + 一条
+   词表级警告（§8），侧栏会空——那必须是一件**看得见**的事。
+4. **大纲里只允许出现 `subjects` 里的科目**，否则报 `outline_subject_unknown`（`warning`，§8）：
+   两份词表打架时，那个科目下的章／节／点谁都看不到（它不在侧栏的科目下）。
+   以哪边为准是**人的决定**，服务只负责喊出来。
+
+`subject` 是**题卡顶层字段**（§3.1）：缺字段／`null`／空串／纯空白一律算**未归类**，
+`null` 是它的一等取值。没有科目的卡在侧栏的「未归类」下、**道数写在栏上**，
+并且**不计入**任何科目的简报（§10.5）。
+
+> 回填（把存量卡按人给的映射写进 `subject`）是**另一条显式命令**（**先例**是
+> `python3 -m server.backfill --apply`），**不许猜**——猜错科目比没科目更坏（#17 §3.3）。
+> 这份契约只钉住「它必须是一条**显式**命令、预演与 `--apply` 分开、表里出现词表外的科目
+> 就一个字节都不写」这条规矩；命令名与它的报告形状不在这份文件里。
+> 本版不改任何端点形状，只是让这份数据有了**唯一**的读者（`server/subjects.py`，§12）。
+
+### 10.5 `/api/brief/<科目>` —— 简报（本版（前端重构 / #17）新增）
+
+`CONTEXT.md`「简报」：就某个科目近期状态写出的一份文字总结，**由模型写**，因此要过验收才上岗；
+它说的每一个数字都必须能在索引里逐字找回。这一节钉住两个端点与**数字闸门**。
+
+| 动作 | 路由 | 请求 | 响应 `data` | 状态 |
+|---|---|---|---|---|
+| 读最近一份 | `GET /api/brief/<科目>` | 无 body；可选 `?at=YYYY-MM-DD` 取**历史上某一天**那一份 | `{brief: {…落盘形状…}, path}` | **本版新增（形状先钉住）** |
+| 生成一份 | `POST /api/brief/<科目>` | 可选 body `{"window_days": 7}`（默认 7） | `{brief: {…落盘形状…}, path, run_id}` | **本版新增（形状先钉住）** |
+
+**落盘**：`<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json`（一天一份，保留历史，可回看上周的）。
+形状（GET 的 `brief` 与 POST 的 `brief` **就是它原样**）：
+
+```jsonc
+{
+  "subject": "数学",
+  "generated_at": "2026-10-04T09:39:57+00:00",  // 生成时刻
+  "window_days": 7,
+  "window_from": "2026-09-28",                  // 最近 window_days 天的起点
+  "window_until": "2026-10-04",                 // 终点（= 生成这一天）
+  "covers_until": "2026-10-04T09:39:57+00:00",  // **它读的那份索引快照**（= 那次索引的 built_at）
+  "provider": "deepseek", "model": "deepseek-flash",   // 谁写的（两个字段，裁决 D2）
+  "text": "……给人读的那段话……",
+  "window_facts":   [{ "label": "冷却中的道数", "path": "stats.by_subject.数学.cooling", "value": 3 }],
+  "history_facts":  [{ "label": "全部历史的道数", "path": "stats.by_subject.数学.problems", "value": 11 },
+                     { "label": "未归类未计入", "path": "stats.unclassified", "value": 4 }]
+}
+```
+
+| 键 | 含义 |
+|---|---|
+| `text` | **给人读的那段话**。「说得好不好」只由人读，当线索；它不是数据的来源，也不参与判定与打印 |
+| `window_facts` / `history_facts` | 这段话**用到的每一个数字**。`path` 是**指向本次索引的 JSON 指针**（例如 `stats.by_subject.数学.cooling`），`value` 是用到的那个值。**两种窗口并列**：`window_facts` 数的是最近 `window_days` 天，`history_facts` 数的是全部历史——这正是「最近 7 天为主，同时并列全部历史」（#17 §7） |
+| `covers_until` | 这些数字读的是**哪一份索引快照**（那次 `/api/index` 的 `built_at`）。索引是现算的，所以「数字依据哪一刻」必须写下来，否则「过期」判不出来 |
+
+**上岗闸门（硬规矩，写进契约）**：生成之后、**落盘之前**，服务必须把每一条 `path`
+在**本次索引**里**解出来**，要求它与 `value` **相等**。**任何一条对不上，这份简报不落盘**，
+直接 **502** `brief_unverifiable`，`details.facts` 列出对不上的那些
+（`{label, path, claimed, actual}`；解不出来时 `actual` 为 `null`，与「解出来不相等」分两档说清）。
+理由：这个项目最怕的失败是一段读起来很顺、**数字却是编的**总结；而能**自动判**的只有
+「数字对不对」——那一条必须是闸门。**同一道闸门也管未归类**：简报正文必须**显式**写
+「另有 N 道未归类未计入」，并把 N 放进 `history_facts`（`path` 指 `stats.unclassified`），
+于是那句话里的数字也过闸门。
+
+`briefs`（§3）里那个 `stale` / `new_problems` 就用 `covers_until` 判：该科目里
+`created_at` 晚于它的道数 > 0 → `stale: true`，道数就是 `new_problems`。
+**侧栏那句话（「简报已过期：有 N 道新题没进去」）由服务给，界面不许自己算**（与 §6.1 第 5 条同规矩）。
+
+其余形状与既有约定对齐：
+
+- **科目走 URL 编码**，服务端先解码再按受控词表**逐字**校验。⚠ 它**不套用** §1 那条
+  「路径参数只接受 `^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$`」——那条是给**题卡 id 与页 id** 的，
+  科目是中文（`数学` 走 `%E6%95%B0%E5%AD%A6`）。**本版明确**：科目不在词表里 → **400**
+  `bad_request`（`reason = "subject_not_in_vocabulary"`，`details.param = "subject"`，
+  `allowed` 给词表的取值），**不是 404**——这个科目根本不存在于受控词表里，是输入错（§9）。
+  拿科目拼文件名之前必须先过这道白名单：**词表是白名单，所以穿越不可能**
+  （与 `page_id_mismatch` 同一类纪律：内容不许决定写到哪、读到哪；写盘仍是
+  「先写临时文件再原子替换」）。
+- **没有简报 → 404**（`reason = "brief_missing"`，`details.available` 列出**实际有哪几天**）；
+  `?at=` 要比的是那份简报文件名里的日期，**不许**按「最接近的一天」匹配。
+- **模型失败 → 502 `model_unavailable`**（沿用既有约定，§9）：那一次**不落任何文件**
+  （D1/D9「拒绝就该一个字节都不动」）。
+- `window_days` 不是正整数 → **400** `bad_request`（`details.param = "window_days"`）；
+  body 上限走**写端点那一档**（64 KiB，§9）。
+- 该科目一道题都没有时**不拒绝**：数字全是 0，正文照写——闸门只管数字对不对。
+- 生成要花一次模型调用，留档 tag `brief`（`runs/`，§10.1 的同一套留档，`run_id` 一并返回）；
+  **`brief` 是它自己的模型角色**，`BRIEF_PROVIDER` / `BRIEF_MODEL`（§1）——**不复用抽取角色**，
+  复用会让换模型时两个用途互相绑死（#17 §7）。
+
 ## 11. 契约决定与偏离记录
 
 | 决定 | 为什么 |
@@ -1226,6 +1517,8 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `blocks: null` 表示「还没切」，与 `[]`（切出 0 块）区分开 | #13 交付时切分（#10）还没做。用空列表冒充会让界面看起来能跑——ADR 0007 第 6 条要的是「我没做什么」说得出来 |
 | `POST /api/inbox` 是 v0 唯一的写端点，且只往收件目录写**新**文件 | ADR 0007 第 4 条把「放一个文件」定为录入的唯一入口；写新文件不是改已有数据，所以 §3 的 `read_only: true` 仍然成立，`read_only_note` 把那句话解释清楚 |
 | 上传 body 上限 **413**，且判在**读 body 之前** | 服务将来要经局域网暴露给手机（#13）。读一个百 MB 的 body 再拒绝不是拒绝；这个响应之后关连接，因为 body 没读完，keep-alive 会串味 |
+| `blocks: null`（还没切）与 `[]`（确实切出 0 块）的区分，**本版（前端重构 / #17）扩展到 `segmentation.mode`** | #13 那条区分的落点是「不许用空列表冒充『能跑』」。本版加了第三个维度：**「这份块列表是谁定的」**（`model` = 机器切出来的预设／`manual` = 人画的／`unavailable` = 还没有列表）。两件事必须分开：`null` vs `[]` 说的是**有没有列表**，`mode` 说的是**列表的来源与可信度**。`mode == "unavailable"` 时 `blocks` **必须是 `null`**——否则「我不知道」会被写成「这一页没有题」，那正是 #13 当时要挡的那句话（§10.2.1、#17 §3.6） |
+| `removed_blocks[]` 与 `delete` 动作**收窄**既有的「删掉它才是静默丢题」那条裁决 | 旧口径：块只能 `drop`（不收，块留在页文件里、可审计），**不许删**，「不要它」只有 `drop` 一条路。本版开了一个**受控的删口子**（#17 §3.5、§30），因为「切分器多切了一个空框」这类东西留着只会污染对账读数。收窄写成两条硬约束，而不是取消那条裁决：**已绑 `card_id` 的块永远不许删**（删块＝孤儿绑定，要「不要它」仍只能用 `drop`）、**未入库的块删了必须进 `removed_blocks[]` 留痕**（哪一块、原来什么框、什么时候），而且留痕里**永远不许出现带 `card_id` 的块**——那是「删块那道闸破了」的直接证据（§10.2.1、§10.2.1b） |
 
 ### 变更记录
 
@@ -1255,6 +1548,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（R3–R6、N1、N4） | §9 的 `internal_error` 原因清单改成显式取值列表并登记 `internal_error`（R5）；§11 的 `deps` 行改掉「这一层没有图像与模型的活」（N1）；§11 偏离表加判定的置信度门只挡「对」那一条（N4）。**响应形状没有别的变化** | R3（六条会拒绝/跳过的分支补上断言形状的测试：`page_commit_block_without_box`／`page_commit_blocks_skipped`／`intake_block_unknown`／`problem_file_unreadable`／`problem_not_dict`／`page_ink_draft_excluded`，六条全可达、无需 skip）、R4（读不了的卡不再安静地 `continue`：重切与入库都报 `card_file_unreadable` + 文件指针 + 明说它没进对账）、R6（用户可见文案的术语滑词「答案」→「作答」：`errors.not_auto_judgeable` 的 `hint` 与界面侧两处，`grep` 那句旧措辞在 `server/` 里为空（本表这一行的引用是唯一的仓库级命中））、N1（零依赖不等于没有图像与模型的活）、N4（spec #1 表格与 #4 验收 2 的字面冲突按工单实现，记账免得被当 bug 查） |
 | 本版（ADR 0008） | §1 数据目录默认值从「仓库根的 `data/`」改成**用户数据目录**（Windows `%APPDATA%\ai-note`、macOS `~/Library/Application Support/ai-note`、其它 `$XDG_DATA_HOME/ai-note`）；§10.1 的留档改成「**数据目录**下的 `runs/`」；§1 收件目录的例子改成 `--data <dir>` → `<dir>/inbox/`。**响应形状一个字段都没变** | 运行时产物不该住在项目目录里：`git clean`／重新 clone／切分支都可能碰掉资料，`git status` 常年靠六条忽略规则兜底，而且生产数据与测试语料抢同一个目录——「跑测试别写到真数据」本该由结构保证，不该靠纪律。仓库里的 `data/` 降级为**本机测试语料**；默认值改成在**建 parser 的那一刻**算（`.env.local` 是那时才灌进环境的，import 时算就等于让写在里面的 `AI_NOTE_*` 静默失效） |
 | 本版（真 socket 上的 `PATCH`） | §10.2.1b 的 `PATCH /api/page/<id>` **在真实 socket 上才算真的可用**：`server/app.py` 之前只挂了 `do_GET`／`do_OPTIONS`／`do_POST`，这条路由只在 `Api.handle` 这个纯函数接缝上存在；`OPTIONS` 的 `Allow` 与 `Access-Control-Allow-Methods` 补上 `PATCH`（这两处以前只有 `GET, POST, OPTIONS`）。**响应形状一个字段都没变** | 契约 §10.2.1b 早就写了这条路由，缺的是**接线**——这是「实现没跟上契约」，不是契约改了。它活了很久，因为唯一吃它的测试直接调 `api.handle("PATCH", …)`，**绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。真实后果有两层：真浏览器拿到的是框架自带的 **501 + `text/html`**（不是 §2 的信封），而跨源预检因为方法清单里没有 `PATCH`，**更早一步就把请求拦下了**——切分修正页唯一的写路径等于不存在。现在有一条走真 socket 的测试盯着它（摘掉 `do_PATCH` 它会红） |
+| 本版（前端重构 / #17） | **A 科目成一等字段**：§3.1 题卡记录加 `subject`（`null` = **未归类**）；§8 逐卡加 `subject_missing`（`hint`，与 `page_binding_missing` 同级）与 `subject_unknown`（`warning`，值不在词表**不许静默改写成 `null`**），并按实现订正「逐卡码 `level` 全是 `warning`」那句（#17 §3.9）；§3 的 `stats` 加 `by_subject` 与 `unclassified`，并把不变式 `sum(by_subject[*].problems) + unclassified == stats.problems` 写进正文。**B 词表随索引一起给**：`/api/index` 加 `subjects`／`outline`／`briefs`（`stale` = 「这份简报生成之后又有题录进来了」、`new_problems` 是那几道的道数）；`outline` 里只许出现 `subjects` 里的科目，否则 `outline_subject_unknown`（`warning`）；写明「一次请求画出整棵树、不许露『有科目但没有大纲』的中间态」。**C 数据文件形状**：新 §10.4 钉住 `<数据目录>/vocab/subjects.json`（`{"科目": […]}`，与 `error-causes.json` 同形）与 `topic-outline.seed.json` 的**破坏性改形**（`{"大纲": {科目: {章: {节: [点]}}}}`，旧 `name` 里那句「不是真实大纲」的自我否定一并删掉）以及理由（**科目是导航的根，大纲必须挂在科目下**）；§8 补 6 条词表级警告（读不出来**不是 500**）。**D 页文件的切分来源与删除留痕**：§10.2.1 加 `segmentation`（`model`／`manual`／`unavailable`）与 `removed_blocks[]`；`mode == "unavailable"` 时 `blocks` **必须**是 `null`；留痕里**永远不许**出现带 `card_id` 的块；写明**切分不可用时也建页**（照片落盘、页文件照建——推翻「切分不可用就不建页」那条旧裁决，ADR 0005 / #15）。**E PATCH 的动作闭集加两条**：`add`（新块 id 与模型块**共用一套分配**；`bbox_norm` 非法 → 与 `move` 同一个拒绝形状）与 `delete`（**已绑 `card_id` 的块永远不许删** → 400 `block_delete_bound_to_card` 带 `card_id`；未入库的块删了必须留痕）；回执加 `blocks_removed`（**每一次删除都要报数**，0 也报），并写明**新增走 PATCH 而不新开端点**的理由（加动作 = 一行；新端点要把 `dry_run`／拒绝形状／`EDITABLE_ACTIONS`／回执再实现一遍，最怕两处漂移）。**F `resegment` 语义改成「重置为预设」**：要 `{"confirm_discard_manual": true}`，否则 **409** `resegment_needs_confirmation` + `details.discarded`（`{manual_blocks, removed_blocks, human_edited_blocks}`）；成功时 `segmentation.mode` 回 `"model"`、回执报**真的**丢了几块、删掉的块进 `removed_blocks[]`；`checks`／`reconciliation` 照旧跑。**G 简报端点**：新 §10.5 的两个端点、落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json` 的形状（`window_facts`／`history_facts` 的 `path` 是指向本次索引的 JSON 指针）与**上岗闸门**（任何一条 `path` 解不出来或对不上 → **不落盘** + 502 `brief_unverifiable` + `details.facts`）；未归类**不计入**任何科目简报，但正文必须写「另有 N 道未归类未计入」且 N 进 `history_facts` 受同一道闸门管。**H 切分与简报的接线**：§1 补 `SEGMENTER_PROVIDER`／`SEGMENTER_MODEL` 与 `BRIEF_PROVIDER`／`BRIEF_MODEL`（默认沿用抽取角色的默认值）与四个角色的上岗闸门；§12 加 `server/subjects.py`、`server/brief.py`、`server/brief_client.py`／`server/segmenter_client.py`；§12.1 加模型上岗验收 `python3 -m pytest server/tests/test_acceptance_models.py -v`（**换模型就要重跑，不过考不许上岗**；需要密钥，**没密钥 skip 而不是 pass**）与 `segmenter` 的三条闸门（视觉探针 + 固定照片集上的人工判定 + `segmentation.py` 的三条对账判据，**三条都要过**，固定照片集落进仓库当夹具）。**I** §0 范围、§9 错误码、§10 状态表、§11 偏离表同步。**本版只改契约，实现另跟** | 工单 #17（前端重构）的 §3 与 §10 落成契约（契约先行）。要点：①**未归类是一等状态**，不是缺字段——它要有自己的兜底栏与道数，要一条 `hint` 而不是被当成脏数据；②**科目只有一个真源**（受控词表），卡上的值不在表里**不许被静默改写成 `null`**（读数是记录的原值，谁改的谁喊）；③侧栏要**一次请求画出整棵树**，所以词表随索引走、不新开端点；④**「我不知道」与「这一页没有题」必须分得开**（`blocks: null` vs `[]`，再加一层 `segmentation.mode`），而切分不可用时**页文件还是要建**——不建，人就无从手画；⑤**删块要留痕、已绑卡的不许删**——删掉它才是静默丢题；⑥**重置为预设是破坏性动作**，必须先报清将丢弃几处人工改动，不许不声不响覆盖人的劳动；⑦**简报最怕的是一段读起来很顺、数字却是编的总结**——能自动判的「数字对不对」必须是闸门；⑧**换模型就要重跑验收，不过考不许上岗**，固定照片集落进仓库让这句话成为一条可执行的命令 |
 
 
 ## 12. 模块角色（下游一眼要看到的两件事）
@@ -1279,6 +1573,9 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/page_create.py` | **页资源「建」动作的唯一实现**（B7 / #15）：照片（内容哈希前 12 位定页 id）→ 存图 + 建页文件 + 跑切分 + #11 统计 + #12 建议去留。幂等（同图重传不重跑切分、不覆盖块列表）；模型失败先用系统临时目录跑切分，成功才写进 `data/`（拒绝不留痕迹）；`as_candidates` 是切分接缝的归一化（建与重切共用） |
 | `server/page_commit.py` | **页资源「入库」动作的唯一实现**（B7 / #15）：只给「收」的块发卡号、id 首次分配（`pages.assign_card_ids`）、已经生成过的块不重复生成、**先写页再建卡**（幂等：中断后重跑不会换 id）、把绑定写回页文件、报告索引重建。它不另判收不收（那是 #12）也不另分配 id（那是 #9） |
 | `server/audit.py` | **落盘数据体检的唯一实现**（B7 / #15）：页↔卡**双向**对账（§8 的 B7 码表）、`CHECKS`（「我查了哪几项」）、`python3 -m server.audit`。**只读盘、不修改、可随时重跑**；页绑定与字段自检分别消费 `pages.page_binding` 与 `warnings.card_warnings`，串题判据消费 `warnings.duplicate_transcript_groups`——一条规则一份实现。退出码只认 `warning` 级发现 |
+| `server/subjects.py` （**本版（前端重构 / #17）新增**） | **受控词表与大纲的唯一读取实现**（§10.4）：读 `<数据目录>/vocab/subjects.json` 与 `<数据目录>/vocab/topic-outline.seed.json`、产出 `/api/index` 的 `subjects`／`outline`（§3）、出 `stats.by_subject` 与 `stats.unclassified`（含那条不变式）、以及逐卡的 `subject_missing`（hint）／`subject_unknown`（warning）。**读不出来不是 500**，是词表级警告 + 空词表；词表没读出来时**一条 `subject_unknown` 都不发**。别的模块要科目判定只有这一个地方可消费 |
+| `server/brief.py` （**本版（前端重构 / #17）新增**） | **简报的生成与数字闸门的唯一实现**（§10.5）：按窗口汇总读数 → 问 `brief` 角色 → 把 `text` 里用到的每个数字落成 `window_facts`／`history_facts`（`path` 指向本次索引）→ **逐条解出来核对**，一条对不上就**不落盘、502 `brief_unverifiable`**。落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json`，先写临时文件再原子替换 |
+| `server/brief_client.py` 与 `server/segmenter_client.py` （**本版（前端重构 / #17）新增**） | 两个角色各自的**调用接缝**，照 `server/intake_client.py` / `server/judge_client.py` 的形状（提示词与消息形状按角色分家、共用 `model_client` 那条与角色无关的管道、`runs/` 留档 tag 分别是 `brief` 与 `segment`）。`brief_client` 是**纯文本**角色，`segmenter_client` **要看图**（整页照片 + 候选块）——前置一份**视觉探针**：纯文本模型收到图片不会报错，它会忽略图片、照着提示词**凭空编块**（`CONTEXT.md`「视觉探针」） |
 
 ## 12.1 测试接缝
 
@@ -1306,5 +1603,19 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
   并断言重切与入库都没有偷偷改卡/改页（逐字节比对）。骨架卡刚入库时审计**一定**有
   「内容还没填」的 warning（题面／标准答案／擦除图），所以那条测试先把「页↔卡对账没有错误」
   与「内容缺项」分开断言，再模拟审核把内容填上，然后断言审计一条发现都没有。
+- **模型上岗验收不在上面那些接缝里**（**本版（前端重构 / #17）新增**）：
+  `python3 -m pytest server/tests/test_acceptance_models.py -v`。
+  **换模型就要重跑验收，不过考不许上岗**（`CONTEXT.md`「验收」）——这句话要写进
+  那个测试文件的头部注释里，而且它必须是一次**可执行的命令**，而不是一句愿望。
+  它**需要密钥**（真的去问模型）：**没密钥时 skip，
+  而不是 pass**——把「没跑成」报成「通过了」正是这个项目最怕的那种静默。
+  角色的默认值与环境变量见 §1；`segmenter` 与 `brief` 两个新角色的调用接缝见 §12。
+- **`segmenter` 的上岗闸门：三条都必需**（#17 §8、§33）：① **视觉探针**必须过——它防的正是
+  「纯文本模型收到图片不报错、忽略图片、照着提示词**凭空编块**」；② 一份**固定照片集**上的
+  **人工判定**（切分质量只有人能判，判据写进验收记录）；③ `server/segmentation.py` 的
+  三条**确定性对账判据**（题号连续性／重叠／覆盖）必须**全过**。三条**都**必须过，缺一条不算上岗。
+  那份固定照片集**落进仓库当夹具**，所以「换模型重跑验收」是一次可执行的命令。
+  已知弱点要**显式**写进验收记录：题号连续性**依赖模型把题号报对**——报不出题号时那条判据
+  只报 `question_number_missing`（hint），**不许当成通过**。
 - 测试数据**自造在临时目录里**，测完即删。真实题卡只有两张、重做次数是 0，
   测试绝不碰它们（工单 #1 的第 35 条 user story）。

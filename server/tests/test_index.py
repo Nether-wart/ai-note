@@ -105,6 +105,15 @@ def test_images_auto_judge_and_stats(api_for):
         "graduated": 0,
         "auto_judge_eligible": 1,
         "auto_judge_ineligible": 0,
+        # 按科目汇总（#17）。不变式：sum(by_subject[*].problems) + unclassified == problems。
+        # 词表里的科目哪怕 0 道也要在树上——侧栏要能画出空科目，不然人会以为它丢了。
+        "by_subject": {
+            "数学": {"problems": 1, "in_default_list": 1, "cooling": 0, "graduated": 0,
+                     "auto_judge_eligible": 1, "unreviewed": 0},
+            "物理": {"problems": 0, "in_default_list": 0, "cooling": 0, "graduated": 0,
+                     "auto_judge_eligible": 0, "unreviewed": 0},
+        },
+        "unclassified": 0,
     }
     assert body["warnings"] == []
 

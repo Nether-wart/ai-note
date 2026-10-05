@@ -16,6 +16,8 @@ from .errors import ApiError, bad_request, not_found
 from .inbox import Inbox
 from .publicbase import is_reachable_from_other_devices, public_base_warning
 from .records import problem_detail, problem_record
+from .subjects import load as load_vocabulary
+from .subjects import rollup as subject_rollup
 from .warnings import _warn as _contract_warn
 from .warnings import index_warnings
 
@@ -181,12 +183,19 @@ class Catalog:
 
         # 默认打印清单的顺序：按上次重做（从未重做过的以录入时间起算）从早到晚。
         # 界面拿这个顺序原样渲染，不重新排——排序规则只有这一份实现（契约 §4）。
+        # 受控词表（科目与大纲）先读：卡级自检要用它判 `subject_unknown`，
+        # 而它读不出来时**不许**对每张卡都喊一声（那是噪声，不是判据）。
+        vocabulary, vocab_warnings = load_vocabulary(self)
+
         records = [problem_record(card, self, at) for card in cards]
         records.sort(key=lambda rec: rec["sort_key"])
 
         per_card = [w for rec in records for w in rec["warnings"]]
-        warnings += self.config_warnings() + index_warnings(records) + per_card
+        warnings += self.config_warnings() + vocab_warnings + index_warnings(records) + per_card
 
+        # 按科目汇总。`rollup` 是「一道题都不许少」那条不变式的实现处：
+        # `sum(by_subject[*].problems) + unclassified == problems`。
+        subjects_rollup = subject_rollup(records, vocabulary)
         stats = {
             "problems": len(records),
             "problems_skipped": len(skipped),
@@ -195,12 +204,18 @@ class Catalog:
             "graduated": sum(1 for r in records if r["graduated"]),
             "auto_judge_eligible": sum(1 for r in records if r["auto_judge"]["eligible"]),
             "auto_judge_ineligible": sum(1 for r in records if not r["auto_judge"]["eligible"]),
+            "by_subject": subjects_rollup["by_subject"],
+            "unclassified": subjects_rollup["unclassified"],
         }
         data = {
             "built_at": at.isoformat(timespec="seconds"),
             "count": len(records),
             "problems": records,
             "stats": stats,
+            # 词表随索引一起给，是为了侧栏**一次请求**就画出整棵树：分两次取会出现
+            # 「有科目但没有大纲」的中间态，而中间态在界面上就是一道错。
+            "subjects": vocabulary["subjects"],
+            "outline": vocabulary["outline"],
             "screen_redo": screen_redo_summary(records),
             # 服务自述：手机该用哪个地址（ADR 0007 第 5 条）、上传页链接、收件目录在哪，
             # 以及「我没有改任何已有数据」（ADR 0007 第 6 条要的就是这句话）。
