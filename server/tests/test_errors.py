@@ -35,22 +35,20 @@ def test_write_methods_on_read_only_endpoints_are_405(api_for):
 def test_reserved_write_namespaces_say_they_are_reserved():
     """预留的动作要**明说自己还没实现**：含糊的 404 会让人以为是打错了字。
 
-    `/api/page*`（#14）现在**路由在**了，所以整条前缀不再是「预留命名空间」：
-    「改」与「重切」已实现（用错方法是 405，见 `test_page_endpoints.py`），
-    而「建」与「入库」两个动作归 #15，走**带说明的 404**——形状由这里钉住。
+    `/api/page*`（#14/#15）现在**路由都在**了，所以整条前缀不再是「预留命名空间」：
+    「改」「重切」在 #14 落地，「入库」在 #15 落地（见 `test_page_endpoints.py`
+    与 `test_page_commit.py`）；只剩「建」（归 #15 的下一块）走**带说明的 404**。
     """
     from server.errors import ApiError
     from server.page_api import PageEndpoint
 
-    for call, arguments in ((PageEndpoint.create_reserved, ()),
-                            (PageEndpoint.commit_reserved, ("p-x",))):
-        with pytest.raises(ApiError) as excinfo:
-            call(*arguments)
-        payload = excinfo.value.payload()
-        assert excinfo.value.status == 404
-        assert payload["code"] == "not_found"
-        assert payload["details"]["reserved"] is True
-        assert "#15" in payload["details"]["owner"]
+    with pytest.raises(ApiError) as excinfo:
+        PageEndpoint.create_reserved()
+    payload = excinfo.value.payload()
+    assert excinfo.value.status == 404
+    assert payload["code"] == "not_found"
+    assert payload["details"]["reserved"] is True
+    assert "#15" in payload["details"]["owner"]
 
 
 def test_every_response_carries_cors_headers(api_for):

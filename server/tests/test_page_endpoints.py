@@ -304,20 +304,23 @@ def test_a_segmenter_that_fails_is_a_502_and_leaves_the_page_untouched(tmp_path)
 # ---------------------------------------------------------------- 入库（commit）与建（POST /api/page）
 
 
-def test_commit_is_wired_but_declares_itself_unimplemented(tmp_path):
-    """**入库归 #15**：路由接上了，但它必须**明说自己还没实现**——绝不冒充成功。
+def test_commit_is_implemented_and_reports_what_it_wrote(tmp_path):
+    """**入库已在 #15 落地**：这条路不再给「预留」的 404，而是一份入库报告。
 
-    ADR 0007 第 6 条：含糊的 404 让人以为是打错了字；「预留、还没实现」要说清。
-    契约 §10 的 `details.reserved` 就是这条口径。
+    这一页的块**还没判过去留**（`keep: null`）→ 一块都不入库，而且要说出来
+    （`page_commit_nothing_kept`）：「还没判」与「不收」不是一回事，更不许悄悄建卡。
     """
+    from server import page_commit
+
     api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
 
     status, envelope = post_json(api, f"/api/page/{PAGE_ID}/commit")
 
-    assert status in (404, 501)
-    assert envelope["ok"] is False
-    assert envelope["error"]["code"] in ("not_found", "not_implemented")
-    assert "15" in json.dumps(envelope["error"], ensure_ascii=False)
+    assert status == 200, envelope
+    assert envelope["data"]["created"] == [] and envelope["data"]["reused"] == []
+    assert envelope["data"]["wrote_cards"] is False
+    assert [row["block_id"] for row in envelope["data"]["skipped"]] == ["b1"]
+    assert page_commit.COMMIT_NOTHING_KEPT in {w["code"] for w in envelope["warnings"]}
     assert list(api.catalog.problems_dir.glob("*.json")) == [], "不许悄悄建题卡"
 
 

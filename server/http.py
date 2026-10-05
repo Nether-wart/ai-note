@@ -243,7 +243,8 @@ class Api:
         match = re.fullmatch(r"/api/page/(?P<pid>.*?)/commit", path)
         if match:
             self._require(method, "POST")
-            self.pages.commit_reserved(match.group("pid"))
+            data, warnings = self.pages.commit(match.group("pid"))
+            return json_response(200, data=data, warnings=warnings)
 
         # `.*`（而不是 `.+`）：空的页 id 要落到 id 校验的 400 上，
         # 而不是掉进「没有这条路由」的 404——客户端少给一段路径不是路由写错了。
