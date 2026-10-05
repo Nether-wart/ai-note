@@ -117,14 +117,19 @@
 .ai-note-shell {
   display: flex;
   align-items: flex-start;
+  /* 索引栏贴左起排：它是每一页都要用的导航，换一栏的鼠标距离应当是固定的、
+     不用先把指针挪到屏幕中间去。 */
+  justify-content: flex-start;
   gap: 1.5rem;
-  max-width: 1440px;
-  margin: 0 auto;
   padding: 1rem 1rem 4rem;
 }
 
 .ai-note-shell__main {
-  flex: 1 1 auto;
+  /* 正文栏固定宽：一行读数的长度由排版决定，不由屏幕宽度决定。
+     窄屏由下面的媒体查询改成整宽。 */
+  flex: 0 0 52rem;
+  width: 52rem;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -158,6 +163,11 @@
 @media (max-width: 996px) {
   .ai-note-shell {
     flex-direction: column;
+  }
+
+  .ai-note-shell__main {
+    flex: 1 1 auto;
+    width: 100%;
   }
 
   .ai-note-sidebar {

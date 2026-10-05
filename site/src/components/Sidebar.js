@@ -162,7 +162,7 @@ function SubjectItem({subject, current}) {
       )}
       {subject.countsMissing && (
         <p className="ai-note-warn ai-note-sidebar__note" data-counts-missing-note="true">
-          服务没给这个科目的读数：道数不知道，**不是 0 道**。
+          服务没给这个科目的读数（不是 0 道）。
         </p>
       )}
       {/* 简报过期：N 照抄 `brief.new_problems`，界面不自己数一遍。 */}

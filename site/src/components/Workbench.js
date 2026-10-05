@@ -425,8 +425,7 @@ export default function Workbench({apiBase, pageId = null, subjects = [], onClos
     return (
       <WorkbenchFrame onClose={onClose} title="录入一页">
         <p className="ai-note-meta">
-          往这里放一张**整页照片**：机器先切一遍（那只是预设），人再调整，最后入库。
-          一页 = 一张照片，题卡 id 在**入库时**才分配。
+          往这里放一张整页照片：机器先切一遍（只是预设），人再调整，最后入库。
         </p>
 
         <label className="ai-note-field">
@@ -446,8 +445,7 @@ export default function Workbench({apiBase, pageId = null, subjects = [], onClos
         </label>
         {subjects.length === 0 && (
           <p className="ai-note-hint" data-vocabulary-empty="true">
-            受控词表里现在没有科目（读不到或还是空的）：先按**未归类**收入，词表补上之后
-            索引会为这些卡报 `subject_unknown`。
+            受控词表里现在没有科目（读不到还是空的）：先按未归类收入。
           </p>
         )}
 
@@ -551,8 +549,8 @@ export default function Workbench({apiBase, pageId = null, subjects = [], onClos
         </p>
       ) : (
         <p className="ai-note-warn" data-segmentation-unavailable="true">
-          切分不可用：服务没有给出块列表（`blocks` 是 null，不是「这一页没有题」）。
-          **请在这张照片上自己画框**——「新增一块」已经打开，直接在照片上拖一个框出来。
+          切分不可用：服务没有给出块列表（不是「这一页没有题」）。
+          请在这张照片上自己画框——「新增一块」已经打开，直接在照片上拖一个框出来。
         </p>
       )}
 
@@ -640,7 +638,7 @@ export default function Workbench({apiBase, pageId = null, subjects = [], onClos
         <h2>块</h2>
         {blocksKnown && view.blocks.length === 0 ? (
           <p className="ai-note-meta" data-blocks-empty="true">
-            页文件里记着**确实切出 0 块**（`blocks` 是空数组）。要录题就在照片上自己画框。
+            页文件里记着确实切出 0 块。要录题就在照片上自己画框。
           </p>
         ) : (
           <ul className="ai-note-block-list">
@@ -743,8 +741,7 @@ function BlockInspector({row, busy, questionNo, setQuestionNo, onRun}) {
       </div>
       {row.card_id && (
         <p className="ai-note-hint" data-delete-bound-note="true">
-          这一块已经绑了题卡 <code>{row.card_id}</code>：服务**不许**删它（删块会造出孤儿绑定），
-          要「不要它」只能用「不收」（drop）。
+          这一块已经绑了题卡 <code>{row.card_id}</code>：不许删它（删块会造出孤儿绑定），要「不要它」只能用「不收」（drop）。
         </p>
       )}
 

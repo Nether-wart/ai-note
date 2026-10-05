@@ -38,10 +38,6 @@ const config = {
         {to: '/', label: '总览', position: 'left'},
       ],
     },
-    footer: {
-      style: 'dark',
-      copyright: `数据只在这台机器上 · 服务地址 ${apiBase}`,
-    },
   },
 };
 

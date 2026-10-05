@@ -41,7 +41,7 @@ export default function Home() {
             上传整页照片
           </button>
           <span className="ai-note-meta">
-            录入的唯一入口是收件目录；点这里打开工作台：照片 → 切分 → 人工调整 → 入库。
+            照片 → 切分 → 人工调整 → 入库。
           </span>
         </div>
 
@@ -68,8 +68,7 @@ export default function Home() {
               <strong data-today-ready={model.totals.inDefaultList}>
                 {model.totals.inDefaultList}
               </strong>{' '}
-              道（未毕业且已脱离冷却）——这一句只是把服务给的三样读数摆在一起，
-              界面不重新定义「今天该做什么」。
+              道（未毕业且已脱离冷却）。
             </p>
 
             <table className="ai-note-table" data-overview-table="true">
@@ -97,7 +96,7 @@ export default function Home() {
                     </td>
                     {row.countsMissing ? (
                       <td colSpan={5} className="ai-note-warn" data-counts-missing="true">
-                        服务没给这个科目的读数：不知道几道，**不是 0 道**
+                        服务没给这个科目的读数（不是 0 道）
                       </td>
                     ) : (
                       <>
@@ -123,8 +122,7 @@ export default function Home() {
                     <Link to={subjectUrl(null, 'detail')}>{model.unclassified.label}</Link>
                   </td>
                   <td colSpan={5} data-unclassified-count={model.unclassified.count}>
-                    {model.unclassified.count} 道：服务只给了这一个道数，没有按在池／冷却／毕业
-                    分档（未归类**不计入**任何科目的简报）。
+                    {model.unclassified.count} 道
                   </td>
                 </tr>
 
@@ -136,17 +134,12 @@ export default function Home() {
                   <td data-cooling={model.totals.cooling}>{model.totals.cooling}</td>
                   <td data-graduated={model.totals.graduated}>{model.totals.graduated}</td>
                   <td className="ai-note-meta" data-unreviewed="missing">
-                    服务没给整表的未审核合计，所以这一格留空（不做第二遍统计）
+                    服务没给
                   </td>
                   <td data-today={model.totals.inDefaultList}>{model.totals.inDefaultList}</td>
                 </tr>
               </tbody>
             </table>
-
-            <p className="ai-note-meta" data-index-built-at>
-              索引建于 <code>{data.built_at}</code>，共 {model.totals.problems} 道题
-              {data.server?.read_only ? '；服务是只读的（v0）' : ''}。
-            </p>
           </>
         )}
       </main>

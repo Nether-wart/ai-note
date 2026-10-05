@@ -149,8 +149,7 @@ function BriefView({apiBase, name, data}) {
     return (
       <section data-brief="unclassified">
         <p className="ai-note-warn">
-          未归类没有简报：简报是**科目**的近况总结，未归类的 {data.stats?.unclassified ?? 0} 道
-          **不计入**任何科目的简报（服务给的读数，界面不重算）。
+          未归类没有简报：简报按科目生成，未归类的 {data.stats?.unclassified ?? 0} 道不计入。
         </p>
       </section>
     );
@@ -173,7 +172,7 @@ function BriefView({apiBase, name, data}) {
       {state.phase === 'missing' && (
         <div className="ai-note-banner" data-brief-missing="true">
           <strong>这个科目还没有简报</strong>
-          <p>简报是就这个科目近期状态写出的总结，要**按需生成**——它不是索引的一部分。</p>
+          <p>简报要按需生成。</p>
           {state.error?.hint && <p className="ai-note-meta">服务的提示：{state.error.hint}</p>}
           {state.error?.details?.available && (
             <p className="ai-note-meta">
@@ -190,7 +189,7 @@ function BriefView({apiBase, name, data}) {
               error={generateError}
               extra={
                 generateError?.reason === 'brief_unverifiable' || generateError?.code === 'brief_unverifiable'
-                  ? '数字闸门没过：这份简报里至少有一个数字在索引里对不上，所以它**没有落盘**——编数字即不合格。'
+                  ? '数字闸门没过：这份简报里至少有一个数字在索引里对不上，所以它没有落盘。'
                   : null
               }
             />
@@ -256,7 +255,7 @@ function BriefBody({brief, path, generating, generateError, onGenerate}) {
           error={generateError}
           extra={
             generateError?.reason === 'brief_unverifiable' || generateError?.code === 'brief_unverifiable'
-              ? '数字闸门没过：这份新简报里至少有一个数字在索引里对不上，所以它**没有落盘**，现在这一份还是旧的。'
+              ? '数字闸门没过：这份新简报里至少有一个数字在索引里对不上，所以它没有落盘，现在这一份还是旧的。'
               : null
           }
         />
@@ -312,13 +311,13 @@ function DetailView({data, name, onUpload}) {
           上传整页照片
         </button>
         <span className="ai-note-meta">
-          细则按**录入时间由新到老**排（{ordered.length} 道）；要印题面去「今日重做」。
+          细则按录入时间由新到老排（{ordered.length} 道）；要印题面去「今日重做」。
         </span>
       </div>
 
       {undated.length > 0 && (
         <p className="ai-note-warn" data-undated={undated.length}>
-          另有 {undated.length} 道**没有录入时间**，排不了序，列在最后：
+          另有 {undated.length} 道没有录入时间，列在最后：
           {undated.map((problem) => (
             <span key={problem.id}>
               {' '}
@@ -385,8 +384,7 @@ function OutlineView({data, name}) {
     return (
       <section data-outline="unclassified">
         <p className="ai-note-warn">
-          未归类没有考点大纲：大纲的根是**科目**（科目 → 章 → 节 → 点），未归类还没被
-          指定科目，所以它挂不到任何一章下。
+          未归类没有考点大纲：大纲挂在科目下（科目 → 章 → 节 → 点），未归类还没指定科目。
         </p>
       </section>
     );
@@ -479,8 +477,7 @@ function RedoView({data, name}) {
         <>
           <RedoHeader header={header} />
           <p className="ai-note-meta" data-basis-scope="library">
-            ⚠ 这两个数字数的是**全库**的那一堆（服务只算了全库的两套总体）；上面那个
-            {queue.length} 才是这个科目里的。
+            ⚠ 这两个数字数的是全库那一堆；{queue.length} 才是这个科目里的。
           </p>
         </>
       ) : (
@@ -511,7 +508,7 @@ function RedoView({data, name}) {
       )}
 
       <p className="ai-note-meta">
-        题面一律是**擦除手写后的图**；这一栏不印正解与标准答案——那是阅读页的事。
+        题面一律是擦除手写后的图；这一栏不印正解与标准答案。
       </p>
     </section>
   );

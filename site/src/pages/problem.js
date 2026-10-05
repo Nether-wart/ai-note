@@ -120,8 +120,7 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
           <img src={cleanUrl} alt="题面（擦除手写后的图）" data-image-kind="clean" />
         ) : (
           <p className="ai-note-warn" data-missing-clean="true" role="alert">
-            这道题**没有擦除图**（`images.clean` 是 null）：缺就明说缺，**不回退到原图**——
-            原图印着手写与订正，那里面就有答案。
+            这道题没有擦除图：不回退到原图（原图印着手写与订正，那里面就有答案）。
           </p>
         )}
 
@@ -137,7 +136,7 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
               onChange={(event) => onToggleOriginal(event.target.checked)}
               data-toggle="show-original"
             />{' '}
-            显示原图（含手写与订正——**里面就有答案**，这是一次显式动作）
+            显示原图（含手写与订正，里面有答案）
           </label>
         </p>
 
@@ -145,13 +144,13 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
           (originalUrl ? (
             <>
               <p className="ai-note-warn" data-explicit-original="true">
-                你现在看的是**原图**（`images.original`）：它印着原解与订正，只用于审核这一页。
+                你现在看的是原图：它印着原解与订正，只用于审核这一页。
               </p>
               <img src={originalUrl} alt="原题（未擦除，印着手写与订正）" data-image-kind="original" />
             </>
           ) : (
             <p className="ai-note-warn" data-original-missing="true">
-              服务连原图都没给（`images.original` 是 null）：没有可以看的照片。
+              服务连原图都没给：没有可以看的照片。
             </p>
           ))}
 
@@ -168,7 +167,7 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
             <strong>标准答案</strong>
             <span className="ai-note-meta">（自动判定的唯一基准）</span>：
           </p>
-          <p data-field="standard_answer">{problem.standard_answer ?? '（还没有：这一栏该空就空）'}</p>
+          <p data-field="standard_answer">{problem.standard_answer ?? '（还没有）'}</p>
           <p>
             <strong>正解</strong>
             <span className="ai-note-meta">（给人看的完整解答）</span>：

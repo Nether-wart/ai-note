@@ -54,7 +54,7 @@ export default function Split() {
             error={{
               code: 'page_id_missing',
               message: '这一页要指名道姓地打开一页：/split?page=<页 id>',
-              hint: '为什么明确失败：猜一页会让你在**另一页**上动刀——那正是这个项目最怕的事故。',
+              hint: '不给页 id 时明确失败：猜一页会在另一页上动刀。',
             }}
             extra="要录一页新的，回首页点「上传整页照片」。"
           />
