@@ -204,3 +204,55 @@ def test_the_rebuilt_index_shows_the_two_new_cards(tmp_path):
         # 两把闸门都关着（同一份实现给的两个读数）
         assert rec["auto_judge"]["eligible"] is False
         assert rec["screen_redo"]["ready"] is False
+
+
+# ---------------------------------------------------------------- 其余拒绝/跳过分支（D9）
+
+
+def test_a_non_object_block_is_shouted_about_and_gets_no_card(tmp_path):
+    """块列表里混进非对象项 → 点名报出来（不是安静跳过），其余块照常入库。"""
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+        "这不是一个块",
+    ])])
+
+    status, envelope = commit(api)
+
+    assert status == 200
+    assert envelope["data"]["blocks"]["not_an_object"] == 1
+    assert envelope["data"]["blocks"]["kept"] == 1
+    assert [row["block_id"] for row in envelope["data"]["created"]] == ["b1"]
+    assert "block_not_an_object" in codes(envelope["warnings"])
+
+
+def test_a_bound_card_that_cannot_be_read_is_not_overwritten(tmp_path):
+    """块绑的卡在盘上却读不了 → **不覆盖**（先留证据），这一块不进 `created` 也不进 `reused`。"""
+    bound = "p-20200101-abcdef"
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True, card_id=bound),
+    ])])
+    (api.catalog.problems_dir / f"{bound}.json").write_bytes(b"{ not json")
+
+    status, envelope = commit(api)
+
+    assert status == 200
+    assert envelope["data"]["created"] == [] and envelope["data"]["reused"] == []
+    assert envelope["data"]["wrote_cards"] is False
+    assert [row["reason"] for row in envelope["data"]["refused"]] == ["card_unreadable"]
+    assert "page_commit_card_unreadable" in codes(envelope["warnings"])
+    assert (api.catalog.problems_dir / f"{bound}.json").read_bytes() == b"{ not json"
+
+
+def test_committing_cards_on_a_page_whose_photo_is_gone_is_shouted_about(tmp_path):
+    """页指向的整页照片不在：不是拒绝（页与块都还在），但入库的卡指向一张取不到的图 → 要喊。"""
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+    ])])
+
+    status, envelope = commit(api)
+
+    assert status == 200
+    assert len(envelope["data"]["created"]) == 1
+    photo = [w for w in envelope["warnings"] if w["code"] == "page_photo_missing"]
+    assert len(photo) == 1
+    assert photo[0]["level"] == "warning"

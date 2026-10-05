@@ -26,7 +26,7 @@ from server import audit
 from server.catalog import Catalog
 
 
-def write(root, *, cards=(), pages=(), raw_cards=None, images=(), photos=()):
+def write(root, *, cards=(), pages=(), raw_cards=None, raw_pages=None, images=(), photos=()):
     """造一个数据目录（卡、页、资产、以及故意写坏的原始文件）。"""
     (root / "problems").mkdir(parents=True, exist_ok=True)
     (root / "pages").mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,8 @@ def write(root, *, cards=(), pages=(), raw_cards=None, images=(), photos=()):
     for page in pages:
         (root / "pages" / f"{page['id']}.json").write_text(
             json.dumps(page, ensure_ascii=False, indent=2), encoding="utf-8")
+    for name, blob in (raw_pages or {}).items():
+        (root / "pages" / name).write_bytes(blob)
     for name in images:
         (root / "assets" / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     for name in photos:
@@ -279,6 +281,66 @@ def test_an_unreadable_card_file_is_reported_not_silently_dropped(tmp_path):
     assert found[0]["level"] == "warning"
     assert found[0]["card_id"] == "p-20200101-broken"
     assert report["audited"]["cards_unreadable"] == 1
+
+
+def test_an_unreadable_page_file_is_reported_as_a_warning(tmp_path):
+    """页文件读不了 → warning（这一页的块与绑定都没查，说出来而不是安静跳过）。"""
+    catalog = write(tmp_path / "data", raw_pages={"aaaa11112222.json": b"{ not json"})
+
+    report = audit.audit(catalog)
+
+    found = findings(report, "page_file_unreadable")
+    assert len(found) == 1
+    assert found[0]["level"] == "warning"
+    assert found[0]["page_id"] == "aaaa11112222"
+    assert report["audited"]["pages_unreadable"] == 1
+    assert report["ok"] is False
+
+
+def test_a_page_file_whose_id_does_not_match_the_filename_is_a_warning(tmp_path):
+    """页里的 id 与文件名不一致 = 数据矛盾（写盘路径只认文件名，内容里的 id 只用于对账）。"""
+    # 文件名叫 aaaa…，里面的 id 却是 bbbb…（夹具按 id 命名，所以这里要手写文件名）
+    catalog = write(tmp_path / "data", raw_pages={
+        "aaaa11112222.json": json.dumps(page("bbbb11112222", [block("b1", None)])).encode(),
+    })
+
+    report = audit.audit(catalog)
+
+    found = findings(report, "page_id_mismatch")
+    assert len(found) == 1
+    assert found[0]["level"] == "warning"
+    assert found[0]["page_id"] == "aaaa11112222"
+
+
+def test_a_non_object_block_in_a_page_is_shouted_about(tmp_path):
+    """页里的块列表混进非对象项 → 点名报出来（这一项没有对账）。"""
+    catalog = write(tmp_path / "data", pages=[
+        page("aaaa11112222", [block("b1", None), "这不是一个块"]),
+    ], photos=["aaaa11112222.png"])
+
+    report = audit.audit(catalog)
+
+    found = findings(report, "block_not_an_object")
+    assert len(found) == 1
+    assert found[0]["check"] == "page_blocks_shaped"
+    assert found[0]["level"] == "warning"
+
+
+def test_a_bound_card_whose_own_page_image_is_empty_is_a_hint(tmp_path):
+    """卡绑在页上、但卡自己的 `source.page_image` 空 → 来源信息不全（hint，不是矛盾级）。"""
+    pid = "p-20200101-aaaaaa"
+    card = a_card(pid, page_id="aaaa11112222")
+    card["source"]["page_image"] = None
+    catalog = write(tmp_path / "data", cards=[card], pages=[
+        page("aaaa11112222", [block("b1", pid)]),
+    ], photos=["aaaa11112222.png"])
+
+    report = audit.audit(catalog)
+
+    found = findings(report, "card_page_image_missing")
+    assert len(found) == 1
+    assert found[0]["level"] == "hint"
+    assert found[0]["card_id"] == pid and found[0]["page_id"] == "aaaa11112222"
 
 
 # ---------------------------------------------------------------- 不许静默 + 与索引一致

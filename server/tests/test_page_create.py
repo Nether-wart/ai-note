@@ -233,3 +233,66 @@ def test_a_request_without_a_photo_is_400_and_creates_nothing(tmp_path):
     assert response.status == 400
     assert envelope["error"]["details"]["param"] == "file"
     assert not api.catalog.pages_dir.exists()
+
+
+# ---------------------------------------------------------------- 其余拒绝/跳过分支（D9：每条都要有自己的测试）
+
+
+def test_two_photos_in_one_upload_become_two_pages(tmp_path):
+    """一个文件 = 一页；一次传多个（一个文件夹）= 多页（与 `POST /api/inbox` 同一分组口径）。"""
+    first, _ = a_photo(tmp_path)
+    second = ink.encode_png(white_with_blocks(80, 40, [(0, 0, 30, 10, RED)]))
+    segmenter = static_segmenter([{"id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 1.0], "question_no": 1}])
+    api = build_api(tmp_path, segmenter=segmenter)
+
+    body, content_type = multipart_body([("a.png", first), ("b.png", second)])
+    response = api.handle("POST", "/api/page", body, content_type=content_type)
+    envelope = json.loads(response.body)
+
+    assert response.status == 200
+    assert len(envelope["data"]["created"]) == 2
+    assert len(envelope["data"]["pages"]) == 2
+    assert len(segmenter.calls) == 2
+    for page_id in envelope["data"]["created"]:
+        assert (api.catalog.pages_dir / f"{page_id}.json").is_file()
+
+
+def test_an_unreadable_page_file_is_not_overwritten_and_no_photo_is_written(tmp_path):
+    """页文件在却读不了 = 真矛盾：**不覆盖**、也不写照片（先留证据，同回填那条纪律）。"""
+    blob, _ = a_photo(tmp_path)
+    page_id = hashlib.sha256(blob).hexdigest()[:12]
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS), make_pages=True)
+    (api.catalog.pages_dir / f"{page_id}.json").write_bytes(b"{ not json")
+
+    status, envelope = post_page(api, blob)
+
+    assert status == 200
+    assert envelope["data"]["created"] == []
+    row = envelope["data"]["pages"][0]
+    assert row["created"] is False and row["segmentation"] == "unreadable_page_file"
+    assert "page_file_unreadable" in {w["code"] for w in envelope["warnings"]}
+    assert (api.catalog.pages_dir / f"{page_id}.json").read_bytes() == b"{ not json"
+    assert not (api.catalog.pages_dir / f"{page_id}.png").exists(), "坏页文件旁边不许写照片"
+
+
+def test_a_non_png_photo_is_stored_but_the_ink_statistics_say_they_could_not_run(tmp_path):
+    """不是 PNG（手机原图可能是 JPEG）→ 收得下、页建得起，但红笔统计**做不了**。
+
+    这一档必须是「待定」（`keep: null`）而不是「没有红笔」（`keep: false`）——
+    「不知道」与「没有」是两件事（#11/#12 同一条纪律）。
+    """
+    from server import intake
+
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    status, envelope = post_page(api, b"\xff\xd8\xff\xe0-not-a-png", name="page.jpg")
+
+    assert status == 200
+    page_id = envelope["data"]["created"][0]
+    saved = json.loads((api.catalog.pages_dir / f"{page_id}.json").read_text(encoding="utf-8"))
+    assert saved["image"] == f"{page_id}.jpg"
+    assert all(b["keep"] is None for b in saved["blocks"])
+    assert all(b["bbox_px"] is None for b in saved["blocks"])
+    assert all(b["decision"]["rule"] == intake.RULE_INK_UNKNOWN for b in saved["blocks"])
+    assert {w["code"] for w in envelope["warnings"]} >= {
+        "intake_page_image_unreadable", "intake_block_ink_unknown"}
