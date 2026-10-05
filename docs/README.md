@@ -4,8 +4,8 @@
 
 | 路径 | 是什么 |
 |---|---|
-| `specs/` | 两份规格的**指针**：[`screen-redo.md`](specs/screen-redo.md)、[`page-segmentation.md`](specs/page-segmentation.md)。正文住在 issue [#1](https://github.com/Nether-wart/ai-note/issues/1) 与 [#2](https://github.com/Nether-wart/ai-note/issues/2) 里，这里不留副本——两份副本会漂移 |
-| `adr/` | 8 篇架构决定（0001–0008），按编号读。**动手改行为之前先看有没有 ADR 拦着** |
+| `specs/` | 三份规格的**指针**：[`screen-redo.md`](specs/screen-redo.md)、[`page-segmentation.md`](specs/page-segmentation.md)、[`frontend-rebuild.md`](specs/frontend-rebuild.md)。正文住在 issue [#1](https://github.com/Nether-wart/ai-note/issues/1)、[#2](https://github.com/Nether-wart/ai-note/issues/2) 与 [#17](https://github.com/Nether-wart/ai-note/issues/17) 里，这里不留副本——两份副本会漂移 |
+| `adr/` | 9 篇架构决定（0001–0009），按编号读。**动手改行为之前先看有没有 ADR 拦着** |
 | `contracts/http-api-v0.md` | 界面与后端之间**唯一必须跨过去的东西**（[ADR 0007](adr/0007-redesign-the-backend-contract-first.md)）：端点、错误信封、字段形状。**改行为之前先改这份文档** |
 | `acceptance-log.md` | 模型上岗验收记录（公开版）。规则是每个模型在每个角色上岗前都要过视觉探针与该角色的通过标准，换模型就要重跑 |
 | `decision-review.md` | 第 1 轮面谈的全部决定清单，逐条标了反转成本与信心——**这份清单是给你推翻用的** |
