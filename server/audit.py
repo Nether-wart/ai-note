@@ -50,8 +50,8 @@ import sys
 from pathlib import Path
 
 from . import pages, warnings as warnings_mod
-from .app import DEFAULT_DATA
 from .catalog import Catalog
+from .paths import default_data_dir
 
 # 审计自己的码（契约 §8）。凡是别处已有的码就沿用字面量，不另造近义名。
 CARD_FILE_UNREADABLE = "card_file_unreadable"            # warning：卡文件读不了（不是安静少一张）
@@ -301,8 +301,8 @@ def audit(catalog) -> dict:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="落盘数据体检：页 ↔ 卡双向对账（只报告、不修改）")
-    parser.add_argument("--data", default=str(DEFAULT_DATA),
-                        help="数据目录（默认仓库根的 data/）")
+    parser.add_argument("--data", default=str(default_data_dir()),
+                        help="数据目录（默认**用户数据目录**，见 server/paths.py）")
     return parser
 
 

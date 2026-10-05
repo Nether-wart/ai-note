@@ -19,9 +19,9 @@ from pathlib import Path
 
 from .config import load_env_files, load_judge_config
 from .http import Api
+from .paths import default_data_dir
 from .publicbase import public_base_warning, resolve_public_base
 
-DEFAULT_DATA = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
@@ -152,8 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
     """命令行入口。**每个配置项都有环境变量**：手机那条路上，服务常常是被脚本或
     桌面图标拉起来的，命令行改不了（契约 §1）。"""
     parser = argparse.ArgumentParser(description="错题本后端服务（契约 v0，#13 起收件目录可写）")
-    parser.add_argument("--data", default=os.environ.get("AI_NOTE_DATA", str(DEFAULT_DATA)),
-                        help="数据目录（默认仓库根的 data/；题卡／资产／索引只读）")
+    parser.add_argument("--data", default=str(default_data_dir()),
+                        help="数据目录（默认**用户数据目录**，见 server/paths.py；"
+                             "题卡／资产／索引只读。仓库里的 data/ 只做测试语料）")
     parser.add_argument("--host", default=DEFAULT_HOST,
                         help="监听地址（默认只监听本机）。要让手机连上来用 0.0.0.0，"
                              "同时**必须**给 --public-base")

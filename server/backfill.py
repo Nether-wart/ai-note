@@ -19,15 +19,15 @@ import json
 import sys
 from pathlib import Path
 
-from .app import DEFAULT_DATA
 from .catalog import Catalog
 from .pages import backfill_pages
+from .paths import default_data_dir
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把存量题卡反推回填成页文件（#9）")
-    parser.add_argument("--data", default=str(DEFAULT_DATA),
-                        help="数据目录（默认仓库根的 data/）")
+    parser.add_argument("--data", default=str(default_data_dir()),
+                        help="数据目录（默认**用户数据目录**，见 server/paths.py）")
     parser.add_argument("--apply", action="store_true",
                         help="真的写页文件；不传就是预演（只报告）")
     args = parser.parse_args(argv)

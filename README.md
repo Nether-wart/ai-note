@@ -23,20 +23,42 @@
 | `server/` | 后端：HTTP 层、判定、掌握状态机、页与切分、收入决策 | ✅ | [`server/README.md`](server/README.md) |
 | `site/` | 界面：清单页 / 重做页 / 切分修正页 | ✅ | [`site/README.md`](site/README.md) |
 | `docs/` | 规格、ADR、契约、验收记录 | ✅ | [`docs/README.md`](docs/README.md) |
-| `data/` | 你的资料：题卡、照片、页文件、词表 | ⚠️ 只有词表种子 | [`data/README.md`](data/README.md) |
+| `data/` | **本机测试语料**（一份真实数据的副本）＋两个词表种子 | ⚠️ 只有词表种子 | [`data/README.md`](data/README.md) |
 | `proto/` | 冻结的原型证据（README 里有它的结论） | ✅ | [`proto/README.md`](proto/README.md) |
 | `samples/` | 原型用的真实手写照片 | ❌ 只有 README | [`samples/README.md`](samples/README.md) |
-| `runs/` | 模型调用留档（跑过才有；契约 §10.1） | ❌ | — |
+| `runs/` | 旧位置留下的模型调用留档——**新默认不在这个仓库里**（见下） | ❌ | — |
 | `.env.local` | 密钥与本地配置 | ❌ | [`.env.local.example`](.env.local.example) |
 | `CONTEXT.md` | 术语表：项目用语的唯一真相 | ✅ | 直接读 |
 | `AGENTS.md` | 给 AI 助手的入口（指向 `docs/agents/`） | ✅ | — |
 | `pytest.ini` | 测试配置（`proto/` 撞名那道护栏在这里） | ✅ | — |
 
+## 你的数据不在这个仓库里
+
+题卡、照片、页文件与模型调用留档都是**运行时产物**，默认落在**用户数据目录**
+（[ADR 0008](docs/adr/0008-runtime-files-live-in-the-user-data-dir.md)）：
+
+| 平台 | 位置 |
+|---|---|
+| Windows | `%APPDATA%\ai-note\`（Roaming） |
+| macOS | `~/Library/Application Support/ai-note/` |
+| 其它 | `~/.local/share/ai-note/`（`$XDG_DATA_HOME` 优先） |
+
+里面是 `problems/`、`assets/`、`pages/`、`batches/`、`inbox/`、`private/` 与 `runs/`。
+`--data` / `AI_NOTE_DATA` 可以改。仓库里的 `data/` **只做本机测试语料**——想拿它跑就显式
+`--data data`；想把它当生产数据就搬过去（一次性）：
+
+```bash
+cp -r data/. ~/.local/share/ai-note/     # Windows 换成 %APPDATA%\ai-note
+```
+
 ## 跑起来
 
 ```bash
-# 1) 后端：默认只监听本机，数据目录默认 ./data
-python3 -m server.app --data data --host 127.0.0.1 --port 8765
+# 1) 后端：默认只监听本机；数据目录默认在你的用户数据目录（不是这个仓库）
+python3 -m server.app --host 127.0.0.1 --port 8765
+
+# 拿仓库里的测试语料跑（下面那些 curl 例子用的就是它）：
+#   python3 -m server.app --data data --host 127.0.0.1 --port 8765
 
 # 2) 界面：另开一个终端。依赖装在本地缓存里，别让 npm 写到仓库外
 cd site
@@ -55,6 +77,9 @@ python3 -m pytest -q
 node --test site/tests/
 node site/tests/selftest.mjs
 ```
+
+**想一步步人工验收**（起服务、点完三个页面、看哪些读数是服务给的、哪些行为算红线）见
+[`docs/walkthrough.md`](docs/walkthrough.md)。
 
 手机上录入、公开地址、切分修正界面等更细的用法都在 [`server/README.md`](server/README.md) 与
 [`site/README.md`](site/README.md) 里。

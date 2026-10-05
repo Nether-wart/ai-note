@@ -64,7 +64,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -737,16 +736,19 @@ def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False
 
 
 def _default_runs_dir() -> Path:
-    """留档目录的唯一定义在 `server/http.py`（所有角色的调用档都落在那儿）。"""
-    from .http import DEFAULT_RUNS_DIR
-    return DEFAULT_RUNS_DIR
+    """留档目录的唯一定义在 `server/paths.py`（所有角色的调用档都落在那儿）。"""
+    from .paths import default_runs_dir
+    return default_runs_dir()
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .paths import default_data_dir, default_runs_dir
+
     parser = argparse.ArgumentParser(
         description="收入决策（#12）：红笔痕迹的语义 → 收 / 不收 / 待定")
-    parser.add_argument("--data", default=os.environ.get("AI_NOTE_DATA"),
-                        help="数据目录（默认仓库根的 data/，也是 AI_NOTE_DATA）")
+    parser.add_argument("--data", default=str(default_data_dir()),
+                        help="数据目录（默认**用户数据目录**，见 server/paths.py；"
+                             "仓库里的 data/ 只做测试语料）")
     parser.add_argument("--page", required=True,
                         help="页 id（页文件名主干，例如 41c86bcfc007）")
     parser.add_argument("--apply", action="store_true",
@@ -756,8 +758,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="一键补收：把这一页没入库的块全收进来（写回要加 --apply）")
     parser.add_argument("--include-block", action="append", default=None, metavar="块ID",
                         help="只补收点名的块（可重复：--include-block b2 --include-block b5）")
-    parser.add_argument("--runs-dir", default=os.environ.get("AI_NOTE_RUNS"),
-                        help="模型调用留档目录（契约 §10.1；默认仓库根的 runs/，已在 .gitignore）")
+    parser.add_argument("--runs-dir", default=str(default_runs_dir()),
+                        help="模型调用留档目录（契约 §10.1；默认 <数据目录>/runs，"
+                             "也就是用户数据目录下的 runs/）")
     return parser
 
 
@@ -772,15 +775,13 @@ def main(argv: list[str] | None = None, *, semantics=None, at=None) -> int:
     `semantics` 是**测试接缝**：注入假的抽取角色，测试就不联网、不花钱。
     """
     # 环境先灌、parser 后建（与 `server/app.py: main` 同一个顺序讲究：默认值现算）。
-    from .app import DEFAULT_DATA, load_local_env
+    from .app import load_local_env
 
     for env_file in load_local_env():
         print(f"密钥文件：{env_file}", file=sys.stderr)
 
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.data is None:
-        args.data = str(DEFAULT_DATA)
 
     data_dir = Path(args.data)
     if not data_dir.is_dir():

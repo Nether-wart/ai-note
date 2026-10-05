@@ -10,7 +10,8 @@
 ## 跑
 
 ```bash
-# 只监听本机，数据目录默认是仓库根的 data/（题卡／资产／索引只读）
+# 拿仓库里的**测试语料**跑（生产数据默认在用户数据目录，见 ../data/README.md 与 ADR 0008）；
+# 题卡／资产／索引只读。
 python3 -m server.app --data data --host 127.0.0.1 --port 8765
 
 curl -s http://127.0.0.1:8765/api/index | python3 -m json.tool | head -40

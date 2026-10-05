@@ -22,6 +22,7 @@ from .errors import ApiError, bad_request, method_not_allowed, not_found
 from .judge_client import HttpJudge
 from .model_client import ModelUnavailable
 from .page_api import PageEndpoint
+from .paths import default_runs_dir
 
 # 还没实现的写命名空间。给一个含糊的 404，会让人以为是打错了字，而不是
 # 「这个端点还没实现」。`/api/attempt/`（#5）、`/api/inbox`（#13）与
@@ -32,8 +33,7 @@ RESERVED: dict[str, str] = {}
 # 手机上传页是后端托管的**静态资源**（ADR 0007 第 2 条：托管文件不是渲染页面）。
 UPLOAD_PAGE = Path(__file__).resolve().parent / "static" / "upload.html"
 
-# 留档默认落在仓库根的 `runs/`（.gitignore 里已有）。测试一律指到临时目录。
-DEFAULT_RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+# 留档默认落在**用户数据目录**下的 `runs/`（`paths.default_runs_dir`，测试一律指到临时目录）。
 
 
 @dataclass
@@ -90,7 +90,7 @@ class Api:
         # 坏配置**在这里就起不来**（阈值 NaN／无穷／越界，或 provider 不在白名单里），
         # 而不是每个请求里再验一遍（#5 派发简报第 7 条）。
         self.judge_config = config or load_judge_config()
-        judge_call = judge or HttpJudge(self.judge_config, runs_dir or DEFAULT_RUNS_DIR)
+        judge_call = judge or HttpJudge(self.judge_config, runs_dir or default_runs_dir())
         self.attempts = AttemptEndpoint(
             self.catalog, judge_call=judge_call, threshold=self.judge_config.threshold,
             clock=self.catalog.clock, provider=self.judge_config.provider,

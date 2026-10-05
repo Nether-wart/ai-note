@@ -33,7 +33,11 @@
 ## 1. 基址、监听与配置
 
 - 默认 `http://127.0.0.1:8765`，**只监听本机**（ADR 0003 单用户本地优先）。
-- 数据目录默认是仓库根的 `data/`，用 `--data <dir>` 或环境变量 `AI_NOTE_DATA` 覆盖。
+- 数据目录默认是**用户数据目录**（[ADR 0008](../adr/0008-runtime-files-live-in-the-user-data-dir.md)）：
+  Windows `%APPDATA%\ai-note`、macOS `~/Library/Application Support/ai-note`、
+  其它 `$XDG_DATA_HOME/ai-note`（没设就是 `~/.local/share/ai-note`）。
+  用 `--data <dir>` 或环境变量 `AI_NOTE_DATA` 覆盖。仓库里的 `data/` 只是**测试语料**，
+  不是默认数据目录（要拿它起服务就显式 `--data data`）。
   测试与验收必须指到临时目录，**绝不指向真实数据目录去写**。
   v0 不写任何文件，所以「指到真实数据目录」也只读。
 - 启动：`python3 -m server.app --data <dir> --host 127.0.0.1 --port 8765`。
@@ -45,7 +49,7 @@
   推导出来的地址如果**别的设备打不开**（通配地址／环回，而服务又绑在通配地址上），
   索引里会出现 `public_base_not_reachable` 警告（§8）——这是债务的可见化，不是错误。
 - **收件目录**（CONTEXT「收件目录」）：`--inbox`（或 `AI_NOTE_INBOX`），默认是**数据目录**
-  下面的 `inbox/`（即 `--data data` → `data/inbox/`）。它**跟着 `--data` 走**：
+  下面的 `inbox/`（`--data <dir>` → `<dir>/inbox/`）。它**跟着 `--data` 走**：
   换了数据目录却还往仓库里的 `data/inbox` 写，就是往真数据里写。
   「往这里放一个文件」是录入的唯一入口（ADR 0007 第 4 条）。上传、扫描与上传页见 §10.3。
 
@@ -910,7 +914,8 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
   此时 `streak` 不动，`note` 里也有这句原话。
 
 **留档（`runs/`）**：#5 验收第 3 条要求每次自动判定留一份调用档（提示词与用量）。
-`run_id` 就是那份档的标识，200 时一并返回；`runs/` 不进仓库（`.gitignore` 里已有）。
+`run_id` 就是那份档的标识，200 时一并返回；留档落在**数据目录**下的 `runs/`
+（`server/paths.py`，[ADR 0008](../adr/0008-runtime-files-live-in-the-user-data-dir.md)），不进仓库。
 人工确认不调模型，**不留档**，`run_id` 为 `null`。
 
 ### 10.2 页资源 —— 归属 #9 #10 #12 #14（编排裁决 D5）
@@ -1248,6 +1253,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（R1：对账进生产路径） | §10.2.1b：`POST /api/page` 与 `POST …/resegment` 的响应加 `checks` / `reconciliation` 两键（定义见该节的表）；§12 的 `server/ink.py`／`server/segmentation.py` 两行点明 `page_ink_regions`／`reconcile_response` | 第二轮修复 pass R1。#10 交付了确定性的三条判据，但**只有测试调用它**——生产路径上「静默丢题」照样是静默的。现在两条路都跑并结构化报出来，**只报不改**（切分仍由人确认）。覆盖率必须真的跑：`ink.page_ink_regions` 是整页墨迹区域唯一的实现（八连通，红笔∪深色），读不出来时明说「没查」而不是冒充通过 |
 | 本版（R2/R9：码表去重） | 回填那条路**不再自造第二个码**：`bbox_norm` 缺/退化（块退化为整页）与 §8 已定的 `block_without_box`（「与 `pages.rebind` 同一个码、同一件事」）统一，`server/pages.py` 收成一个 `BLOCK_WITHOUT_BOX` 常量（回填与 `rebind` 三处共用）。§8 码表**不变**（被删的那个码从来没进过表） | 第二轮修复 pass R2/R9。同一个事实两个码会让界面出现两种说法、让「按码统计」永远对不上；R9 一并收掉 `page_commit.py` 里那句「已记进报告、留给最终修复 pass 收」的过期承诺——那笔账现在真的记在这里 |
 | 本版（R3–R6、N1、N4） | §9 的 `internal_error` 原因清单改成显式取值列表并登记 `internal_error`（R5）；§11 的 `deps` 行改掉「这一层没有图像与模型的活」（N1）；§11 偏离表加判定的置信度门只挡「对」那一条（N4）。**响应形状没有别的变化** | R3（六条会拒绝/跳过的分支补上断言形状的测试：`page_commit_block_without_box`／`page_commit_blocks_skipped`／`intake_block_unknown`／`problem_file_unreadable`／`problem_not_dict`／`page_ink_draft_excluded`，六条全可达、无需 skip）、R4（读不了的卡不再安静地 `continue`：重切与入库都报 `card_file_unreadable` + 文件指针 + 明说它没进对账）、R6（用户可见文案的术语滑词「答案」→「作答」：`errors.not_auto_judgeable` 的 `hint` 与界面侧两处，`grep` 那句旧措辞在 `server/` 里为空（本表这一行的引用是唯一的仓库级命中））、N1（零依赖不等于没有图像与模型的活）、N4（spec #1 表格与 #4 验收 2 的字面冲突按工单实现，记账免得被当 bug 查） |
+| 本版（ADR 0008） | §1 数据目录默认值从「仓库根的 `data/`」改成**用户数据目录**（Windows `%APPDATA%\ai-note`、macOS `~/Library/Application Support/ai-note`、其它 `$XDG_DATA_HOME/ai-note`）；§10.1 的留档改成「**数据目录**下的 `runs/`」；§1 收件目录的例子改成 `--data <dir>` → `<dir>/inbox/`。**响应形状一个字段都没变** | 运行时产物不该住在项目目录里：`git clean`／重新 clone／切分支都可能碰掉资料，`git status` 常年靠六条忽略规则兜底，而且生产数据与测试语料抢同一个目录——「跑测试别写到真数据」本该由结构保证，不该靠纪律。仓库里的 `data/` 降级为**本机测试语料**；默认值改成在**建 parser 的那一刻**算（`.env.local` 是那时才灌进环境的，import 时算就等于让写在里面的 `AI_NOTE_*` 静默失效） |
 
 
 ## 12. 模块角色（下游一眼要看到的两件事）
