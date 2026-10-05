@@ -17,14 +17,17 @@ from . import assets, inbox as inbox_mod
 from .attempt import AttemptEndpoint
 from .catalog import Catalog
 from .config import load_judge_config
+from . import errors
 from .errors import ApiError, bad_request, method_not_allowed, not_found
 from .judge_client import HttpJudge
+from .model_client import ModelUnavailable
+from .page_api import PageEndpoint
 
 # 还没实现的写命名空间。给一个含糊的 404，会让人以为是打错了字，而不是
-# 「这个端点还没实现」。`/api/attempt/`（#5）与 `/api/inbox`（#13）已落地，不在这一列。
-RESERVED = {
-    "/api/page": "页资源（建 / 改 / 重切 / 入库）归 #9 #10 #12 #14",
-}
+# 「这个端点还没实现」。`/api/attempt/`（#5）、`/api/inbox`（#13）与
+# `/api/page*`（#14 落「改」与「重切」；「建」「入库」归 #15，由它给带说明的 404）
+# 都已落地，不在这一列。
+RESERVED: dict[str, str] = {}
 
 # 手机上传页是后端托管的**静态资源**（ADR 0007 第 2 条：托管文件不是渲染页面）。
 UPLOAD_PAGE = Path(__file__).resolve().parent / "static" / "upload.html"
@@ -88,6 +91,9 @@ class Api:
             clock=self.catalog.clock, provider=self.judge_config.provider,
             model=self.judge_config.model,
         )
+        # 页资源（契约 §10.2）。`segmenter` 是 #10 的模型接缝（与 #13 的收件管道
+        # 共用同一个注入对象）；不注入 = 切分不可用，绝不编块列表。
+        self.pages = PageEndpoint(self.catalog, segmenter=segmenter)
 
     def handle(self, method: str, target: str, body: bytes | str | None = b"",
                content_type: str = "", declared_length: int | None = None) -> Response:
@@ -103,6 +109,12 @@ class Api:
         except ApiError as exc:
             # 失败也可以带警告：拒绝一次作答时那张卡的自检结果要一并带上（§10.1）
             response = json_response(exc.status, error=exc.payload(), warnings=exc.warnings)
+        except ModelUnavailable as exc:
+            # 兜底：模型调用失败 → **502**（D1），绝不裸 500。具体是哪一页由
+            # 抛出的那一层说（`page_api.resegment` 用 `errors.model_unavailable(pid=…)`
+            # 把页 id 带进 `details`），这里只保证「502 + 信封」这条底线。
+            failure = errors.model_unavailable(str(exc), pid=None)
+            response = json_response(502, error=failure.payload(), warnings=failure.warnings)
         except Exception as exc:  # 不允许用 500 表达「输入不对」，但真出错要说清
             response = json_response(
                 500,
@@ -169,6 +181,14 @@ class Api:
             self._require(method, "POST")
             return self._post(path, body)
 
+        # 页资源（契约 §10.2）：四个动作一个接缝。路由在这里显式列出，
+        # 好让「用错方法」得到 405（带 allowed）而不是含糊的 404。
+        if path == "/api/page":
+            self._require(method, "POST")
+            return self._page_create()
+        if path.startswith("/api/page/"):
+            return self._page_route(method, path, body)
+
         # 其余 POST 交给写端点那一份判断：只读端点上是 405、预留命名空间是带说明的 404。
         if method == "POST":
             return self._post(path, body)
@@ -196,6 +216,40 @@ class Api:
                 )
 
         raise not_found(f"没有这条路由：{path}", hint="GET /api/index 看看索引")
+
+    # ------------------------------------------------------------ 页资源
+
+    def _page_route(self, method: str, path: str, body: bytes | str | None) -> Response:
+        """`/api/page/<id>`（改）与 `/api/page/<id>/resegment`、`/commit`。
+
+        用错方法 → 405 带 `allowed`（契约 §5.1）：不是含糊的 404——路由**在**，
+        只是这个动作不收这个方法。
+        """
+        match = re.fullmatch(r"/api/page/(?P<pid>.*?)/resegment", path)
+        if match:
+            self._require(method, "POST")
+            data, warnings = self.pages.resegment(match.group("pid"))
+            return json_response(200, data=data, warnings=warnings)
+
+        match = re.fullmatch(r"/api/page/(?P<pid>.*?)/commit", path)
+        if match:
+            self._require(method, "POST")
+            self.pages.commit_reserved(match.group("pid"))
+
+        # `.*`（而不是 `.+`）：空的页 id 要落到 id 校验的 400 上，
+        # 而不是掉进「没有这条路由」的 404——客户端少给一段路径不是路由写错了。
+        match = re.fullmatch(r"/api/page/(?P<pid>.*)", path)
+        if match:
+            self._require(method, "PATCH")
+            data, warnings = self.pages.edit(match.group("pid"), body)
+            return json_response(200, data=data, warnings=warnings)
+
+        raise not_found(f"没有这条路由：{path}", hint="页资源的动作见契约 §10.2")
+
+    def _page_create(self) -> Response:
+        """`POST /api/page`（建）归 #15——明说自己还没实现，不冒充成功。"""
+        self.pages.create_reserved()
+        raise AssertionError("unreachable")   # pragma: no cover —— create_reserved 总会抛
 
     # ------------------------------------------------------------ 上传页
 

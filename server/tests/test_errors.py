@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import get_json
 
 
@@ -30,18 +32,25 @@ def test_write_methods_on_read_only_endpoints_are_405(api_for):
     assert body["error"]["details"]["allowed"] == ["GET", "OPTIONS"]
 
 
-def test_reserved_write_namespaces_say_they_are_reserved(api_for):
-    """#9 #10 #12 #14 要落在这里。含糊的 404 会让人以为是打错了字。
+def test_reserved_write_namespaces_say_they_are_reserved():
+    """预留的动作要**明说自己还没实现**：含糊的 404 会让人以为是打错了字。
 
-    已落地的不在这一列：`/api/attempt/`（#5）与 `/api/inbox*`（#13）收到 GET 都是
-    **405**（说清它收 POST），分别见 `test_attempt_endpoint.py` 与 `test_inbox.py`。
+    `/api/page*`（#14）现在**路由在**了，所以整条前缀不再是「预留命名空间」：
+    「改」与「重切」已实现（用错方法是 405，见 `test_page_endpoints.py`），
+    而「建」与「入库」两个动作归 #15，走**带说明的 404**——形状由这里钉住。
     """
-    for target in ("/api/page/p-x",):
-        status, body = get_json(api_for([]), target)
+    from server.errors import ApiError
+    from server.page_api import PageEndpoint
 
-        assert status == 404, target
-        assert body["error"]["code"] == "not_found"
-        assert "预留" in body["error"]["message"] or "预留" in body["error"].get("hint", "")
+    for call, arguments in ((PageEndpoint.create_reserved, ()),
+                            (PageEndpoint.commit_reserved, ("p-x",))):
+        with pytest.raises(ApiError) as excinfo:
+            call(*arguments)
+        payload = excinfo.value.payload()
+        assert excinfo.value.status == 404
+        assert payload["code"] == "not_found"
+        assert payload["details"]["reserved"] is True
+        assert "#15" in payload["details"]["owner"]
 
 
 def test_every_response_carries_cors_headers(api_for):
