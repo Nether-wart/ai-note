@@ -46,8 +46,14 @@ def card_warnings(card: dict, catalog) -> list[dict]:
             "题面还没有转录（problem.transcript 空）→ 先收录在清单里，审核时填；"
             "没有题面就不进重做纸", pid))
     if not std:
+        # 分级（最终修复 pass 裁决）：解答题**按设计**没有标准答案（过程题只能人工确认），
+        # 那是预期状态 → `hint`；非解答题缺标准答案是「可机判却缺基准」的真问题 → `warning`。
+        # warning 必须意味着「有东西不对」——把预期状态报成警告会把它淹在噪声里
+        # （D3/D4 的一贯口径：提示与警告分级，别让预期状态淹掉真问题）。
+        # 与 `autojudge.reject_reason` 同一个判据（`solution_type` 优先），不另判一遍。
         warns.append(_warn("standard_answer_missing",
-                           "标准答案为空 → 不能走自动判定，只能人工确认", pid))
+                           "标准答案为空 → 不能走自动判定，只能人工确认", pid,
+                           level="hint" if t == "solution" else "warning"))
     if t == "choice" and std and not _CHOICE_LETTER.fullmatch(std):
         warns.append(_warn("standard_answer_not_choice_letter",
                            f"选择题的标准答案不是选项字母：{std!r}", pid))

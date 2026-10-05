@@ -320,6 +320,29 @@ def test_rebind_warnings_carry_an_explicit_level(api_for):
     assert all(item.get("level") in ("warning", "hint") for _, item in found), found
 
 
+def test_a_solution_card_missing_its_answer_is_only_a_hint(api_for):
+    """解答题**按设计**没有标准答案（过程题只能人工确认）→ 提示，不是警告（D3/D4 口径）。
+
+    `warning` 必须意味着「有东西不对」；把预期状态报成警告会把它淹在噪声里，
+    而提示与警告的分级正是「别让预期状态淹掉真问题」那条纪律的落点。
+    """
+    body = index_of(api_for([make_card(**{"problem.type": "solution",
+                                          "standard_answer.value": ""})]))
+    (warn,) = [w for w in body["data"]["problems"][0]["warnings"]
+               if w["code"] == "standard_answer_missing"]
+
+    assert warn["level"] == "hint"
+
+
+def test_a_non_solution_card_missing_its_answer_is_a_warning(api_for):
+    """非解答题缺标准答案 = 可机判却缺基准，那是**真问题**，仍然是警告。"""
+    body = index_of(api_for([make_card(**{"standard_answer.value": ""})]))
+    (warn,) = [w for w in body["data"]["problems"][0]["warnings"]
+               if w["code"] == "standard_answer_missing"]
+
+    assert warn["level"] == "warning"
+
+
 def test_problem_id_mismatch_warning_carries_an_explicit_level(api_for):
     """索引级的 `problem_id_mismatch` 也走 `_warn`：`{code,message,id,level}` 四件齐全。"""
     card = make_card("p-20200101-aaaaaa")
