@@ -16,6 +16,7 @@ from .errors import ApiError, bad_request, not_found
 from .inbox import Inbox
 from .publicbase import is_reachable_from_other_devices, public_base_warning
 from .records import problem_detail, problem_record
+from .warnings import _warn as _contract_warn
 from .warnings import index_warnings
 
 # id 里不许出现 `..`：`/` 已经被挡在外面，所以穿越本来就做不到，这条是纵深防御
@@ -168,14 +169,14 @@ class Catalog:
                     path.stem))
                 continue
             if path.stem != card.get("id"):
-                warnings.append(
-                    {
-                        "code": "problem_id_mismatch",
-                        "message": f"{path.name} 里的 id 是 {card.get('id')!r}，与文件名不一致"
-                                   f"→ 改名或复制粘贴事故",
-                        "id": card.get("id"),
-                    }
-                )
+                # 走 `warnings._warn`：契约 §2 要求 `level` **总是显式发出来**，
+                # 手搓 dict 漏了它，下游只能靠猜（BRIEF 硬规则 7）。
+                warnings.append(_contract_warn(
+                    "problem_id_mismatch",
+                    f"{path.name} 里的 id 是 {card.get('id')!r}，与文件名不一致"
+                    f"→ 改名或复制粘贴事故",
+                    card.get("id"),
+                ))
             cards.append(card)
 
         # 默认打印清单的顺序：按上次重做（从未重做过的以录入时间起算）从早到晚。

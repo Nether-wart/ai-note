@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from conftest import PNG_1X1, get_json, make_card
+from conftest import PNG_1X1, get_json, make_card, post_json
 from server import pages
 
 
@@ -195,6 +195,139 @@ def test_an_unreadable_page_file_is_a_warning_not_a_silent_hint(api_for):
     (warn,) = warnings_of(api, "page_binding_lost")
     assert warn["level"] == "warning"
     assert "读不了" in warn["message"]
+
+
+def _walk_warnings(node, path=""):
+    """把一个响应/报告里**所有** `warnings` 列表逐项收集出来（递归，含嵌套的 data）。
+
+    用于「所有对外警告都带 level」这条防回归断言：只认键名 `warnings`，
+    `skipped` 不在内（契约 §2 的 Skipped 形状没有 `level` 这一档）。
+    """
+    found: list[tuple[str, object]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "warnings" and isinstance(value, list):
+                found.extend((f"{path}.{key}", item) for item in value)
+            else:
+                found.extend(_walk_warnings(value, f"{path}.{key}"))
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(_walk_warnings(item, f"{path}[{index}]"))
+    return found
+
+
+def test_every_outward_warning_carries_an_explicit_level(api_for):
+    """**递归**断言：任何对外响应里的每一条警告都带 `level`（契约 §2）。
+
+    #15 的复查发现「构造警告一律走 `warnings._warn`」这条硬规则有三处漏网：
+    `catalog.problem_id_mismatch`、`pages.backfill_pages` 的 5 条、`pages.rebind`
+    的 3 条——它们手搓 dict，级别只能靠消费方猜。逐条补测试太容易漏下一处，
+    所以这里改成对**所有出口**做一次递归检查（这是最省事的防回归）。
+    """
+    page_id = "aaaaaa"
+    # 一道解答题（std 空 → hint）、一道选择题（std 空 → warning）、两张题干逐字相同
+    # （索引级 duplicate_transcript）、以及一份坏页文件（rebind 会报 block_* 码）。
+    api = api_for(
+        [
+            make_card("p-20200101-aaaaaa", **{"problem.type": "solution",
+                                              "standard_answer.value": ""}),
+            make_card("p-20200101-bbbbbb", **{"standard_answer.value": ""}),
+        ],
+        files={"p-20200101-cccccc": make_card("p-20200101-dddddd")},
+    )
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{page_id}.json").write_text(json.dumps({
+        "version": 1, "id": page_id, "image": f"{page_id}.png", "blocks": [
+            "这不是一个对象",                       # block_not_an_object
+            {"id": "b2", "card_id": "p-20200101-aaaaaa"},   # block_without_box
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    status, index = get_json(api, "/api/index")
+    assert status == 200, index
+    status, seg = post_json(api, f"/api/page/{page_id}/resegment", {})
+    assert status == 200, seg
+
+    found = _walk_warnings(index) + _walk_warnings(seg)
+    assert len(found) >= 5, f"夹具本来就该有警告，否则这条断言空转：{found}"
+    bad = [(where, item) for where, item in found
+           if not isinstance(item, dict) or item.get("level") not in ("warning", "hint")]
+    assert not bad, f"没有显式 level 的对外警告：{bad}"
+
+
+def test_backfill_warnings_carry_an_explicit_level(api_for):
+    """回填报告是**对外出口**（`python3 -m server.backfill`）——5 条警告也必须有 `level`。
+
+    它们和 #15 审计面对同样的码（`page_file_unreadable`/`page_id_mismatch`/
+    `page_image_unsafe`/`page_photo_missing`/`block_box_fallback`），两面给出的级别
+    必须一致；手搓 dict 漏掉 `level` 就是「同一个码，两面说法不同」。
+    """
+    from conftest import PNG_1X1
+
+    ids = ["p-20200101-aaaaaa", "p-20200101-bbbbbb", "p-20200101-cccccc",
+           "p-20200101-dddddd", "p-20200101-eeeeee"]
+    cards = []
+    for pid in ids:
+        card = make_card(pid)
+        card["source"]["page_image"] = f"data/pages/{pid[-6:]}.png"  # 6 位 → 页 id
+        cards.append(card)
+    # 回填要拿掉 E 的边界，才会报 block_box_fallback
+    cards[4]["source"]["bbox_norm"] = None
+    api = api_for(cards)
+    pages_dir = api.catalog.pages_dir
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / "aaaaaa.json").write_text("{ 这不是 JSON", encoding="utf-8")
+    (pages_dir / "bbbbbb.json").write_text(json.dumps({
+        "version": 1, "id": "别的页", "image": "bbbbbb.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "cccccc.json").write_text(json.dumps({
+        "version": 1, "id": "cccccc", "image": "../cccccc.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "dddddd.json").write_text(json.dumps({
+        "version": 1, "id": "dddddd", "image": "dddddd.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "eeeeee.png").write_bytes(PNG_1X1)   # 照片在 → 只报 block_box_fallback
+
+    report = pages.backfill_pages(api.catalog, apply=False)
+
+    found = _walk_warnings(report)
+    codes = {item.get("code") for _, item in found}
+    assert codes == {"page_file_unreadable", "page_id_mismatch", "page_image_unsafe",
+                     "page_photo_missing", "block_box_fallback"}, found
+    bad = [(where, item) for where, item in found
+           if not isinstance(item, dict) or item.get("level") not in ("warning", "hint")]
+    assert not bad, f"回填报告里没有显式 level 的警告：{bad}"
+
+
+def test_rebind_warnings_carry_an_explicit_level(api_for):
+    """`pages.rebind` 交回的事实也必须带 `level`（裁决：走 `warnings._warn`，不是内部结构）。
+
+    三条码都要走到：非对象项、没有可用 `bbox_norm`、消失的块绑着卡片。
+    """
+    report = pages.rebind(
+        [{"id": "old1", "bbox_norm": [0.0, 0.0, 0.4, 0.4], "card_id": "p-20200101-aaaaaa"},
+         "不是对象",
+         {"id": "old3", "bbox_norm": None}],
+        [{"id": "new1", "bbox_norm": [0.6, 0.6, 0.3, 0.3]},
+         {"id": "new2", "bbox_norm": [0.5, 0.05, 0.1, 0.1]},
+         {"id": "new3"}],
+    )
+
+    found = _walk_warnings(report)
+    codes = {item.get("code") for _, item in found}
+    assert {"block_not_an_object", "block_without_box",
+            "block_removed_with_card"} <= codes, found
+    assert all(item.get("level") in ("warning", "hint") for _, item in found), found
+
+
+def test_problem_id_mismatch_warning_carries_an_explicit_level(api_for):
+    """索引级的 `problem_id_mismatch` 也走 `_warn`：`{code,message,id,level}` 四件齐全。"""
+    card = make_card("p-20200101-aaaaaa")
+    body = index_of(api_for(files={"p-20200101-zzzzzz": card}))
+
+    (warn,) = [w for w in body["warnings"] if w["code"] == "problem_id_mismatch"]
+    assert warn["level"] == "warning"
+    assert warn["id"] == "p-20200101-aaaaaa"
 
 
 def test_every_warning_carries_an_explicit_level(api_for):

@@ -39,6 +39,20 @@ PAGE_VERSION = 1
 PAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
+def _warn(code: str, message: str, pid: str | None, level: str = "warning") -> dict:
+    """一条警告——**形状的唯一实现在 `server/warnings.py: _warn`**（硬规则 7）。
+
+    `level` 总是显式发出来（契约 §2）；由服务给，界面不许自行升降级。
+
+    这里**延后 import** 是因为依赖是一个环：`warnings` 顶层就 import 本模块
+    （它要用 `page_binding`）。写成顶层 `from .warnings import _warn` 会让
+    「谁先被 import」决定成败——先 import `server.attempt` 就会先 import `warnings`，
+    那时本模块还在半初始化，导入直接失败。
+    """
+    from .warnings import _warn as _contract_warn
+    return _contract_warn(code, message, pid, level)
+
+
 def is_page_id(page_id) -> bool:
     """这个字符串能不能当页 id（＝页文件名的主干）。**取页 id 的入口必须先问它**。
 
@@ -263,21 +277,21 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
             pages_by_id[page_id] = page
             if error:
                 page_errors[page_id] = error
-                warnings.append({
-                    "code": "page_file_unreadable",
-                    "message": f"{error} → 这张卡没有回填；不覆盖坏文件，先留证据",
-                    "id": pid,
-                })
+                warnings.append(_warn(
+                    "page_file_unreadable",
+                    f"{error} → 这张卡没有回填；不覆盖坏文件，先留证据",
+                    pid,
+                ))
             elif page is not None and not page_identity_ok(page, page_id):
                 # 页里的 id 与文件名不一致 = 数据矛盾。**不覆盖这个文件**（同不可读那一档）：
                 # 按内容里的 id 写回去就会静默落到别的文件上，甚至覆盖一张真题卡。
                 page_errors[page_id] = (
                     f"{page_paths[page_id]} 里的 id 与文件名不一致：{page.get('id')!r}")
-                warnings.append({
-                    "code": "page_id_mismatch",
-                    "message": f"{page_errors[page_id]} → 这张卡没有回填；不覆盖这个文件，先留证据",
-                    "id": pid,
-                })
+                warnings.append(_warn(
+                    "page_id_mismatch",
+                    f"{page_errors[page_id]} → 这张卡没有回填；不覆盖这个文件，先留证据",
+                    pid,
+                ))
 
         if page_id in page_errors:
             reports.append(_card_report(pid, "skipped", page_id, page_errors[page_id]))
@@ -294,19 +308,19 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
             image_name = page.get("image") or ""
             if not is_page_image_name(image_name):
                 # 先判「是不是纯文件名」再拼路径：坏 image 会让 `.is_file()` 去 pages/ 外面探。
-                warnings.append({
-                    "code": "page_image_unsafe",
-                    "message": f"页 {page_id} 的 image 不是纯文件名：{image_name!r}"
-                               f" → 不拿它拼路径（照片必须与页文件并列，D5）",
-                    "id": pid,
-                })
+                warnings.append(_warn(
+                    "page_image_unsafe",
+                    f"页 {page_id} 的 image 不是纯文件名：{image_name!r}"
+                    f" → 不拿它拼路径（照片必须与页文件并列，D5）",
+                    pid,
+                ))
             elif not image_name or not (catalog.pages_dir / image_name).is_file():
-                warnings.append({
-                    "code": "page_photo_missing",
-                    "message": f"页 {page_id} 的整页照片不在：{catalog.pages_dir / image_name}"
-                               f" → 这个页绑定指向一张取不到的图",
-                    "id": pid,
-                })
+                warnings.append(_warn(
+                    "page_photo_missing",
+                    f"页 {page_id} 的整页照片不在：{catalog.pages_dir / image_name}"
+                    f" → 这个页绑定指向一张取不到的图",
+                    pid,
+                ))
 
         if any(b.get("card_id") == pid for b in page["blocks"]):
             reports.append(_card_report(pid, "unchanged", page_id,
@@ -317,8 +331,7 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
         page["blocks"].append(block)
         dirty.add(page_id)
         for note in notes:
-            warnings.append({"code": "block_box_fallback",
-                             "message": f"{pid}：{note}", "id": pid})
+            warnings.append(_warn("block_box_fallback", f"{pid}：{note}", pid))
         reports.append(_card_report(
             pid, "created" if fresh else "appended", page_id,
             "建了页文件，块 = 这张卡的边界" if fresh else "页文件已存在，追加一个块"))
@@ -527,6 +540,13 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
     给出 `matched_from`、`iou` 与 `contain`）与 `removed`。界面上「新增／替换／保留」
     怎么措辞由 #10 定（它在这些事实上做三态映射，见 `server/segmentation.py`）。
 
+    **警告也是契约形状**（最终修复 pass 裁决，二选一里选 **(a)**）：`warnings[]` 的每一条
+    都走 `warnings._warn`，所以 `{code, message, id, level}` 四件齐全——`level` 由这里
+    显式给（全是 `warning`，都是「有东西不对」）。**不是**「内部结构、由消费方补级别」：
+    #10 的 `classify_resegment` 原样透传这个列表，而任何下游（审计、界面）都可能直接消费
+    它，让级别取决于「谁在读」正是 §2 要消灭的猜法。`id` 沿用事实本来的语义：
+    非对象项没有 id（`null`）、无 `bbox_norm` 的块填块 id、消失的块填**卡 id**。
+
     对照事实**放在 `matches` 里、不放进块**：块会长成页文件的一行，而
     `matched_from` 下一次重切就过期了——把过期事实写进存档文件，正是这个项目
     最怕的那种「安静的谎」。
@@ -540,25 +560,25 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
     old_list = []
     for old in old_blocks or []:
         if not isinstance(old, dict):
-            warnings.append({"code": "block_not_an_object",
-                             "message": f"旧块列表里有一项不是对象：{old!r}"})
+            warnings.append(_warn("block_not_an_object",
+                                  f"旧块列表里有一项不是对象：{old!r}", None))
             continue
         if _xywh(old.get("bbox_norm")) is None:
-            warnings.append({"code": "block_without_box", "id": old.get("id"),
-                             "message": f"旧块 {old.get('id')!r} 没有可用的 bbox_norm"
-                                        f"（整页归一化边界）→ 无法按位置匹配"})
+            warnings.append(_warn("block_without_box",
+                                  f"旧块 {old.get('id')!r} 没有可用的 bbox_norm"
+                                  f"（整页归一化边界）→ 无法按位置匹配", old.get("id")))
         old_list.append(old)
 
     new_list: list[dict] = []
     for new in new_blocks or []:
         if not isinstance(new, dict):
-            warnings.append({"code": "block_not_an_object",
-                             "message": f"新块列表里有一项不是对象：{new!r}"})
+            warnings.append(_warn("block_not_an_object",
+                                  f"新块列表里有一项不是对象：{new!r}", None))
             continue
         if _xywh(new.get("bbox_norm")) is None:
-            warnings.append({"code": "block_without_box", "id": new.get("id"),
-                             "message": f"新块 {new.get('id')!r} 没有可用的 bbox_norm"
-                                        f" → 无法按位置匹配"})
+            warnings.append(_warn("block_without_box",
+                                  f"新块 {new.get('id')!r} 没有可用的 bbox_norm"
+                                  f" → 无法按位置匹配", new.get("id")))
         new_list.append(new)
 
     matchable = [i for i, block in enumerate(old_list) if _xywh(block.get("bbox_norm"))]
@@ -615,12 +635,12 @@ def rebind(old_blocks, new_blocks, *, iou_threshold: float = MATCH_IOU,
             "bbox_norm": old.get("bbox_norm"),
         })
         if old.get("card_id"):
-            warnings.append({
-                "code": "block_removed_with_card",
-                "id": old.get("card_id"),
-                "message": f"块 {old.get('id')!r} 在新切分里找不到位置重合的块，"
-                           f"但它绑着卡片 {old['card_id']} → 卡片不会被自动抹掉，先人工确认",
-            })
+            warnings.append(_warn(
+                "block_removed_with_card",
+                f"块 {old.get('id')!r} 在新切分里找不到位置重合的块，"
+                f"但它绑着卡片 {old['card_id']} → 卡片不会被自动抹掉，先人工确认",
+                old.get("card_id"),
+            ))
 
     return {
         "blocks": blocks,
