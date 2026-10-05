@@ -340,6 +340,116 @@ def test_ids_allocated_on_one_page_do_not_collide_with_other_pages():
     assert len(set(ids)) == len(ids) == 6
 
 
+# --------------------- 数据安全：写盘路径只认调用方给的页 id，内容里的 id/image 只用于对账
+
+
+def bare_page(page_id: str, claimed_id, image: str | None = None) -> dict:
+    """一个空页文件（`id` 故意与文件名不一致时用）。"""
+    return {
+        "version": 1, "id": claimed_id, "image": image if image is not None else f"{page_id}.png",
+        "created_at": None,
+        "origin": {"original_file": None, "sheet": None, "page_number": None},
+        "blocks": [],
+    }
+
+
+def test_image_name_must_be_a_plain_filename():
+    """`image` 只能是「与页文件并列」的文件名：`/`、`\\`、`..` 一律不算（D5）。"""
+    assert pages.is_page_image_name("41c86bcfc007.png") is True
+    assert pages.is_page_image_name("") is True, "还没记照片（回填会报提示）"
+    assert pages.is_page_image_name(None) is True
+    for bad in ("../secret.png", "a/b.png", "a\\b.png", "..", "../../x.png", ["x"], 0):
+        assert pages.is_page_image_name(bad) is False, bad
+
+
+def test_save_page_writes_to_the_callers_page_id_not_the_one_inside(tmp_path):
+    """要求 1/2：页里的 `id` 只用于对账；写盘路径**只认调用方给的页 id**。
+
+    修前这里会写到 `<data>/problems/p-20261004-41c86b.json`（内容里的 id 穿过 `..`），
+    把一张真题卡整份覆盖。
+    """
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    catalog = Catalog(tmp_path / "data")
+    catalog.pages_dir.mkdir(parents=True)
+    page = bare_page("41c86bcfc007", "../problems/p-20261004-41c86b")
+
+    with pytest.raises(ApiError) as excinfo:
+        pages.save_page(catalog, page, page_id="41c86bcfc007")
+
+    err = excinfo.value
+    assert (err.status, err.code) == (400, "bad_request")
+    assert err.reason == "page_id_mismatch"
+    assert err.details["param"] == "page_id", "HTTP 层能把这个 400 原样透出去"
+    assert not (catalog.pages_dir / "41c86bcfc007.json").exists(), "一个字节都不写"
+    assert not (catalog.root / "problems").exists(), "更没有穿过 `..` 写到 problems/ 去"
+    assert list(catalog.pages_dir.iterdir()) == [], "连临时文件都不留"
+
+
+def test_save_page_preview_runs_the_same_identity_gate(tmp_path):
+    """预演与真写走同一条代码路径：坏 id 在 `apply=False` 也必须被拒、也必须不碰盘。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    catalog = Catalog(tmp_path / "data")
+    catalog.pages_dir.mkdir(parents=True)
+    page = bare_page("41c86bcfc007", "someotherpage")
+
+    with pytest.raises(ApiError) as excinfo:
+        pages.save_page(catalog, page, page_id="41c86bcfc007", apply=False)
+
+    assert excinfo.value.reason == "page_id_mismatch"
+    assert list(catalog.pages_dir.iterdir()) == [], "预演（和一些坏 id）一个文件都不许出现"
+
+
+def test_save_page_with_a_matching_id_still_writes_where_the_caller_says(tmp_path):
+    """正常路径保持不变：id 一致就写到 `<page_id>.json`（不回归）。"""
+    from server.catalog import Catalog
+
+    catalog = Catalog(tmp_path / "data")
+    page = bare_page("41c86bcfc007", "41c86bcfc007")
+
+    path = pages.save_page(catalog, page, page_id="41c86bcfc007")
+
+    assert path == catalog.pages_dir / "41c86bcfc007.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["id"] == "41c86bcfc007"
+
+
+def test_backfill_refuses_to_overwrite_a_page_file_whose_id_disagrees(api_for):
+    """回填也是写页文件的一方：页里 id 与文件名不一致 → 警告 + **不覆盖**（同不可读那一档）。"""
+    api = api_for([real_shaped_card()])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    page_file = api.catalog.pages_dir / f"{REAL_PAGE_HASH}.json"
+    bad = json.dumps(bare_page(REAL_PAGE_HASH, "someotherpage"), ensure_ascii=False, indent=2)
+    page_file.write_text(bad, encoding="utf-8")
+
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    assert page_file.read_text(encoding="utf-8") == bad, "坏页文件一个字节都不能被覆盖"
+    assert [c["action"] for c in report["cards"]] == ["skipped"]
+    warning = next(w for w in report["warnings"] if w["code"] == "page_id_mismatch")
+    assert "id" in warning["message"]
+
+
+def test_backfill_warns_instead_of_probing_outside_pages_for_a_traversing_image(api_for):
+    """`image` 穿越：回填**不拿它拼路径**去 `.is_file()`，而是显式报出来。"""
+    api = api_for([real_shaped_card()])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    # 把「照片」放在 pages/ 外面，且让它真的存在：修前会把它当成照片在场（不报缺图）
+    (api.catalog.root / "secret.png").write_bytes(b"top secret")
+    page_file = api.catalog.pages_dir / f"{REAL_PAGE_HASH}.json"
+    page_file.write_text(json.dumps(bare_page(REAL_PAGE_HASH, REAL_PAGE_HASH, "../secret.png"),
+                                    ensure_ascii=False), encoding="utf-8")
+
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    warning = next(w for w in report["warnings"] if w["code"] == "page_image_unsafe")
+    assert "../secret.png" in warning["message"]
+    assert not [w for w in report["warnings"] if w["code"] == "page_photo_missing"], \
+        "坏 image 不许被当成「照片在场」，也不许被当成「照片不在」（两张嘴都得先闭嘴）"
+
+
 # ------------------------------------------- 实测：真的存量数据（只读，绝不写）
 
 # 真数据是被 gitignore 的私人数据，不在 worktree 里（BRIEF「实测数据事实」）。

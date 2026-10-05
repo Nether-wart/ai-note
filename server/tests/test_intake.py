@@ -639,6 +639,115 @@ def test_a_page_id_that_could_escape_the_pages_dir_is_rejected(tmp_path):
         "拒绝路径不得留下痕迹（这里差点是一次真正的数据破坏）"
 
 
+def test_a_page_file_whose_id_escapes_into_problems_cannot_overwrite_the_card(tmp_path):
+    """**最小复现**：页文件里的 `id` 指着一张真题卡 → 拒绝、受害者 md5 不变、零写入。
+
+    写盘路径只认调用方点名的页 id；页里那个 `id` 只用于对账。修前这条会把整份页 JSON
+    覆盖到 `data/problems/p-20261004-41c86b.json` 上（md5 变），却报出
+    `page_path=<pages>/41c86bcfc007.json`（它根本没写这个文件），且 `warnings == []`。
+    """
+    import hashlib
+
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    (data / "problems").mkdir(parents=True)
+    victim = data / "problems" / "p-20261004-41c86b.json"
+    victim.write_text(json.dumps({"id": "p-20261004-41c86b", "note": "真题卡"},
+                                 ensure_ascii=False), encoding="utf-8")
+    victim_md5 = hashlib.md5(victim.read_bytes()).hexdigest()
+    page = page_of([red_block("b1")])
+    page["id"] = "../problems/p-20261004-41c86b"
+    page_file = data / "pages" / "41c86bcfc007.json"
+    original = json.dumps(page, ensure_ascii=False, indent=2)
+    page_file.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007",
+                          semantics=FakeSemantics({"b1": "cross"}), at=AT, apply=True)
+
+    err = excinfo.value
+    assert (err.status, err.code) == (400, "bad_request")
+    assert err.reason == "page_id_mismatch", "D1：拒绝要有机器可读的细因"
+    assert err.details["param"] == "page_id", "HTTP 层能把这个 400 原样透出去"
+    assert hashlib.md5(victim.read_bytes()).hexdigest() == victim_md5, \
+        "受害者题卡必须一个字节不变"
+    assert page_file.read_text(encoding="utf-8") == original, "自己的页文件也不许被写"
+    assert not list((data / "pages").glob("*.tmp")), "拒绝路径不留半个页"
+
+
+def test_a_page_file_whose_id_names_a_different_page_is_rejected_and_writes_nothing(tmp_path):
+    """派生症状 1：`"id":"someotherpage"`（合法文件名）→ 修前静默写错文件、谎报 `page_path`。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    page = page_of([red_block("b1")])
+    page["id"] = "someotherpage"
+    (data / "pages" / "41c86bcfc007.json").write_text(
+        json.dumps(page, ensure_ascii=False), encoding="utf-8")
+    before = sorted(p.name for p in (data / "pages").iterdir())
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007",
+                          semantics=FakeSemantics({"b1": "cross"}), at=AT, apply=True)
+
+    assert excinfo.value.reason == "page_id_mismatch"
+    assert sorted(p.name for p in (data / "pages").iterdir()) == before, \
+        "一个文件都不许多、不许少"
+    assert not (data / "pages" / "someotherpage.json").exists(), "尤其不许写到 someotherpage"
+
+
+def test_a_bad_page_id_in_the_file_is_rejected_even_in_a_preview(tmp_path):
+    """预演与真写走同一个校验（#14 implementer 实测反馈）：坏 id 不许被预演报告成「没问题」。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    page = page_of([red_block("b1")])
+    page["id"] = "someotherpage"
+    (data / "pages" / "41c86bcfc007.json").write_text(
+        json.dumps(page, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007", at=AT, apply=False)
+
+    assert excinfo.value.reason == "page_id_mismatch"
+    assert not list((data / "pages").glob("*.tmp")), "预演更不该碰盘"
+
+
+@pytest.mark.parametrize("image", ["../secret.png", "sub/photo.png", "a\\b.png", "..",
+                                   "....//x.png"])
+def test_a_page_image_that_is_not_a_plain_filename_is_rejected(tmp_path, image):
+    """要求 3：`image` 必须是纯文件名（不含 `/`、`\\`、`..`），否则拒绝——不许借读取穿越。"""
+    from server.catalog import Catalog
+    from server.errors import ApiError
+
+    data = tmp_path / "data"
+    (data / "pages").mkdir(parents=True)
+    (data / "problems").mkdir(parents=True)
+    (data / "secret.png").write_bytes(b"top secret")
+    page = page_of([red_block("b1")])
+    page["image"] = image
+    (data / "pages" / "41c86bcfc007.json").write_text(
+        json.dumps(page, ensure_ascii=False), encoding="utf-8")
+    before = sorted(p.name for p in (data / "pages").iterdir())
+
+    with pytest.raises(ApiError) as excinfo:
+        intake.run_intake(Catalog(data), "41c86bcfc007",
+                          semantics=FakeSemantics({"b1": "cross"}), at=AT, apply=True)
+
+    err = excinfo.value
+    assert (err.status, err.code) == (400, "bad_request")
+    assert err.reason == "page_image_unsafe"
+    assert err.details["param"] == "image"
+    assert sorted(p.name for p in (data / "pages").iterdir()) == before, "一个字节都不写"
+
+
 def test_a_missing_page_photo_makes_every_block_pending_not_dropped(tmp_path):
     """整页图不在 → 统计做不了 → 每块**待定**，不是「没有红笔」。"""
     from server.catalog import Catalog
@@ -843,3 +952,92 @@ def test_the_cli_builds_the_real_extractor_when_nothing_is_injected(tmp_path, mo
     assert envelope["data"]["asked"] == []
     assert built["config"].role == "extract", "抽取角色的身份走同一张角色表"
     assert built["runs_dir"] == str(runs), "留档目录用 --runs-dir 给的那个"
+
+
+# ------------------------------- CLI 也必须堵住同一条旁路（最小复现的命令形态）
+
+
+def _point_page_id_at(path, claimed_id):
+    """把页文件里的 `id` 改成 `claimed_id`（模拟被塞坏的页文件）。"""
+    page = json.loads(path.read_text(encoding="utf-8"))
+    page["id"] = claimed_id
+    path.write_text(json.dumps(page, ensure_ascii=False), encoding="utf-8")
+
+
+def test_the_cli_refuses_a_page_file_whose_id_points_at_a_card(tmp_path):
+    """D9：最小复现的 CLI 形态——修前 rc=0/`ok=true` 且**真的覆盖了受害者题卡**。"""
+    import hashlib
+
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block()])
+    victim = catalog.problems_dir / "p-20261004-41c86b.json"
+    victim.write_text(json.dumps({"id": "p-20261004-41c86b", "note": "真题卡"},
+                                 ensure_ascii=False), encoding="utf-8")
+    victim_md5 = hashlib.md5(victim.read_bytes()).hexdigest()
+    _point_page_id_at(path, "../problems/p-20261004-41c86b")
+    page_bytes = path.read_bytes()
+
+    code, envelope, err = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                              "--apply", semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    assert code == 2 and envelope["ok"] is False
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["reason"] == "page_id_mismatch"
+    assert envelope["error"]["details"]["param"] == "page_id"
+    assert hashlib.md5(victim.read_bytes()).hexdigest() == victim_md5, "受害者题卡不变"
+    assert path.read_bytes() == page_bytes, "页文件也不变"
+    assert not list(catalog.pages_dir.glob("*.tmp")), "不留半个页"
+
+
+def test_the_cli_returns_a_structured_envelope_when_the_page_id_escapes_the_pages_dir(tmp_path):
+    """派生症状 2：`"id":"../../problems/p-nope"` → 修前是**裸 `FileNotFoundError`（rc=1）**。"""
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block()])
+    _point_page_id_at(path, "../../problems/p-nope")
+
+    code, envelope, err = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                              "--apply", semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    assert code == 2, "不许是 1（裸回溯的退出码）"
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["reason"] == "page_id_mismatch"
+    assert "Traceback" not in err, "D1：绝不许裸回溯"
+
+
+def test_the_cli_turns_a_filesystem_failure_into_the_d1_envelope(tmp_path, monkeypatch):
+    """要求 4：盘上的 `OSError`（含 `FileNotFoundError`）→ 结构化信封，不许裸回溯。
+
+    这条不走坏页文件（那条现在被 `page_id_mismatch` 挡在前面），而是直接把
+    `save_page` 换成一个抛 `FileNotFoundError` 的替身——正是修前那条 CLI 的失败形态。
+    """
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block()])
+    before = path.read_bytes()
+
+    def boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "problems/p-nope.json.tmp")
+
+    monkeypatch.setattr(intake.pages, "save_page", boom)
+
+    code, envelope, err = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                              "--apply", semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    assert code == 2
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "internal_error"
+    assert envelope["error"]["reason"] == "filesystem_error"
+    assert "FileNotFoundError" in envelope["error"]["message"], "message 带异常类名"
+    assert "Traceback" not in err
+    assert path.read_bytes() == before
+
+
+def test_the_cli_returns_a_structured_envelope_when_the_page_image_is_unsafe(tmp_path):
+    """要求 3 的命令形态：坏 `image` 也是信封（`details.param == "image"`），不是裸回溯。"""
+    catalog, path = make_pages_dir(tmp_path, blocks=[red_block()], image_name="../secret.png")
+
+    code, envelope, err = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                              "--apply", semantics=FakeSemantics({"b1": "cross"}), at=AT)
+
+    assert code == 2
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["reason"] == "page_image_unsafe"
+    assert envelope["error"]["details"]["param"] == "image"
+    assert "Traceback" not in err
