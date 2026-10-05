@@ -234,6 +234,10 @@ def create_pages(catalog, *, body, content_type, segmenter, at=None) -> tuple[di
     **拒绝路径一个字节都不动**（D9）：不是 multipart / 没有 `file` 段 / 全是空文件 → 400，
     全都发生在 `pages_dir.mkdir` 之前。
     """
+    # body 归一化成 bytes（与 `http._inbox_upload` 同一条讲究）：不经这一步，一个 str body
+    # 会在 `parse_multipart` 的字节拼接上抛 TypeError → 兜底 500，而 D1 要的是 400。
+    if isinstance(body, str):
+        body = body.encode("utf-8")
     files = inbox.upload_files(inbox.parse_multipart(body, content_type))
     moment = at or datetime.now()
     stamp = _iso(moment)

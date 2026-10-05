@@ -256,3 +256,42 @@ def test_committing_cards_on_a_page_whose_photo_is_gone_is_shouted_about(tmp_pat
     photo = [w for w in envelope["warnings"] if w["code"] == "page_photo_missing"]
     assert len(photo) == 1
     assert photo[0]["level"] == "warning"
+
+
+def test_a_card_deleted_after_commit_is_recreated_with_the_same_id(tmp_path):
+    """半途而废的状态可以自愈：页里有绑定、卡被删了 → 重跑入库**用同一个 id 补建**。
+
+    这正是「先写页、再建卡」那条顺序换来的性质：绑定已经落盘，重跑不会重新分配 id。
+    """
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+        block("b2", [0.02, 0.40, 0.9, 0.2], keep=True),
+    ])])
+    _, first = commit(api)
+    first_ids = [row["card_id"] for row in first["data"]["created"]]
+    (api.catalog.problems_dir / f"{first_ids[0]}.json").unlink()
+
+    status, second = commit(api)
+
+    assert status == 200
+    assert [row["card_id"] for row in second["data"]["created"]] == [first_ids[0]]
+    assert [row["card_id"] for row in second["data"]["reused"]] == [first_ids[1]]
+    assert second["data"]["wrote_page"] is False, "绑定本来就在盘上，没什么可改"
+
+
+def test_an_unsafe_page_image_is_a_400_and_no_card_is_ever_written(tmp_path):
+    """页里的 `image` 可穿越 → **400，一个字节都不写**（这是 #12 那条漏洞的派生症状，
+    而入库是**写**路径：不验它就可能把卡建到一个假来源上）。"""
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+    ])])
+    (api.catalog.pages_dir / f"{PAGE_ID}.json").write_text(json.dumps({
+        "version": 1, "id": PAGE_ID, "image": "../../problems/p-x.json",
+        "blocks": [block("b1", [0.02, 0.02, 0.9, 0.2], keep=True)],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    status, envelope = commit(api)
+
+    assert status == 400
+    assert envelope["error"]["details"]["param"] == "page_id"
+    assert list(api.catalog.problems_dir.glob("*.json")) == []

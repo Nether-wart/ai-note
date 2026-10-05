@@ -296,3 +296,16 @@ def test_a_non_png_photo_is_stored_but_the_ink_statistics_say_they_could_not_run
     assert all(b["decision"]["rule"] == intake.RULE_INK_UNKNOWN for b in saved["blocks"])
     assert {w["code"] for w in envelope["warnings"]} >= {
         "intake_page_image_unreadable", "intake_block_ink_unknown"}
+
+
+def test_a_str_body_is_a_400_not_a_500(tmp_path):
+    """body 是 str（不是 bytes）也要走 400：D1 不许用兜底 500 表达输入不对。"""
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    response = api.handle("POST", "/api/page", "这不是字节",
+                          content_type="multipart/form-data; boundary=----x")
+    envelope = json.loads(response.body)
+
+    assert response.status == 400
+    assert envelope["error"]["code"] == "bad_request"
+    assert not api.catalog.pages_dir.exists()
