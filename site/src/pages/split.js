@@ -37,7 +37,7 @@ export default function Split() {
           : (
             <div className="ai-note-banner" role="alert" data-status="failed" data-error-code="page_id_missing">
               <strong>没给页 id</strong>
-              <p>这一页要指名道姓地打开一页：<code>/split?page=<页 id></code></p>
+              <p>这一页要指名道姓地打开一页：<code>{'/split?page=<页 id>'}</code></p>
               <p className="ai-note-meta">
                 为什么明确失败：猜一页会让你在**另一页**上动刀——那正是这个项目最怕的事故。
               </p>
