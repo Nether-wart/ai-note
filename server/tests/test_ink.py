@@ -315,6 +315,50 @@ def test_page_block_reports_missing_bbox_is_not_silently_zero():
     assert reports[1]["message"]
 
 
+# ------------------------------- 切片 4b：整页墨迹区域（覆盖率对账的输入，R1）
+#
+# 覆盖率判据（`segmentation.check_coverage`）吃的是「一片墨迹」的列表，而工厂里
+# 没有第二处能造它——墨迹区域的唯一实现就是这里。红笔与深色都算墨迹：订正也是
+# 页面上该被框住的内容（只数深色会把红笔订正漏出覆盖率之外）。
+
+def test_page_ink_regions_are_connected_patches_with_their_pixel_counts():
+    """白底 + 两片离得远的墨迹 → 两个区域，各带自己的 `bbox_norm`（整页归一化）与 `px`。"""
+    img = white_with_blocks(100, 60, [(10, 10, 20, 20, RED), (60, 40, 80, 50, BLACK)])
+
+    regions = ink.page_ink_regions(img)
+
+    assert regions == [
+        {"bbox_norm": [0.1, 10 / 60, 0.1, 10 / 60], "px": 100},
+        {"bbox_norm": [0.6, 40 / 60, 0.2, 10 / 60], "px": 200},
+    ]
+
+
+def test_page_ink_regions_join_touching_pixels_and_separate_gaps():
+    """一片墨迹是**连着的**墨迹像素（八连通）：贴着的算一片，隔开的算两片。"""
+    img = white_with_blocks(10, 10, [(0, 0, 1, 1, BLACK), (2, 2, 3, 3, BLACK)])
+
+    regions = ink.page_ink_regions(img)
+
+    assert [r["px"] for r in regions] == [1, 1], "隔一格就是两片，不许并成一个"
+
+    touching = white_with_blocks(10, 10, [(0, 0, 1, 1, BLACK), (1, 1, 2, 2, BLACK)])
+    assert [r["px"] for r in ink.page_ink_regions(touching)] == [2], "斜对角贴着算一片"
+
+
+def test_a_red_patch_is_ink_too_when_the_whole_page_is_reconciled():
+    """红笔订正也是墨迹：只数深色会把一整片红笔订正漏出覆盖率之外。"""
+    img = white_with_blocks(10, 10, [(0, 0, 4, 4, RED)])
+
+    regions = ink.page_ink_regions(img)
+
+    assert [r["px"] for r in regions] == [16]
+
+
+def test_a_blank_page_has_no_ink_regions():
+    """白纸就是没有墨迹——空列表，而不是一片盖住整页的假区域。"""
+    assert ink.page_ink_regions(color_image(5, 5, WHITE)) == []
+
+
 # ------------------------------------------- 切片 5：统计不做语义判断（验收 3）
 
 SEMANTIC_WORDS = (

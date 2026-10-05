@@ -309,3 +309,102 @@ def test_a_str_body_is_a_400_not_a_500(tmp_path):
     assert response.status == 400
     assert envelope["error"]["code"] == "bad_request"
     assert not api.catalog.pages_dir.exists()
+
+
+# ------------------------------------------------ 对账接进生产路径（R1：不许静默丢题）
+#
+# spec #2：「对账必须是确定性的，这是把『静默丢题』变成响声的唯一办法。」
+# 所以「建」这条路上必须真的跑 `segmentation.reconcile` 的三条判据，并把结论
+# 结构化放进响应（`checks` + `reconciliation`，警告走 `warnings`）。
+
+RECONCILE_CODES = {
+    "question_number_gap", "question_number_duplicate", "question_number_missing",
+    "block_overlap", "block_without_box", "block_not_an_object",
+    "page_ink_uncovered", "page_ink_draft_excluded", "page_ink_invalid",
+    "coverage_not_checked",
+}
+
+
+def reconcile_warnings(envelope):
+    return [w for w in envelope["warnings"] if w["code"] in RECONCILE_CODES]
+
+
+def test_a_normal_page_reconciles_completely_and_quietly(tmp_path):
+    """**阴性对照**：正常页（题号连续、块不重叠、墨迹都被框住）一条响声都不许有。
+
+    这三条新接线最容易的失败模式是给每一页加一句「我没查」——那比不接还坏：
+    它会训练人忽略体检（`proto/server.py:1046-1047`）。
+    """
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    _, envelope = post_page(api, blob)
+
+    row = envelope["data"]["pages"][0]
+    assert reconcile_warnings(envelope) == []
+    assert row["checks"]["coverage"]["checked"] is True, "覆盖率这一条真的跑了"
+    assert row["checks"]["coverage"]["ok"] is True
+    assert row["checks"]["question_numbers"]["gaps"] == []
+    assert row["checks"]["overlaps"]["pairs"] == []
+    assert row["reconciliation"] == {
+        "blocks": 2, "checks_run": ["question_numbers", "overlaps", "coverage"],
+        "checks_skipped": [], "alarms": [], "ok": True, "complete": True,
+    }
+
+
+def test_create_shouts_when_the_model_skips_a_question_number(tmp_path):
+    """模型报出 17、19 却没有 18 → 建页当场报警（「漏了一题」最便宜的探测器）。"""
+    blob, _ = a_photo(tmp_path)
+    blocks = [
+        {"id": "b1", "bbox_norm": [0.0, 0.0, 0.4, 1 / 3], "question_no": 17},
+        {"id": "b2", "bbox_norm": [0.6, 0.0, 0.4, 1 / 3], "question_no": 19},
+    ]
+    api = build_api(tmp_path, segmenter=static_segmenter(blocks))
+
+    _, envelope = post_page(api, blob)
+
+    assert "question_number_gap" in {w["code"] for w in envelope["warnings"]}
+    row = envelope["data"]["pages"][0]
+    assert row["checks"]["question_numbers"]["gaps"] == [18]
+    assert row["reconciliation"]["ok"] is False
+    assert "question_number_gap" in row["reconciliation"]["alarms"]
+
+
+def test_create_shouts_when_two_cut_blocks_overlap(tmp_path):
+    """两块边界相交（切重了）→ 建页当场报警。"""
+    blob, _ = a_photo(tmp_path)
+    blocks = [
+        {"id": "b1", "bbox_norm": [0.0, 0.0, 0.5, 1 / 3], "question_no": 1},
+        {"id": "b2", "bbox_norm": [0.4, 0.0, 0.5, 1 / 3], "question_no": 2},
+    ]
+    api = build_api(tmp_path, segmenter=static_segmenter(blocks))
+
+    _, envelope = post_page(api, blob)
+
+    assert "block_overlap" in {w["code"] for w in envelope["warnings"]}
+    assert envelope["data"]["pages"][0]["checks"]["overlaps"]["pairs"]
+
+
+def test_create_shouts_about_a_large_patch_of_ink_no_block_covers(tmp_path):
+    """下半页一大片墨迹（2000px）没被任何块框住 → 覆盖率这一条当场报警。
+
+    正是 spec #2 那条实测锚点：`1-0000.png` 框下方 6158 像素墨迹全是手写解答
+    （`docs/acceptance-log.md:75-83`）。
+    """
+    img = white_with_blocks(100, 60, [(0, 40, 100, 60, (20, 20, 20))])
+    blob = ink.encode_png(img)
+    blocks = [{"id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 0.5], "question_no": 1}]
+    api = build_api(tmp_path, segmenter=static_segmenter(blocks))
+
+    _, envelope = post_page(api, blob)
+
+    codes = {w["code"] for w in envelope["warnings"]}
+    assert "page_ink_uncovered" in codes
+    row = envelope["data"]["pages"][0]
+    assert row["checks"]["coverage"]["ok"] is False
+    (miss,) = row["checks"]["coverage"]["uncovered"]
+    assert miss["px"] == 2000 and miss["alarm"] is True
+    # 页还是建起来了——对账只报不改（切分仍由人确认）
+    assert row["created"] is True
+    assert (api.catalog.pages_dir / f"{row['page_id']}.json").is_file()
+

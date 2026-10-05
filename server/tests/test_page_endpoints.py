@@ -301,6 +301,106 @@ def test_a_segmenter_that_fails_is_a_502_and_leaves_the_page_untouched(tmp_path)
     assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
 
 
+# ------------------------------------------------ 对账接进生产路径（R1）
+#
+# 重切这条路上也要跑 `segmentation.reconcile` 的三条判据（题号连续性／块重叠／覆盖率），
+# 结论结构化放进响应。覆盖率要读**页文件旁边那张整页照片**（D5：照片与页文件并列）。
+
+UPPER = {"id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 0.5], "question_no": 1}
+
+
+def a_black_patch_page(api, patches):
+    """把一张合成整页照片写到页文件旁边（与页文件同名不同后缀，D5）。"""
+    from server import ink
+    from test_ink import white_with_blocks
+
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{PAGE_ID}.png").write_bytes(
+        ink.encode_png(white_with_blocks(100, 60, patches)))
+
+
+def test_resegment_reconciles_the_new_blocks_and_is_quiet_when_all_is_well(tmp_path):
+    """**阴性对照**：题号连续、块不重叠、墨迹都被框住 → 重切一条响声都没有。"""
+    existing = page([block("b1", [0.0, 0.0, 0.4, 1 / 3], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=17)])
+    def segmenter(image_path):
+        return {"blocks": [
+            {"id": "b1", "bbox_norm": [0.0, 0.0, 0.4, 1 / 3], "question_no": 17},
+            {"id": "b2", "bbox_norm": [0.6, 0.0, 0.4, 1 / 3], "question_no": 18},
+        ], "parsed": True, "rejected": [], "warnings": []}
+
+    api = build_api(tmp_path, pages=[existing], segmenter=segmenter)
+    a_black_patch_page(api, [(0, 0, 40, 20, (20, 20, 20)), (60, 0, 100, 20, (20, 20, 20))])
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    data = envelope["data"]
+    assert envelope["warnings"] == []
+    assert data["checks"]["coverage"]["checked"] is True
+    assert data["checks"]["coverage"]["ok"] is True
+    assert data["reconciliation"]["ok"] is True
+    assert data["reconciliation"]["complete"] is True
+
+
+def test_resegment_shouts_about_ink_that_no_new_block_covers(tmp_path):
+    """新切分的块只框住上半页，下半页那片墨迹没人框 → 覆盖率当场报警（只报不改）。"""
+    existing = page([block("b1", [0.0, 0.0, 1.0, 0.5], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=1)])
+    api = build_api(tmp_path, pages=[existing],
+                    segmenter=lambda path: {"blocks": [dict(UPPER)], "parsed": True,
+                                            "rejected": [], "warnings": []})
+    a_black_patch_page(api, [(0, 40, 100, 60, (20, 20, 20))])
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    assert "page_ink_uncovered" in [w["code"] for w in envelope["warnings"]]
+    assert envelope["data"]["checks"]["coverage"]["ok"] is False
+    assert envelope["data"]["reconciliation"]["alarms"] == ["page_ink_uncovered"]
+    # 对账只报不改：页文件一个字节都没动
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
+def test_resegment_shouts_when_the_new_cut_skips_a_question_number(tmp_path):
+    """新切分报出 17、19 却没有 18 → 重切当场报警（缺口在 `checks` 里点名）。"""
+    existing = page([block("b1", [0.0, 0.0, 1.0, 0.5], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=17)])
+    def segmenter(image_path):
+        return {"blocks": [
+            {"id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 0.5], "question_no": 17},
+            {"id": "b2", "bbox_norm": [0.0, 0.5, 1.0, 0.5], "question_no": 19},
+        ], "parsed": True, "rejected": [], "warnings": []}
+
+    api = build_api(tmp_path, pages=[existing], segmenter=segmenter)
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    assert "question_number_gap" in [w["code"] for w in envelope["warnings"]]
+    assert envelope["data"]["checks"]["question_numbers"]["gaps"] == [18]
+
+
+def test_resegment_shouts_when_two_new_blocks_overlap(tmp_path):
+    """两块新边界相交（切重了）→ 重切当场报警。"""
+    existing = page([block("b1", [0.0, 0.0, 0.5, 0.5], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=1)])
+    def segmenter(image_path):
+        return {"blocks": [
+            {"id": "b1", "bbox_norm": [0.0, 0.0, 0.5, 0.5], "question_no": 1},
+            {"id": "b2", "bbox_norm": [0.4, 0.0, 0.5, 0.5], "question_no": 2},
+        ], "parsed": True, "rejected": [], "warnings": []}
+
+    api = build_api(tmp_path, pages=[existing], segmenter=segmenter)
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    assert "block_overlap" in [w["code"] for w in envelope["warnings"]]
+    assert envelope["data"]["checks"]["overlaps"]["pairs"]
+
+
 # ---------------------------------------------------------------- 入库（commit）与建（POST /api/page）
 
 
