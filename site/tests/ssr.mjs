@@ -99,7 +99,6 @@ export async function createHarness() {
     },
   });
 
-  const {default: SplitEditor} = await import('../src/components/SplitEditor.js');
   const {default: RedoQuestion} = await import('../src/components/RedoQuestion.js');
   const {default: RedoPage, ResultPanel} = await import('../src/components/RedoPage.js');
   const {default: RedoHeader} = await import('../src/components/RedoHeader.js');
@@ -121,17 +120,6 @@ export async function createHarness() {
         delete globalThis.__REDO_SEARCH__;
       }
     },
-    /**
-     * 切分修正页（#14）。`pageData` 是给自检留的缝：给了它就不去 fetch，
-     * 于是能在不联网、不起服务的前提下被渲染出来。
-     */
-    renderSplit: (pageData, {pageId = 'aaaabbbbcccc', apiBase = ''} = {}) =>
-      renderToStaticMarkup(
-        createElement(SplitEditor, {apiBase, pageId, pageData}),
-      ),
-    /** 同上，但**不给页**（渲染出「正在读…」那一刻）。 */
-    renderSplitLoading: ({pageId = 'aaaabbbbcccc'} = {}) =>
-      renderToStaticMarkup(createElement(SplitEditor, {apiBase: '', pageId})),
     /** 判定结果面板（R7：掌握读数按 verdict 分流）。`result` 是 `attemptResult` 的形状。 */
     renderResult: (result) =>
       renderToStaticMarkup(createElement(ResultPanel, {result})),

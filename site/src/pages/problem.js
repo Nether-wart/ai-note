@@ -6,6 +6,7 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import {assetUrl, fetchProblem} from '../lib/api';
 import {buildRedoUrl} from '../lib/redo';
 import {parseProblemQuery} from '../lib/routes';
+import {formatMoment} from '../lib/time';
 import {useMounted} from '../lib/use-mounted';
 import FailurePanel from '../components/FailurePanel';
 
@@ -99,6 +100,8 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
   const cleanUrl = assetUrl(apiBase, clean);
   const originalUrl = assetUrl(apiBase, original);
   const canRedo = problem.screen_redo?.ready === true;
+  // 时刻显示成人读的样子（`2026-10-04 14:31`）；精确的原串挂在 `title` 上，随时查得到。
+  const moment = formatMoment(problem.created_at);
 
   return (
     <article data-problem-body="true">
@@ -110,7 +113,8 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
         </small>
       </h1>
       <p className="ai-note-meta">
-        题卡 <code>{problem.id}</code> · 录入 {problem.created_at || '（服务没给时刻）'} · 重做过{' '}
+        题卡 <code>{problem.id}</code> · 录入{' '}
+        <span title={moment.exact || undefined}>{moment.text}</span> · 重做过{' '}
         {problem.attempts ?? 0} 次 · 掌握读数 {problem.mastery_cn}
         {problem.cooling ? `（还在冷却，还差 ${problem.cooldown_days} 天）` : ''}
       </p>
@@ -275,7 +279,7 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
       ))}
 
       {(envelope.warnings || []).length > 0 && (
-        <details className="ai-note-banner" data-problem-notices="true">
+        <details className="ai-note-banner alert alert--warning" data-problem-notices="true">
           <summary>这封信封还带了 {envelope.warnings.length} 条警告（点开看原话）</summary>
           <ul>
             {envelope.warnings.map((warning, index) => (

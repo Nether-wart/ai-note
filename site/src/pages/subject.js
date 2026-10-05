@@ -5,7 +5,8 @@ import {useLocation} from '@docusaurus/router';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import {fetchBrief, postBrief} from '../lib/api';
 import {buildRedoUrl, queueForProblems, redoHeader} from '../lib/redo';
-import {UNCLASSIFIED, parseSubjectQuery, problemUrl} from '../lib/routes';
+import {UNCLASSIFIED, parseSubjectQuery, problemUrl, subjectUrl} from '../lib/routes';
+import {filterByTime, formatMoment, timeIndex} from '../lib/time';
 import {briefState, detailOrder, outlineRows, problemsOfSubject} from '../lib/tree';
 import {useMounted} from '../lib/use-mounted';
 import FailurePanel from '../components/FailurePanel';
@@ -69,7 +70,13 @@ export default function Subject() {
         ) : view === 'brief' ? (
           <BriefView apiBase={apiBase} name={name} data={data} />
         ) : view === 'detail' ? (
-          <DetailView data={data} name={name} onUpload={() => workbench?.open(null)} />
+          <DetailView
+            data={data}
+            name={name}
+            month={parsed.month}
+            week={parsed.week}
+            onUpload={() => workbench?.open(null)}
+          />
         ) : view === 'outline' ? (
           <OutlineView data={data} name={name} />
         ) : (
@@ -224,13 +231,21 @@ function BriefView({apiBase, name, data}) {
 }
 
 function BriefBody({brief, path, generating, generateError, onGenerate}) {
+  // 时刻印给人读的那一个形状，原始串挂在 `title` 上（与「细则」的行同一条口径）：
+  // 这一行并排四个时刻，全是 ISO 串时读起来只是一团数字。
+  const generated = formatMoment(brief.generated_at);
+  const windowFrom = formatMoment(brief.window_from);
+  const windowUntil = formatMoment(brief.window_until);
+  const covers = formatMoment(brief.covers_until);
   return (
     <article data-brief-body="true">
       <p className="ai-note-meta">
-        生成于 <code>{brief.generated_at}</code> · 窗口最近 {brief.window_days} 天（
-        {brief.window_from} → {brief.window_until}）· 数字依据的那份索引快照{' '}
-        <code>{brief.covers_until}</code> · 谁写的 <code>{brief.provider}</code>/
-        <code>{brief.model}</code>
+        生成于 <code title={generated.exact || undefined}>{generated.text}</code> · 窗口最近{' '}
+        {brief.window_days} 天（
+        <span title={windowFrom.exact || undefined}>{windowFrom.text}</span> →{' '}
+        <span title={windowUntil.exact || undefined}>{windowUntil.text}</span>）· 数字依据的那份索引快照{' '}
+        <code title={covers.exact || undefined}>{covers.text}</code> · 谁写的{' '}
+        <code>{brief.provider}</code>/<code>{brief.model}</code>
         {path ? <> · 落盘在 <code>{path}</code></> : null}
       </p>
 
@@ -296,15 +311,28 @@ function FactList({facts, basis}) {
  * 它不是默认打印清单的排法——那个按上次重做时间排，用它会让这份明细每重做一次就重排一次。
  * 每行只印题面转录的**前若干字**（不是全文）、题型、掌握读数、考点、错因，整行链到阅读页。
  * **不印正解／标准答案／原答／订正**：这一栏不是审核页。
+ *
+ * 顶上那片时间索引（`timeIndex`）是**入口**，筛不筛都印着：它是导航，不是结果。筛选状态
+ * 住在地址里（`?month=`／`?week=`，`filterByTime`），所以它全是 `<Link>`——关掉 JS、
+ * 刷新、把地址发给别人，看到的都是同一页。
  */
-function DetailView({data, name, onUpload}) {
+function DetailView({data, name, month, week, onUpload}) {
   const {ordered, undated} = useMemo(
     () => detailOrder(problemsOfSubject(data.problems, name)),
     [data.problems, name],
   );
+  // 索引吃这一栏**全部**的题（含排不了时间的）：`timeIndex` 自己会把 undated 分出去，
+  // 界面不另立一份「哪道题归哪个月」的规则（两份规则迟早会互相矛盾）。
+  const buckets = useMemo(() => timeIndex(ordered), [ordered]);
+  const filtered = useMemo(() => filterByTime(ordered, {month, week}), [ordered, month, week]);
+  const filtering = Boolean(month || week);
+  // 地址里那一段在索引里找不到 = **明确失败**。这时既不能退回「全部」（一次失效的链接
+  // 会装成一次正常跳转），也不该只画一片空白：失败面板把键、服务的原话与出路一起说清。
+  const broken = Boolean(filtered.error);
+  const rows = broken ? [] : filtered.problems;
 
   return (
-    <section data-detail="true">
+    <section data-detail="true" data-month={month || ''} data-week={week || ''}>
       <div className="ai-note-workbench__toolbar">
         <button type="button" className="button button--primary" onClick={onUpload} disabled={!onUpload}
           data-action="open-workbench" data-from="detail">
@@ -315,58 +343,127 @@ function DetailView({data, name, onUpload}) {
         </span>
       </div>
 
-      {undated.length > 0 && (
-        <p className="ai-note-warn" data-undated={undated.length}>
-          另有 {undated.length} 道没有录入时间，列在最后：
-          {undated.map((problem) => (
-            <span key={problem.id}>
-              {' '}
-              <Link to={problemUrl(problem.id)}>{problem.id}</Link>
-            </span>
-          ))}
-        </p>
-      )}
+      {buckets.months.length > 0 && <TimeIndex name={name} months={buckets.months} />}
 
-      {ordered.length === 0 ? (
-        <p data-detail-empty="true">
-          {name ? `「${name}」下还没有错题。` : '未归类下还没有错题。'}录入入口是上面那个「上传整页照片」。
-        </p>
+      {broken ? (
+        <FailurePanel title="地址里指的那一段，时间索引里没有" error={filtered.error} />
       ) : (
-        <ul className="ai-note-detail-list">
-          {ordered.map((problem) => (
-            <li key={problem.id} data-problem-id={problem.id}>
-              <Link className="ai-note-detail-row" to={problemUrl(problem.id)}
-                data-detail-link="true">
-                <span data-transcript-prefix="true">
-                  {transcriptPrefix(problem.transcript)}
-                </span>
-                <span className="ai-note-badges">
-                  <span className="ai-note-badge">{problem.type_cn || problem.type}</span>
-                  <span className="ai-note-badge" data-mastery={problem.mastery_cn}>
-                    {problem.mastery_cn}
-                  </span>
-                  <span className="ai-note-badge">
-                    连续对 {problem.streak ?? 0}/2
-                  </span>
-                  <span className="ai-note-badge" data-review={problem.review}>
-                    {problem.review === 'reviewed' ? '已审核' : '未审核'}
-                  </span>
-                  <span className="ai-note-badge" data-created-at={problem.created_at}>
-                    录入 {problem.created_at || '（服务没给时刻）'}
-                  </span>
-                </span>
-                <span className="ai-note-meta" data-topics={problem.topics?.length || 0}>
-                  考点：{problem.topics?.length ? problem.topics.join('、') : '（还没有考点）'}
-                </span>
-                <span className="ai-note-meta" data-error-causes={problem.error_causes?.length || 0}>
-                  错因：{problem.error_causes?.length ? problem.error_causes.join('、') : '（还没有错因）'}
-                </span>
+        <>
+          {filtering && (
+            <p data-detail-filter={filtered.key}>
+              筛选：{filtered.label}（{rows.length} 道）{' '}
+              <Link to={subjectUrl(name, 'detail')} data-filter-clear="true">
+                显示全部
               </Link>
-            </li>
-          ))}
-        </ul>
+            </p>
+          )}
+
+          {/* 「没有录入时间」那一行说的是**整份细则**；筛着的时候它会把不在筛选里的题
+              也说成「列在最后」，读起来像筛选漏了人。所以只在没筛时出现。 */}
+          {undated.length > 0 && !filtering && (
+            <p className="ai-note-warn" data-undated={undated.length}>
+              另有 {undated.length} 道没有录入时间，列在最后：
+              {undated.map((problem) => (
+                <span key={problem.id}>
+                  {' '}
+                  <Link to={problemUrl(problem.id)}>{problem.id}</Link>
+                </span>
+              ))}
+            </p>
+          )}
+
+          {rows.length === 0 ? (
+            filtering ? (
+              // 桶就是从这份名单里数出来的，正常筛不出 0 道——但空清单会把「这一段里一道
+              // 都没有」印成一片空白，而空白最容易被读成「一切正常」。
+              <p data-detail-filter-empty="true">筛选：{filtered.label} 里一道题都没有。</p>
+            ) : (
+              <p data-detail-empty="true">
+                {name ? `「${name}」下还没有错题。` : '未归类下还没有错题。'}录入入口是上面那个「上传整页照片」。
+              </p>
+            )
+          ) : (
+            <ul className="ai-note-detail-list">
+              {rows.map((problem) => {
+                // 行上只印给人读的时刻，原始串留在 `title` 里（`lib/time.js` 的口径）：
+                // `created_at` 是数据，不是用来读的。
+                const moment = formatMoment(problem.created_at);
+                return (
+                  <li key={problem.id} data-problem-id={problem.id}>
+                    <Link className="ai-note-detail-row" to={problemUrl(problem.id)}
+                      data-detail-link="true">
+                      <span data-transcript-prefix="true">
+                        {transcriptPrefix(problem.transcript)}
+                      </span>
+                      <span className="ai-note-badges">
+                        <span className="ai-note-badge">{problem.type_cn || problem.type}</span>
+                        <span className="ai-note-badge" data-mastery={problem.mastery_cn}>
+                          {problem.mastery_cn}
+                        </span>
+                        <span className="ai-note-badge">
+                          连续对 {problem.streak ?? 0}/2
+                        </span>
+                        <span className="ai-note-badge" data-review={problem.review}>
+                          {problem.review === 'reviewed' ? '已审核' : '未审核'}
+                        </span>
+                        <span className="ai-note-badge" data-created-at={problem.created_at}
+                          title={moment.exact || undefined}>
+                          录入 {moment.text}
+                        </span>
+                      </span>
+                      <span className="ai-note-meta" data-topics={problem.topics?.length || 0}>
+                        考点：{problem.topics?.length ? problem.topics.join('、') : '（还没有考点）'}
+                      </span>
+                      <span className="ai-note-meta" data-error-causes={problem.error_causes?.length || 0}>
+                        错因：{problem.error_causes?.length ? problem.error_causes.join('、') : '（还没有错因）'}
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
       )}
     </section>
+  );
+}
+
+/**
+ * 时间索引：一条全是链接的走廊——按月一张卡（`row` / `col col--3` / `card`，都是 Infima
+ * 自己的排法），最近那一个月再按周分。
+ *
+ * 这里没有 `onClick`：点一张卡就是跳到那个地址，筛选是**地址**的一部分（「细则」那条纪律）。
+ * 最近一个月的周索引由 `timeIndex` 挂在 `months[0].weeks` 上，所以只问它有没有，不另外算。
+ */
+function TimeIndex({name, months}) {
+  return (
+    <div className="row" data-time-index="true">
+      {months.map((bucket) => (
+        <div className="col col--3" key={bucket.key}>
+          <div className="card">
+            <div className="card__body">
+              <Link to={subjectUrl(name, 'detail', {month: bucket.key})} data-month-card={bucket.key}>
+                {bucket.label} <span className="badge badge--secondary">{bucket.count} 道</span>
+              </Link>
+              {bucket.weeks?.length ? (
+                <ul className="ai-note-meta" data-weeks="true">
+                  {bucket.weeks.map((week) => (
+                    <li key={week.key}>
+                      <Link
+                        to={subjectUrl(name, 'detail', {month: bucket.key, week: week.key})}
+                        data-week-card={week.key}>
+                        {week.label} · 第 {week.week_no} 周 · {week.count} 道
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

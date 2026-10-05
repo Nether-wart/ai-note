@@ -1,39 +1,46 @@
-/* 只加这一页真正需要的东西：一张卡一张卡地看，不比 Docusaurus 默认主题更花哨。 */
+/* 只加这一页真正需要的东西：一张卡一张卡地看，不比 Docusaurus 默认主题更花哨。
+   配色**照 Docusaurus 的那套绿**（主题默认的 primary 阶梯），间距与圆角一律走 Infima
+   的变量（`--ifm-spacing-*`／`--ifm-global-radius`／`--ifm-badge-*`）——
+   自己写死 rem 的下场是换主题时只有这一页不跟着变。 */
 :root {
-  --ifm-color-primary: #b3261e;
+  --ifm-color-primary: #25c2a0;
+  --ifm-color-primary-dark: #21af90;
+  --ifm-color-primary-darker: #1fa588;
+  --ifm-color-primary-darkest: #1a8870;
+  --ifm-color-primary-light: #29d5b0;
+  --ifm-color-primary-lighter: #32d8b4;
+  --ifm-color-primary-lightest: #4fddbf;
   --ai-note-border: var(--ifm-color-emphasis-300);
 }
 
 .ai-note-summary {
-  margin: 1rem 0 1.5rem;
-  padding: 0.75rem 1rem;
+  margin-bottom: var(--ifm-spacing-vertical);
+  padding: var(--ifm-spacing-vertical) var(--ifm-spacing-horizontal);
   border: 1px solid var(--ai-note-border);
-  border-radius: 8px;
+  border-radius: var(--ifm-global-radius);
   font-size: 0.95rem;
 }
 
+/* 横幅照 Docusaurus 的 `alert`（组件里直接用 `alert alert--warning`／`--danger`），
+   这里只留 Infima 没给的那一点：它到下一块的间距。 */
 .ai-note-banner {
-  margin: 0.75rem 0;
-  padding: 0.6rem 0.9rem;
-  border-left: 4px solid var(--ifm-color-warning-dark);
-  background: var(--ifm-color-warning-contrast-background);
-  border-radius: 4px;
+  margin-bottom: var(--ifm-spacing-vertical);
   font-size: 0.9rem;
 }
 
 .ai-note-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
-  gap: 1rem;
+  gap: var(--ifm-spacing-vertical);
 }
 
 .ai-note-card {
   border: 1px solid var(--ai-note-border);
-  border-radius: 10px;
-  padding: 1rem;
+  border-radius: var(--ifm-global-radius);
+  padding: var(--ifm-spacing-vertical) var(--ifm-spacing-horizontal);
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: calc(var(--ifm-spacing-vertical) * 0.5);
 }
 
 .ai-note-card h2 {
@@ -51,14 +58,17 @@
 .ai-note-badges {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: calc(var(--ifm-spacing-horizontal) * 0.4);
   font-size: 0.8rem;
 }
 
+/* 药丸走 Infima 的 badge 变量：内边距、圆角、字号都跟主题走，
+   不自己写死一套（重做页与细则共用这一个类，所以样式必须只在这里定义一次）。 */
 .ai-note-badge {
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
+  padding: var(--ifm-badge-padding-vertical) var(--ifm-badge-padding-horizontal);
+  border-radius: var(--ifm-badge-border-radius);
   border: 1px solid var(--ai-note-border);
+  font-size: var(--ifm-badge-font-size, 0.75rem);
 }
 
 .ai-note-badge--screen {

@@ -21,6 +21,8 @@
 // （纯逻辑不许只在打包器里成立），而 Node 的 ESM 不做扩展名补全。
 // 既有 `redo.js`／`split.js` 之所以没这个问题，是因为它们**没有内部 import**。
 import {UNCLASSIFIED, subjectUrl} from './routes.js';
+// 「读不读得出时刻」只有一条判据，与时间索引共用（`time.js` 的 `parseMoment`）。
+import {parseMoment} from './time.js';
 
 const ZERO_COUNTS = {
   problems: 0,
@@ -114,12 +116,17 @@ export function detailOrder(problems) {
   const dated = [];
   const undated = [];
   for (const problem of problems || []) {
-    const at = Date.parse(problem?.created_at || '');
-    if (Number.isFinite(at)) {
-      dated.push({problem, at});
-    } else {
+    const created = problem?.created_at;
+    // 「读不读得出时刻」只有**一条**判据（`time.js` 的 `parseMoment`），与时间索引同一份。
+    // 两处各判各的时候会出现一种题：排在表里、却进不了任何一张月卡、也不算「没有录入时间」
+    // ——同一个事实的两套说法，而这个项目的失败模式正是「两个产物各说各话」。
+    if (!parseMoment(created)) {
       undated.push(problem);
+      continue;
     }
+    // 排序仍按**时刻**：`created_at` 常是 `+08:00`、重做时刻是 `+00:00`，
+    // 直接比字符串会把时区差当成先后（契约 §1：要比较的时刻一律先归一化到 UTC）。
+    dated.push({problem, at: Date.parse(created)});
   }
   dated.sort((a, b) => b.at - a.at);
   return {

@@ -171,13 +171,47 @@ test('地址的形状：未归类那一栏不带 name', () => {
   assert.equal(problemUrl('p-1'), '/problem?pid=p-1');
 });
 
+test('时间筛选也跟着地址走（筛完的视图要能刷新、能分享）', () => {
+  assert.equal(subjectUrl('数学', 'detail', {month: '2026-10', week: '2026-09-28'}),
+               '/subject?name=%E6%95%B0%E5%AD%A6&view=detail&month=2026-10&week=2026-09-28');
+  assert.equal(subjectUrl(null, 'detail', {month: '2026-10'}),
+               '/subject?view=detail&month=2026-10');
+});
+
 test('栏位缺省是简报，认不出的栏位**明确失败**', () => {
-  assert.deepEqual(parseSubjectQuery('?name=数学'), {name: '数学', view: DEFAULT_VIEW});
-  assert.deepEqual(parseSubjectQuery(''), {name: null, view: DEFAULT_VIEW});
+  assert.deepEqual(parseSubjectQuery('?name=数学'),
+                   {name: '数学', view: DEFAULT_VIEW, month: null, week: null});
+  assert.deepEqual(parseSubjectQuery(''),
+                   {name: null, view: DEFAULT_VIEW, month: null, week: null});
+  assert.deepEqual(parseSubjectQuery('?view=detail&month=2026-10&week=2026-09-28'),
+                   {name: null, view: 'detail', month: '2026-10', week: '2026-09-28'});
   const bad = parseSubjectQuery('?view=whatever');
   assert.equal(bad.error.code, 'view_unknown');
   assert.ok(bad.error.message.includes('whatever'));
   assert.ok(viewLabels().includes(DEFAULT_VIEW));
+});
+
+test('时间筛选的形状在这里验、存不存在留给数据那一层', () => {
+  assert.equal(parseSubjectQuery('?month=2026-1').error.code, 'month_malformed');
+  assert.equal(parseSubjectQuery('?month=2026-10&week=10-05').error.code, 'week_malformed');
+  // 周是**某个月里**的周：单独给周是一次不完整的筛选，不该被猜成「这个月」
+  assert.equal(parseSubjectQuery('?week=2026-10-05').error.code, 'week_without_month');
+  // 只有「细则」按时间索引；别的栏位收到这两个参数要**明确失败**，不许静默忽略
+  assert.equal(parseSubjectQuery('?view=brief&month=2026-10').error.code,
+               'time_filter_needs_detail');
+  // 形状对但索引里没有那一桶 → 这一层放行（`lib/time.js` 的 `filterByTime` 会明确失败）
+  assert.equal(parseSubjectQuery('?month=2026-07&view=detail').month, '2026-07');
+});
+
+test('「读不出时刻」只有一条判据：排序与时间索引对同一道题说同一句话', async () => {
+  const {timeIndex} = await import('../src/lib/time.js');
+  // V8 的 `Date.parse` 认这种写法，而它**不是**我们认的形状：
+  // 若两处各判各的，这道题会排在表里、却进不了任何一张月卡、也不算「没有录入时间」。
+  const odd = {id: 'p-odd', created_at: '10/04/2026'};
+  const normal = {id: 'p-ok', created_at: '2026-10-04T14:31:35+08:00'};
+
+  assert.deepEqual(detailOrder([odd, normal]).undated.map((p) => p.id), ['p-odd']);
+  assert.deepEqual(timeIndex([odd, normal]).undated.map((p) => p.id), ['p-odd']);
 });
 
 test('阅读页没有 pid 时明确失败——绝不落到某一道题', () => {

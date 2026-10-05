@@ -122,7 +122,8 @@ function IndexNotices({index}) {
   const skipped = index.envelope?.skipped || [];
 
   return (
-    <details className="ai-note-banner ai-note-notices" data-index-notices="true" open={skipped.length > 0}>
+    <details className="ai-note-banner ai-note-notices alert alert--warning"
+             data-index-notices="true" open={skipped.length > 0}>
       <summary data-warnings-count={warnings.length} data-skipped-count={skipped.length}>
         索引里的警告 <strong>{warnings.length}</strong> 条 · 没能建出来的记录{' '}
         <strong>{skipped.length}</strong> 条（点开看原话）

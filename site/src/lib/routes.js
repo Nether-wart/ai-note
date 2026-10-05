@@ -45,7 +45,7 @@ export function parseSearch(search) {
   return out;
 }
 
-export function subjectUrl(name, view = DEFAULT_VIEW) {
+export function subjectUrl(name, view = DEFAULT_VIEW, {month = null, week = null} = {}) {
   const params = new URLSearchParams();
   // 不给 `name` = 未归类那一栏。空串与缺字段在这里是**同一件事**，
   // 所以 URL 上也写成同一件事，免得出现 `?name=&view=…` 这种两可的形状。
@@ -53,6 +53,13 @@ export function subjectUrl(name, view = DEFAULT_VIEW) {
     params.set('name', name);
   }
   params.set('view', view);
+  // 时间筛选（只有「细则」用得上）也跟着地址走：筛完的视图要能刷新、能分享。
+  if (month) {
+    params.set('month', month);
+  }
+  if (week) {
+    params.set('week', week);
+  }
   return `/subject?${params.toString()}`;
 }
 
@@ -65,11 +72,15 @@ export function splitUrl(pageId) {
 }
 
 /**
- * `/subject` 的查询串 → `{name, view}` 或 `{error}`。
+ * `/subject` 的查询串 → `{name, view, month, week}` 或 `{error}`。
  *
  * `name` 缺省 = 未归类（那是一栏，不是错误）。`view` 缺省 = 简报（用户没说要哪一栏时
  * 给第一栏是合理的默认，与「落到某道题上」不是一回事）。
  * 认不出的 `view` **明确失败**：猜一个栏位等于把一次链接失效伪装成一次正常跳转。
+ *
+ * `month`／`week` 是「细则」的时间筛选，形状在这里验（`YYYY-MM` / `YYYY-MM-DD`），
+ * **存不存在**由数据那一层判（`lib/time.js` 的 `filterByTime` 会明确失败）。
+ * 两层各管一件：这一层管「这看起来是不是一个键」，那一层管「索引里有没有这一桶」。
  */
 export function parseSubjectQuery(search) {
   const params = parseSearch(search);
@@ -83,7 +94,47 @@ export function parseSubjectQuery(search) {
       },
     };
   }
-  return {name: params.name || null, view};
+  const month = params.month || null;
+  const week = params.week || null;
+  if (month && !/^\d{4}-\d{2}$/.test(month)) {
+    return {
+      error: {
+        code: 'month_malformed',
+        message: `月份的形状不对：${month}`,
+        hint: '月份写成 `YYYY-MM`（例如 2026-10）；不带这个参数就是不筛。',
+      },
+    };
+  }
+  if (week && !/^\d{4}-\d{2}-\d{2}$/.test(week)) {
+    return {
+      error: {
+        code: 'week_malformed',
+        message: `那一周的形状不对：${week}`,
+        hint: '周写成那一周的**周一** `YYYY-MM-DD`；不带这个参数就是不筛。',
+      },
+    };
+  }
+  if (week && !month) {
+    return {
+      error: {
+        code: 'week_without_month',
+        message: '只给了周、没给月份',
+        hint: '周是某个月里的周，两个参数要一起给（月 `YYYY-MM` ＋ 周 `YYYY-MM-DD`）。',
+      },
+    };
+  }
+  if ((month || week) && view !== 'detail') {
+    // 只有「细则」按时间索引。别的栏位收到这两个参数时**明确失败**：静默忽略会让人
+    // 以为「这个筛选对简报也生效」，而页面上什么都不会变。
+    return {
+      error: {
+        code: 'time_filter_needs_detail',
+        message: `时间筛选只属于「细则」，当前栏位是 ${view}`,
+        hint: '把 `month`／`week` 去掉，或把 `view` 改成 `detail`。',
+      },
+    };
+  }
+  return {name: params.name || null, view, month, week};
 }
 
 /** `/problem` 的查询串 → `{pid}` 或 `{error}`。没有 pid 就明确失败，绝不落到某一道题。 */

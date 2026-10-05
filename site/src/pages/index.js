@@ -52,7 +52,7 @@ export default function Home() {
             {/* 词表缺席／为空：显眼处照原话显示（ADR 0007：不许静默） */}
             {model.vocabularyWarning && (
               <div
-                className="ai-note-banner"
+                className="ai-note-banner alert alert--warning"
                 role="alert"
                 data-vocabulary-warning={model.vocabularyWarning.code}>
                 <strong>受控词表有问题（科目那一级会画不出来）</strong>
