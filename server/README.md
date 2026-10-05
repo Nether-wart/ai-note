@@ -1,4 +1,4 @@
-# `server/` —— HTTP 层（契约 v0 + 一个写端点）
+# `server/` —— 后端（契约 v0 的实现）
 
 **契约是唯一必须跨得过去的东西**（[ADR 0007](../docs/adr/0007-redesign-the-backend-contract-first.md)
 第 1 条）。契约文档在 [`docs/contracts/http-api-v0.md`](../docs/contracts/http-api-v0.md)——
@@ -118,23 +118,24 @@ python3 -m pytest server/tests -q
 
 ## 不做
 
-- **改已有数据的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态**：
-  屏幕重做（#5）与定点修正（#6）。`GET`/`POST` 到没落地的预留命名空间会返回一句
-  明说「预留、还没实现」的 404。#13 的 `POST /api/inbox` 只往收件目录放**新**文件。
+- **改「作答历史」的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态**：
+  屏幕重做（#5）与定点修正（#6）。#13 的 `POST /api/inbox` 只往收件目录放**新**文件，
+  不动已有数据；页资源的四个动作在 `/api/page*`（写页文件与题卡，见下）。
 - **不改 `proto/`**、**不落索引盘**（每次请求现算）。
 - **不渲染页面**：`GET /upload` 是后端**托管**的一个静态文件，页面里没有一处服务端注入的值
   （ADR 0007 第 2 条：托管文件不是渲染）。
 - **不监视收件目录**（`inotify` 在同步盘上不可靠）。所以 `POST /api/inbox/scan` 是它的
   手动等价入口；扫描响应里的 `watch.implemented: false` 就是在说这件事。
-- **不做切分与入库**：切分归 #10、页实体归 #9、入库归 #9/#15。所以
+- **切分只有接缝，没有会真去问模型的实现**：`main()` 给的是 `segmenter=None`。于是
   `POST /api/inbox` 的响应里 `pipeline.segmentation.available` 是 `false`、
-  `pages[].blocks` 是 `null`（**不是 `[]`**）、`committed` 是 `false`——
-  没有块列表、没有红笔统计、没有「已入库」。`inbox.py` 里的 `segmenter` 就是 #10 接上来的口子。
-  **#10 落的是这一层的纯逻辑核心**（`server/segmentation.py`：候选块解析与校验、三条对账判据、
-  重切三态对照），**没有**把 `segmenter` 接上：接上它需要「模型调用失败 → 502
-  `model_unavailable`、不留下半截块」这条错误契约，而 `inbox.run_pipeline` 现在直接调用
-  `segmenter(...)`（异常会落到 `http.py` 的兜底 500，与编排裁决 D1 冲突）。
-  模型客户端（#12 抽的 `server/model_client.py`）落地时一并接，别在这里编块列表。
-- **纸上重做的形态**（`channel:"paper"`）还没实现，仍是 400；`POST` 到 `/api/page*`
-  仍是「预留、还没实现」的 404（页文件的形状已由 #9 定下，四个动作归 #10/#12/#14）。
-  定点修正（`attempt_at`）已随 #6 落地。
+  `pages[].blocks` 是 `null`（**不是 `[]`**）、`committed` 是 `false`；建页与重切回
+  `segmentation_not_implemented` 并明说原因——**不返回一个看起来能跑的假块列表**。
+  接缝本身已经接好：三处（`inbox.run_pipeline`、`page_create`、`page_api.resegment`）
+  都把 `ModelUnavailable` 翻成 502 `model_unavailable`、带上**哪一页**、不留下半截块。
+  缺的只是那份会真问模型的实现——提示词与口径在 `proto/` 里，纯逻辑核心
+  （`server/segmentation.py`：候选块解析与校验、三条对账判据、重切三态对照）已经落地。
+- **纸上重做的形态**（`channel:"paper"`）还没实现，仍是 400。定点修正（`attempt_at`）已随 #6 落地。
+- **页资源四个动作都已落地**（契约 §10.2）：`POST /api/page`（建）、`PATCH /api/page/<id>`（改）、
+  `POST /api/page/<id>/resegment`（重切）、`POST /api/page/<id>/commit`（入库）、
+  `GET /api/page/<id>/image`（页图）。现在**没有**「预留命名空间」了——`http.py` 的 `RESERVED`
+  是空的，那条带说明的 404 只是留给以后用的机制。
