@@ -126,3 +126,57 @@ def test_index_states_which_address_the_phone_should_use(api_for):
     assert "inbox" in server and server["reachable_from_other_devices"] is False
     # 没说出口的降级就是静默：读只读这句话要自己解释清楚它到底指什么
     assert "收件目录" in server["read_only_note"]
+
+
+# ------------------------------------------- 入库建的是骨架卡：还没转录也要收录（#15 验收 1）
+
+def test_a_card_that_has_no_transcript_yet_is_listed_with_a_warning(api_for):
+    """**入库产生的是骨架卡**（题面还没转录）：索引必须收录它，并报一条 warning。
+
+    为什么不能像以前那样静默跳过：spec #2 第 17 条「入库后直接进审核队列」——
+    落盘了却在清单里看不见，就是「静默丢题」，而这个项目最怕的正是它。
+    「还没转录」是一个**由人（或抽取角色）填写的字段还没填**，按 ADR 0007 第 6 条
+    必须有一个会喊的检查。
+    """
+    from conftest import make_card
+
+    pid = "p-20200101-aaaaaa"
+    card = make_card(pid, **{"problem.transcript": ""})
+    status, body = get_json(api_for([card]), "/api/index")
+
+    problem = only_problem(body)
+    assert status == 200
+    assert problem["id"] == pid
+    assert problem["transcript"] in (None, "")
+    assert body["skipped"] == [], "收录进清单，不是建不出记录"
+    assert body["data"]["stats"]["problems_skipped"] == 0
+    missing = [w for w in problem["warnings"] if w["code"] == "problem_transcript_missing"]
+    assert len(missing) == 1
+    assert missing[0]["level"] == "warning"
+    assert missing[0]["id"] == pid
+    assert "转录" in missing[0]["message"]
+
+
+def test_a_file_without_a_problem_object_is_still_skipped(api_for):
+    """没有 `problem` 对象 = 真的建不出记录 → 仍然进 `skipped`（这一档没有变松）。"""
+    from conftest import make_card
+
+    card = make_card("p-20200101-aaaaaa")
+    del card["problem"]
+    status, body = get_json(api_for([card]), "/api/index")
+
+    assert status == 200
+    assert body["data"]["count"] == 0
+    assert [row["code"] for row in body["skipped"]] == ["problem_missing_field"]
+    assert body["data"]["stats"]["problems_skipped"] == 1
+
+
+def test_a_problem_that_is_not_an_object_is_still_skipped(api_for):
+    """`problem` 不是对象也一样建不出记录（拼错的结构不许冒充成骨架卡）。"""
+    from conftest import make_card
+
+    status, body = get_json(api_for([make_card(**{"problem": "一道题"})]), "/api/index")
+
+    assert status == 200
+    assert body["data"]["count"] == 0
+    assert [row["code"] for row in body["skipped"]] == ["problem_missing_field"]

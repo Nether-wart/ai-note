@@ -171,3 +171,36 @@ def test_new_cards_are_gated_by_the_one_implementation(tmp_path):
     assert gate["ready"] is False
     assert gate["blockers"] == ["no_clean_image"]
     assert records.screen_redo_gate(api.catalog.load_card(card_id), api.catalog)["ready"] is False
+
+
+# ---------------------------------------------------------------- 索引重建（验收 1 的后半）
+
+
+def test_the_rebuilt_index_shows_the_two_new_cards(tmp_path):
+    """「生成 2 张卡（各带页绑定），**索引重建**」：入库报告与索引读到的数字必须一致。
+
+    骨架卡没有题面转录，所以索引**收录它并报 `problem_transcript_missing`**（warning），
+    而不是像以前那样静默跳过——静默跳过等于「入库了却看不见」。
+    """
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+        block("b2", [0.02, 0.40, 0.9, 0.2], keep=True),
+    ])])
+    _, envelope = commit(api)
+    created = [row["card_id"] for row in envelope["data"]["created"]]
+
+    r = api.handle("GET", "/api/index")
+    body = json.loads(r.body)
+
+    assert r.status == 200
+    assert body["data"]["count"] == 2
+    assert sorted(rec["id"] for rec in body["data"]["problems"]) == sorted(created)
+    assert sorted(envelope["data"]["index"]["card_ids"]) == sorted(created)
+    assert body["skipped"] == []
+    for rec in body["data"]["problems"]:
+        codes = {w["code"] for w in rec["warnings"]}
+        assert "problem_transcript_missing" in codes
+        assert "page_binding_missing" not in codes and "page_binding_lost" not in codes
+        # 两把闸门都关着（同一份实现给的两个读数）
+        assert rec["auto_judge"]["eligible"] is False
+        assert rec["screen_redo"]["ready"] is False

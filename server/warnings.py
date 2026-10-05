@@ -37,6 +37,14 @@ def card_warnings(card: dict, catalog) -> list[dict]:
     reviewed = (card.get("review") or {}).get("status") == "reviewed"
 
     warns: list[dict] = []
+    # 题面转录（#15）：入库建的是**骨架卡**（块上只有边界与题号），转录要等抽取角色
+    # 或审核时填。缺了就是一个该喊的检查——但它是**还没填**，不是矛盾：
+    # 不喊它，一张刚入库的卡在清单上会看起来「什么都有了」。
+    if not (problem.get("transcript") or "").strip():
+        warns.append(_warn(
+            "problem_transcript_missing",
+            "题面还没有转录（problem.transcript 空）→ 先收录在清单里，审核时填；"
+            "没有题面就不进重做纸", pid))
     if not std:
         warns.append(_warn("standard_answer_missing",
                            "标准答案为空 → 不能走自动判定，只能人工确认", pid))

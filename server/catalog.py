@@ -157,9 +157,15 @@ class Catalog:
             if not isinstance(card, dict):
                 skipped.append(_skip("problem_not_dict", f"{path} 不是一个 JSON 对象", path.stem))
                 continue
-            if not (card.get("problem") or {}).get("transcript"):
-                skipped.append(_skip("problem_missing_field",
-                                     f"{path} 缺 problem.transcript，建不出这条记录", path.stem))
+            if not isinstance(card.get("problem"), dict):
+                # 「建不出这条记录」只剩这一档：连 `problem` 对象都没有（结构就是坏的）。
+                # 而「有 problem、只是 transcript 还空着」**不再跳过**——那是 #15 入库
+                # 建出来的骨架卡（题面要等审核时填），静默跳过它就是「入库了却看不见」。
+                # 它由 `warnings.card_warnings` 的 `problem_transcript_missing` 喊出来。
+                skipped.append(_skip(
+                    "problem_missing_field",
+                    f"{path} 缺 problem 对象（题面转录、题型、选项都在里面），建不出这条记录",
+                    path.stem))
                 continue
             if path.stem != card.get("id"):
                 warnings.append(
