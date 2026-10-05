@@ -856,7 +856,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | `not_auto_judgeable` | **422** | **#5，已实现**：`reason` ∈ §6 的三个码之一，`message` 就是那句中文原话，`warnings[]` 带该卡的自检警告。**不是 400，更不是 500**（编排裁决 D1） |
 | `model_unavailable` | **502** | **#5，已实现**：判定角色调用失败（网络／超时／缺密钥）。同一个信封，`reason = "model_unavailable"`。**这一次重做不留下任何记录**——「我们没能问成」不是「看不清」，记成看不清会凭空造出一条没发生过的重做，并静默重置冷却。界面可以直接重试。**本版（前端重构 / #17）起简报生成与切分也走同一个形状**（§10.5、§10.2.1b） |
 | `ambiguous_attempt_at` | **409** | **#6，已实现**：定点修正的 `attempt_at` 定位到**不止一次**重做（同一秒里做了两次）。`details.candidates` 列出命中的索引。**不是 404**：那几次确实存在，只是这个参数区分不了它们；挑一个就是「猜」 |
-| `resegment_needs_confirmation` | **409** | **本版（前端重构 / #17）新增**：`POST /api/page/<id>/resegment` 是**重置为预设**（破坏性），这一页存在人工改动而请求没带 `{"confirm_discard_manual": true}`。`details.discarded` = `{manual_blocks, removed_blocks}`（将丢掉什么；**只有这两个能数准的数**，理由见 §10.2.1b）。**不是 400**：参数没写错，是这次操作会毁掉人的劳动；与 `ambiguous_attempt_at` 同一档——**不许替人做不可逆的决定**（§10.2.1b） |
+| `resegment_needs_confirmation` | **409** | **本版（前端重构 / #17）新增**：`POST /api/page/<id>/resegment` 是**重置为预设**（破坏性），这一页存在人工改动而请求没带 `{"confirm_discard_manual": true}`。`details.discarded` = `{manual_blocks, removed_blocks, mode_before}`（将丢掉什么：**两个数得准的计数** ＋ 重置前那份块列表的来源，理由见 §10.2.1b）。**不是 400**：参数没写错，是这次操作会毁掉人的劳动；与 `ambiguous_attempt_at` 同一档——**不许替人做不可逆的决定**（§10.2.1b） |
 | `brief_unverifiable` | **502** | **本版（前端重构 / #17）新增**：简报的**数字闸门**没过——生成出来的每一个数字都必须在**本次索引**里逐字找回，任何一条对不上**这份简报就不落盘**。`details.facts` 列出对不上的那些（`{label, path, claimed, actual, reason}`；`reason` ∈ `path_unresolved` / `value_mismatch` / `kind_mismatch` / `missing_value` / `bad_fact` / `missing_fact`，取值与理由见 §10.5——**`actual = null` 同时覆盖「解不出来」与「索引里正好是 null」，所以必须靠 `reason` 分开**）。**它与 `model_unavailable` 是两个码，不许合**：处置完全不同——模型没问成**可以直接重试**，数字对不上**重试无用**（提示词或索引没变，重试只会再编一次），合成一句「可以重试」会把人引去重试一个不会变好的东西。理由：这个项目最怕的失败是一段读起来很顺、**数字却是编的**总结，而能自动判的只有「数字对不对」（§10.5） |
 
 `not_found` 下的 `reason` 取值（都是 404，`code` 不变）：没有这道题（`reason == "not_found"`）、
@@ -1279,11 +1279,14 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 - 语义从「重跑一次切分」改成「**重置为预设**」：它是一次**破坏性**动作，**会丢掉人工的改动**。
 - 请求体要**显式确认**：`{"confirm_discard_manual": true}`。没带这个键、而这一页又存在
   **任何**人工改动时 → **409** `resegment_needs_confirmation`，`details.discarded` 说明会丢掉什么：
-  `{"manual_blocks": int, "removed_blocks": int}`——`manual_blocks` = `segmentation.mode == "manual"`
-  时页上的块数，`removed_blocks` = 留痕的条数。**只有这两个数**，因为它们是**能数准**的；
-  我们**不逐块记来源**（哪一块是人动的、哪一块是机器给的，没有这份账），
-  所以**不报一个算不准的第三个**——「界面说 3、服务说 2」比少报一个数坏得多。
-  **先把「将丢弃 N 处人工改动」报清**；这两个数的口径**只有一处实现**
+  `{"manual_blocks": int, "removed_blocks": int, "mode_before": str}`——`manual_blocks` =
+  `segmentation.mode == "manual"` 时页上的块数，`removed_blocks` = 留痕的条数，
+  `mode_before` = **重置之前**那份块列表的来源（`model`／`manual`／`unavailable`）。
+  **计数的只有前两个**，因为它们是**能数准**的；我们**不逐块记来源**（哪一块是人动的、
+  哪一块是机器给的，没有这份账），所以**不报一个算不准的计数**——「界面说 3、服务说 2」
+  比少报一个数坏得多。`mode_before` 是页上的一份**事实**（不是估计、不是计数），
+  界面要拿它说清「这份块列表原来是**人**给的，重置会换成机器的预设」。
+  **先把「将丢弃 N 处人工改动」报清**；这几个键的口径**只有一处实现**
   （`page_edit` 那个分派表旁边），界面照它显示、不许自己重算。
 - 成功时：`segmentation.mode` 回到 `"model"`；`data.discarded` 用**同一个形状**报清**真的**丢了几块
   （不是预估值）；被丢掉的块进 `removed_blocks[]` 留痕——**追加，不清账**：

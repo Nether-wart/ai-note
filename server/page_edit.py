@@ -1019,17 +1019,17 @@ def bad_request_unknown_action(action):
 def block_delete_bound_to_card_error(block_id, card_id) -> errors.ApiError:
     """HTTP 层用它把「已绑卡的块不许删」变成 400（D1：拒绝一律 JSON 信封）。
 
-    **不手搓 dict**：走 `errors` 的信封形状。`code` 是 `bad_request`、`reason` 是
-    `block_delete_bound_to_card`（契约 §9 的 `bad_request` 那一档），`details.card_id`
-    点名是哪张卡拦住了这一删——调用方要能一眼看出「要它消失只能用 `drop`」。
+    **不手搓 dict，也不自己拼 `ApiError`**：走 `errors.bad_request` 那**一个** 400 入口，
+    用它的 `reason=` 指出是哪条规矩被破了（契约 §9：这一档的 `code` 恒为 `bad_request`）。
+    `details.card_id` 点名是哪张卡拦住了这一删——调用方要能一眼看出
+    「要它消失只能用 `drop`」。
     """
-    return errors.ApiError(
-        400, "bad_request",
+    return errors.bad_request(
         f"块 {block_id!r} 绑着题卡 {card_id!r}，不许删：那张卡已经存在，删块会造出孤儿绑定",
         reason=DELETE_BOUND_TO_CARD,
         hint="要「不要它」只能用 drop（不收：块留在页文件里、带 decision.rule = "
              "\"human_drop\"，可审计）",
-        details={"param": "block_id", "value": block_id, "card_id": card_id},
+        param="block_id", value=block_id, card_id=card_id,
     )
 
 
