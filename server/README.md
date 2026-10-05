@@ -95,6 +95,8 @@ python3 -m pytest server/tests -q
 | `warnings.py` | 会喊的检查（ADR 0007 第 6 条）：逐卡自检 + 索引级检查（串题、id 不一致） |
 | `records.py` | **Problem 记录的唯一构造函数**：列表与详情由它产出，详情是它的超集 |
 | `catalog.py` | 一个数据目录的访问：索引、一题、数据目录形状、对外地址拼法（`public_url`） |
+| `subjects.py` | **科目与考点大纲的唯一读取实现**（#17）：`<数据目录>/vocab/subjects.json` 是「有哪些科目」的唯一来源，大纲是 `科目 → 章 → 节 → 点`；卡上 `subject` 的判据（未归类 = `hint`，表外 = `warning`，且**只在词表真读出来时**才报）与按科目汇总（`stats.by_subject`／`unclassified`，那条「一道题都不许少」的不变式就落在这里）都在这一处。按 **mtime** 记忆：文件一动就重读，不重启服务、也不用旧值 |
+| `subject_assign.py` | 存量题卡 → 科目的**显式**迁移命令（`python3 -m server.subject_assign --map 表.json [--apply]`，默认预演）。只认人给的映射表，**不按考点去推**；映射表里有一条不在词表里就**一票否决**，`--apply` 一个字节都不写 |
 | `pages.py` | **页的唯一实现**（B1 / #9）：页文件读写、`page_binding`（旧卡缺绑定 = 提示 vs 页↔卡对不上账 = 警告）、`rebind`（重切按位置重合保留绑定，**匹配只有这一处**）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id） |
 | `segmentation.py` | **切分与对账**（B2 / #10）：模型候选块的解析与校验（拒块逐条给理由）、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。纯逻辑：不联网、不画图、不写题卡。警告一律是契约 §2 的 `Warning`（`{code, message, id, level}`，构造走 `warnings._warn` 那一处）；页级对账码表见契约 §8 |
 | `publicbase.py` | **对外可达地址的唯一实现**：显式优先、否则按绑定之后的 `host:port` 推导；推出来的地址打不开就喊（ADR 0007 第 5 条） |

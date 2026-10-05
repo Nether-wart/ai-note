@@ -22,12 +22,16 @@ export class ApiError extends Error {
   }
 }
 
-export async function requestJson(apiBase, path, {method = 'GET', body = null} = {}) {
+export async function requestJson(apiBase, path, {method = 'GET', body = null, form = null} = {}) {
   const base = String(apiBase || '').replace(/\/+$/, '');
   const url = `${base}${path}`;
 
   const init = {method, headers: {Accept: 'application/json'}};
-  if (body !== null) {
+  if (form !== null) {
+    // multipart：**不要**自己设 `Content-Type`——boundary 是浏览器生成的，
+    // 手写一个就等于亲手把这条请求弄坏（而症状是服务端说「不是 multipart」，很容易查错方向）。
+    init.body = form;
+  } else if (body !== null) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -114,3 +118,48 @@ export const resegmentPage = (apiBase, pageId) =>
  */
 export const pageImageUrl = (apiBase, pageId) =>
   `${String(apiBase || '').replace(/\/+$/, '')}/api/page/${encodeURIComponent(pageId)}/image`;
+
+/**
+ * 「建」：一张照片 → 一页（契约 §10.2.1b）。`file` 是**文件**字段，
+ * `subject` 是**文本**字段——科目在录入时由人指定（`CONTEXT.md`），不是让机器猜的。
+ *
+ * 科目不在受控词表里 → **400**，`error.message` 与 `hint` 是服务的原话，照原话显示；
+ * 不给科目是允许的（那就是**未归类**，一等状态）。
+ *
+ * 切分不可用时这条请求**照样建页**（契约 §10.2.1）：`blocks` 是 `null`、照片在盘上，
+ * 界面要据此开放手动画框——那不是错误，是一个要人接着做完的状态。
+ */
+export function postPage(apiBase, {file, filename = 'page.png', subject = null}) {
+  const form = new FormData();
+  form.append('file', file, filename);
+  if (subject) {
+    form.append('subject', subject);
+  }
+  return requestJson(apiBase, '/api/page', {method: 'POST', form});
+}
+
+/** 「入库」：把「收」的块变成骨架卡（契约 §10.2.1b）。幂等，重复提交不会换 id。 */
+export const commitPage = (apiBase, pageId) =>
+  requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}/commit`, {method: 'POST'});
+
+/**
+ * 简报（契约 §10.5）。`at` 给一个 `YYYY-MM-DD` 就是取历史上那一天那一份；不给就是最新一份。
+ * 没有简报时服务给 **404 `brief_missing`**——那是「还没有」，不是「读不到」，界面要分开说。
+ */
+export function fetchBrief(apiBase, subject, at = null) {
+  const query = at ? `?at=${encodeURIComponent(at)}` : '';
+  return requestJson(apiBase, `/api/brief/${encodeURIComponent(subject)}${query}`);
+}
+
+/**
+ * 生成一份简报：**会问模型**，因此慢、也可能失败（502）。
+ * `window_days` 缺省 7；`history_facts` 那一半数的永远是全部历史。
+ *
+ * 一份数字对不上的简报服务**不落盘**、直接 502 `brief_unverifiable`——那是「模型编了数字」，
+ * 与「模型没问成」是两件事，界面照 `error.message` 原话显示，不许自己编一句委婉说法。
+ */
+export const postBrief = (apiBase, subject, windowDays = null) =>
+  requestJson(apiBase, `/api/brief/${encodeURIComponent(subject)}`, {
+    method: 'POST',
+    body: windowDays ? {window_days: windowDays} : {},
+  });
