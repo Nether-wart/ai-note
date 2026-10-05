@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -452,26 +453,136 @@ def test_backfill_warns_instead_of_probing_outside_pages_for_a_traversing_image(
 
 # ------------------------------------------- 实测：真的存量数据（只读，绝不写）
 
-# 真数据是被 gitignore 的私人数据，不在 worktree 里（BRIEF「实测数据事实」）。
+# 真数据是被 gitignore 的私人数据，不在 worktree / 干净克隆里（BRIEF「实测数据事实」）。
 # 这里**只读**它：把真卡读进来，回填结果写到临时目录，并断言真数据目录没有被碰。
-REAL_DATA = Path(os.environ.get("AI_NOTE_REAL_DATA", "/home/river/Projects/ai-note/data"))
 KNOWN_PAGE_IDS = {"41c86bcfc007", "ef7c47156392"}
 
 
-@pytest.mark.skipif(not (REAL_DATA / "problems").is_dir(),
-                    reason="真数据不在本机（私人数据，被 gitignore）")
+def repo_root() -> Path:
+    """这个仓库的根目录。**linked worktree 里 `parents[2]` 是 worktree 自己**，
+    而真数据（被 gitignore）在主仓库的数据目录里——BRIEF 也写明了「要参考真数据用
+    只读路径」（附了主仓库的绝对位置）。所以问 git「公共 gitdir 在哪」，而不是靠
+    文件层级猜；git 不可用或问不出来时才退回相对层级。
+    """
+    here = Path(__file__).resolve()
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(here.parent), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, check=True, timeout=10)
+        common = Path(out.stdout.strip())
+    except Exception:
+        common = None
+    if common is not None and common.name == ".git":
+        return common.parent
+    return here.parents[2]
+
+
+def real_data_dir() -> Path:
+    """真数据目录：**环境变量优先，否则仓库根相对路径**（`<仓库根>/data`）。
+
+    **绝不硬编码绝对路径**（某个用户名下的某个克隆位置）：那种写法只在
+    「本机 + 这个用户名 + 这个克隆位置」三重巧合下成立，在别人的机器或 CI 上
+    要么报错、要么更糟——**借**着宿主的数据「绿」过去，而干净克隆里其实没有覆盖。
+    `<仓库根>/data` 在干净克隆里不存在，于是真卡用例带理由 skip（看得见）。
+    """
+    env = os.environ.get("AI_NOTE_REAL_DATA")
+    if env:
+        return Path(env)
+    return repo_root() / "data"
+
+
+def _real_data_or_skip() -> Path:
+    """拿真数据目录；不在本机就**显式 skip**（带路径的理由，不是静默通过）。"""
+    root = real_data_dir()
+    if not (root / "problems").is_dir():
+        pytest.skip(f"真数据不在本机（私人数据，被 gitignore）：{root}")
+    return root
+
+
+def test_the_real_data_path_is_env_or_repo_relative_never_a_hardcoded_absolute(
+        monkeypatch, tmp_path):
+    """真数据目录的取法本身就是一条被钉住的规矩（#9 的 merger 抓到过自足性缺口）。"""
+    monkeypatch.setenv("AI_NOTE_REAL_DATA", str(tmp_path / "somewhere"))
+    assert real_data_dir() == tmp_path / "somewhere"
+
+    monkeypatch.delenv("AI_NOTE_REAL_DATA")
+    resolved = real_data_dir()
+    assert resolved.is_absolute(), "解析出来必须是绝对路径"
+    assert resolved == repo_root() / "data"
+    assert (repo_root() / ".git").exists(), "仓库根要认得出来（认错就会静默 skip）"
+
+
+def test_the_test_file_does_not_hardcode_an_absolute_data_path():
+    """**不许硬编码绝对路径**（作业单 6）：这份测试文件里不该出现某个家目录前缀。
+
+    本机绝对路径的写法会让「本机能跑」与「别处能跑」脱钩——这条断言把写法本身钉住，
+    而不是只钉某一次的结果。
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    # 针自己也不能写成字面量，否则这条断言会永远为假（它把自己也算进去）
+    home_prefix = "/" + "home" + "/"
+
+    assert home_prefix not in source, "真数据路径不许写成某个家目录下的绝对路径"
+    assert "AI_NOTE_REAL_DATA" in source, "要留一个显式的环境变量入口（本机真跑用）"
+
+
+def test_the_real_card_case_skips_with_a_reason_when_the_data_is_not_here(
+        monkeypatch, tmp_path):
+    """没有私人数据的环境里，真卡用例要**看得见地跳过**（带理由），不是静默通过。"""
+    monkeypatch.setenv("AI_NOTE_REAL_DATA", str(tmp_path / "absent"))
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _real_data_or_skip()
+
+    assert "真数据不在本机" in str(excinfo.value)
+    assert str(tmp_path / "absent") in str(excinfo.value), "理由里要说清找的是哪个目录"
+
+
+def test_backfilling_a_synthetic_legacy_card_covers_the_whole_shape(api_for):
+    """**自足**的那一半（作业单 6）：用合成的「存量形态」卡覆盖回填逻辑。
+
+    真卡用例会被 skip，所以这条必须自己能证明：`source.page_image` → 页文件名、
+    `bbox_norm`/`bbox_px` 照抄、`origin.original_file` 跟着走，照片与页文件并列。
+    合成照片放在**临时目录**里——干净克隆里也跑得起来。
+    """
+    from conftest import PNG_1X1
+
+    card = real_shaped_card()
+    api = api_for([card])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{REAL_PAGE_HASH}.png").write_bytes(PNG_1X1)   # 假照片，同目录并列
+
+    report = pages.backfill_pages(api.catalog, apply=True)
+
+    assert report["summary"]["created"] == 1
+    assert report["summary"]["skipped"] == 0
+    assert [w["code"] for w in report["warnings"]] == [], \
+        "照片在、绑定建出来了 → 一条警告都不该有（含 page_photo_missing）"
+
+    page = read_page(api)
+    assert page["id"] == REAL_PAGE_HASH
+    assert page["image"] == f"{REAL_PAGE_HASH}.png", "照片只存与页文件并列的文件名（D5）"
+    assert page["origin"]["original_file"] == "2.png"
+    (block,) = page["blocks"]
+    assert block["bbox_norm"] == [0.02, 0.12, 0.76, 0.28], "归一化坐标是规范基准"
+    assert block["bbox_px"] == [3, 20, 541, 79], "像素框照抄盘上原值（xyxy，不重算）"
+    assert block["card_id"] == REAL_PID
+
+
 def test_backfilling_the_real_legacy_cards_writes_pages_next_to_their_photos(api_for):
     """实测验收 1：存量那两张卡（一页一题）反推成页文件，落在照片旁边。"""
+    real_data = _real_data_or_skip()
     cards = [json.loads(p.read_text(encoding="utf-8"))
-             for p in sorted((REAL_DATA / "problems").glob("*.json"))]
+             for p in sorted((real_data / "problems").glob("*.json"))]
     assert cards, "真数据目录里连一张卡都没有，这条测试就没有意义了"
 
     # 页文件名的主干必须真的就是盘上那张照片的名字（命名推法不是纸上谈兵）
     for card in cards:
         stem = pages.page_hash_from_image(card["source"]["page_image"])
-        assert stem and (REAL_DATA / "pages" / f"{stem}.png").is_file()
+        assert stem and (real_data / "pages" / f"{stem}.png").is_file()
 
-    before = sorted(p.name for p in (REAL_DATA / "pages").glob("*.json"))
+    before = sorted(p.name for p in (real_data / "pages").glob("*.json"))
     api = api_for(cards)   # 卡片写进 pytest 的临时目录，真目录一个字节都不碰
     report = pages.backfill_pages(api.catalog, apply=True)
 
@@ -488,5 +599,5 @@ def test_backfilling_the_real_legacy_cards_writes_pages_next_to_their_photos(api
         assert block["bbox_px"] == card["source"]["bbox_px"]
         assert block["card_id"] == card["id"]
 
-    assert sorted(p.name for p in (REAL_DATA / "pages").glob("*.json")) == before, \
+    assert sorted(p.name for p in (real_data / "pages").glob("*.json")) == before, \
         "回填只读真数据目录，绝不往里写任何东西"
