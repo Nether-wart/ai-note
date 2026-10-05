@@ -4,8 +4,9 @@
 
   · **provider 白名单**（`dashscope` / `deepseek`，都在境内，见 `.env.local.example`）。
     白名单外的 provider 是坏配置 → 装载时 `ValueError`，服务拒绝启动。
-  · **角色表**：`extract`（切分与红笔语义）与 `judge`（等价比对）各自解析成一份
-    `RoleConfig`；解析逻辑只有 `load_role_config` 一处，别的角色一律走它。
+  · **角色表**：`extract`（切分与红笔语义）、`judge`（等价比对）与 `brief`（简报）
+    各自解析成一份 `RoleConfig`；解析逻辑只有 `load_role_config` 一处，
+    别的角色一律走它。
   · **判定阈值**校验一次（复用 `server.judge.validate_threshold`，它是公开的）：
     NaN／无穷／越界会静默绕开置信度闸门，正是这套设计唯一禁止的错。
     「校验过了」与「拿去比的值」必须是同一个东西，所以装载返回的就是校验后的 float。
@@ -40,13 +41,21 @@ PROVIDERS = {
 
 # 角色默认。judge 角色只做**纯文本**等价比对，用正式版即可（proto/slice.py:68-71）；
 # extract 角色要看图与模型对账（切分 #10、红笔语义 #12），换模型必须重跑它的考卷。
+# brief 角色（#17 §7）默认**沿用抽取角色的默认值**，但它仍是一个**独立**角色：
+# 换个模型时两个用途不许互相绑死（CONTEXT「模型角色」），所以是分开的一项配置。
+# segmenter 角色（#17 §8）**要看图**（整页照片 → 候选块），与 extract 同样是正式版；
+# 它与 extract 也是分开的两项：切分切坏了要单独换、红笔语义读错了也要单独换。
 ROLE_DEFAULTS = {
     "extract": {"provider": "deepseek", "model": "deepseek-flash"},
     "judge": {"provider": "deepseek", "model": "deepseek-flash"},
+    "brief": {"provider": "deepseek", "model": "deepseek-flash"},
+    "segmenter": {"provider": "deepseek", "model": "deepseek-flash"},
 }
 
 JUDGE_ROLE = "judge"
 EXTRACT_ROLE = "extract"
+BRIEF_ROLE = "brief"
+SEGMENTER_ROLE = "segmenter"
 
 
 @dataclass(frozen=True)

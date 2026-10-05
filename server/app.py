@@ -17,10 +17,11 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .config import load_env_files, load_judge_config
+from .config import SEGMENTER_ROLE, load_env_files, load_judge_config, load_role_config
 from .http import Api
-from .paths import default_data_dir
+from .paths import default_data_dir, default_runs_dir
 from .publicbase import public_base_warning, resolve_public_base
+from .segmenter_client import HttpSegmenter
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -198,8 +199,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        # 切分角色的接线（#17 §8）。**接在这里，不接在 `build_server` 里**：
+        # `segmenter=None` 在本项目里有一个确切含义——**切分不可用**，那时页照建、
+        # `blocks` 是 `null`、人在照片上自己画框（契约 §10.2.1）。测试要造的就是那一档，
+        # 所以「不注入」必须继续等于「不可用」，不能被一个默认值悄悄改掉。
+        # 于是：**库的默认是「不可用」，产品（这一条路径）的默认是「可用」。**
+        segmenter = HttpSegmenter(load_role_config(SEGMENTER_ROLE), default_runs_dir())
         httpd = build_server(data_dir, args.host, args.port, public_base=args.public_base,
-                             inbox=args.inbox)
+                             inbox=args.inbox, segmenter=segmenter)
     except ValueError as exc:
         # 坏配置**起不来**（阈值 NaN/越界、provider 不在白名单）——不许静默降级
         print(f"配置有问题，服务不启动：{exc}", file=sys.stderr)
