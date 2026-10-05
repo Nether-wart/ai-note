@@ -108,3 +108,277 @@
 .ai-note-card_placeholder {
   color: var(--ifm-color-emphasis-600);
 }
+
+/* ------------------------------------------------------------------
+   应用外壳：左侧栏（运行时自绘的科目索引）+ 主内容区
+   类名向 Docusaurus 的文档侧栏看齐（menu / menu__list），颜色只用 --ifm-* 变量。
+   ------------------------------------------------------------------ */
+
+.ai-note-shell {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1rem 1rem 4rem;
+}
+
+.ai-note-shell__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ai-note-sidebar {
+  position: sticky;
+  top: calc(var(--ifm-navbar-height) + 1rem);
+  flex: 0 0 18rem;
+  max-height: calc(100vh - var(--ifm-navbar-height) - 2rem);
+  overflow-y: auto;
+  padding: 0.5rem 0.75rem 1.5rem;
+  border-right: 1px solid var(--ifm-toc-border-color, var(--ai-note-border));
+  font-size: 0.92rem;
+}
+
+.ai-note-sidebar__top {
+  margin-bottom: 0.75rem;
+}
+
+.ai-note-sidebar__hint,
+.ai-note-sidebar__note {
+  font-size: 0.78rem;
+  margin: 0.35rem 0 0;
+}
+
+.ai-note-sidebar__count {
+  float: right;
+  color: var(--ifm-color-emphasis-600);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 996px) {
+  .ai-note-shell {
+    flex-direction: column;
+  }
+
+  .ai-note-sidebar {
+    position: static;
+    flex: 1 1 auto;
+    width: 100%;
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid var(--ifm-toc-border-color, var(--ai-note-border));
+  }
+}
+
+.ai-note-notices summary {
+  cursor: pointer;
+}
+
+.ai-note-notices ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+}
+
+/* ------------------------------------------------------------------
+   阅读页／科目页上的照片与块框
+   ------------------------------------------------------------------ */
+
+.ai-note-page-photo {
+  position: relative;
+  display: block;
+  margin: 1rem 0;
+  /* 触摸设备上拖块框要吃掉滚动手势，否则框一拖页面就跟着滚 */
+  touch-action: none;
+}
+
+.ai-note-page-photo img {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--ai-note-border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ai-note-block-box {
+  position: absolute;
+  border: 2px solid var(--ifm-color-primary);
+  background: rgba(179, 38, 30, 0.08);
+  cursor: move;
+  box-sizing: border-box;
+}
+
+.ai-note-block-box--selected {
+  outline: 2px dashed var(--ifm-color-warning-dark);
+  outline-offset: 1px;
+}
+
+.ai-note-block-box--draft {
+  border-style: dashed;
+  background: transparent;
+  pointer-events: none;
+}
+
+.ai-note-block-box__label {
+  position: absolute;
+  top: -1.25rem;
+  left: -2px;
+  max-width: 24rem;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  padding: 0 0.3rem;
+  background: var(--ifm-color-primary);
+  color: var(--ifm-color-primary-contrast-foreground, #fff);
+  border-radius: 3px 3px 0 0;
+}
+
+/* ------------------------------------------------------------------
+   全屏工作台（录入／改已有的一页）
+   ------------------------------------------------------------------ */
+
+.ai-note-workbench {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  overflow-y: auto;
+  padding: 1rem clamp(1rem, 4vw, 3rem) 4rem;
+  background: var(--ifm-background-color);
+}
+
+.ai-note-workbench__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--ai-note-border);
+  background: var(--ifm-background-color);
+}
+
+.ai-note-workbench__head h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.ai-note-workbench__body {
+  max-width: 1100px;
+  margin: 1rem auto 0;
+}
+
+.ai-note-workbench__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+}
+
+.ai-note-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.ai-note-dropzone {
+  margin: 0.75rem 0;
+  padding: 1.5rem;
+  text-align: center;
+  border: 2px dashed var(--ai-note-border);
+  border-radius: 10px;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.ai-note-block-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: 0.75rem;
+}
+
+.ai-note-card--selected {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 0 0 2px var(--ifm-color-primary);
+}
+
+.ai-note-block-list__pick {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--ifm-color-emphasis-100);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------
+   首页总览的表与细则／考点大纲
+   ------------------------------------------------------------------ */
+
+.ai-note-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  margin: 1rem 0;
+}
+
+.ai-note-table th,
+.ai-note-table td {
+  border: 1px solid var(--ai-note-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ai-note-detail-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ai-note-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--ai-note-border);
+  border-radius: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.ai-note-detail-row:hover {
+  border-color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+.ai-note-detail-row [data-transcript-prefix] {
+  font-weight: 600;
+}
+
+.ai-note-detail-row .ai-note-badges {
+  gap: 0.35rem;
+}
+
+.ai-note-outline {
+  padding-left: 1.2rem;
+}
+
+.ai-note-outline ul {
+  padding-left: 1.1rem;
+}
+
+.ai-note-outline [data-point] {
+  color: var(--ifm-color-emphasis-800);
+}
+

@@ -1,6 +1,7 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useLocation} from '@docusaurus/router';
 import {fetchIndex, postAttempt} from '../lib/api';
+import {useIndex} from '../lib/shell-context';
 import RedoHeader from './RedoHeader';
 import RedoQuestion from './RedoQuestion';
 import {
@@ -30,11 +31,15 @@ import {
  *
  * `indexData` 是**给不靠浏览器的渲染自检留的缝**（#8）：给它一份索引，这一页就不去
  * fetch，于是能在不联网、不起服务的前提下被 `renderToStaticMarkup` 渲染出来。
- * 没有它的时候行为与以前一模一样（运行时去服务取）。
+ * 没有它的时候行为与以前一模一样（运行时去服务取）——**除非**外面套着应用外壳
+ * （`Shell.js`）：那时索引由外壳取一次，这一页读 `useIndex()`，不再取第二次。
  */
 export default function RedoPage({apiBase, indexData = null}) {
   const location = useLocation();
   const search = location?.search || '';
+  // 应用外壳取回来的索引（`Shell.js` 用 context 提供）。没有外壳时是 `null`——
+  // 渲染自检那一趟就没有外壳，于是这一页回到「自己去取」的老路，行为一模一样。
+  const shellIndex = useIndex();
 
   // URL 是队列的真源；`parsed` 一变（刷新、另一个窗口、清单页再点一次）就整页重来。
   const parsed = useMemo(() => parseRedoQuery(search), [search]);
@@ -63,13 +68,23 @@ export default function RedoPage({apiBase, indexData = null}) {
   }, [apiBase]);
 
   useEffect(() => {
-    // 自检注入了索引就不去取：渲染自检要能在**不联网、不起服务**的前提下跑
-    if (!indexData) {
+    // 自检注入了索引就不去取：渲染自检要能在**不联网、不起服务**的前提下跑。
+    // 外层有应用外壳时也不取：索引由外壳取**一次**（一个页面只取一次索引），
+    // 这一页读 `useIndex()` 就行。`useIndex()` 在没有外壳时是 `null`——
+    // 那正是 `site/tests/ssr.mjs` 单独渲这一页那一趟，于是照旧走自己的这条 fetch。
+    if (!indexData && !shellIndex) {
       load();
     }
-  }, [load, indexData]);
+  }, [load, indexData, shellIndex]);
 
-  const data = indexData ?? (indexState.phase === 'ready' ? indexState.envelope.data : null);
+  const data = indexData ?? (shellIndex
+    ? shellIndex.data
+    : indexState.phase === 'ready'
+      ? indexState.envelope.data
+      : null);
+  const indexPhase = shellIndex ? shellIndex.phase : indexState.phase;
+  const indexError = shellIndex ? shellIndex.error : indexState.error;
+  const retryIndex = shellIndex ? shellIndex.reload : load;
   const header = useMemo(
     () => (data ? redoHeader(data, parsed.ok ? parsed.basis : null) : null),
     [data, parsed],
@@ -150,9 +165,9 @@ export default function RedoPage({apiBase, indexData = null}) {
         判定由服务做——这一页只提交作答。
       </p>
 
-      {indexState.phase === 'loading' && <p data-status="loading">正在从服务读索引…</p>}
-      {indexState.phase === 'failed' && (
-        <ErrorPanel title="读不到索引" error={indexState.error} onRetry={load} />
+      {indexPhase === 'loading' && <p data-status="loading">正在从服务读索引…</p>}
+      {indexPhase === 'failed' && (
+        <ErrorPanel title="读不到索引" error={indexError} onRetry={retryIndex} />
       )}
 
       {header && !header.known && (

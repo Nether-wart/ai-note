@@ -95,7 +95,10 @@ export function parseProblemQuery(search) {
       error: {
         code: 'pid_missing',
         message: '地址里没有 pid',
-        hint: '阅读页的地址长这样：/problem?pid=p-20261004-41c86b',
+        // 例子里的 id **不许写成一个真的形状**（`p-<日期>-<6位十六进制>`）：
+        // 它会跟着打包进产物，而 ADR 0001 的自查 `grep -rl "p-2026" build/` 必须为空
+        // （那道自查是「构建产物里没有一道题的内容」唯一的机器判据）。
+        hint: '阅读页的地址长这样：/problem?pid=<题卡 id>',
       },
     };
   }

@@ -109,8 +109,50 @@ export const fetchPage = (apiBase, pageId) =>
 export const patchPage = (apiBase, pageId, payload) =>
   requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}`, {method: 'PATCH', body: payload});
 
-export const resegmentPage = (apiBase, pageId) =>
-  requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}/resegment`, {method: 'POST'});
+/**
+ * **读一页**（打开一页来改时的第一次读取）。
+ *
+ * 走 `GET /api/page/<id>`——契约 §10.2.1b 的动作表里那条**读**。
+ *
+ * 这里有一段弯路值得留着当教训：起先契约与实现**都没有**这条路由，于是「读一页」只能
+ * 拿一次**空修正的预演**（`PATCH {dry_run: true, edits: []}`）去凑——让**读**依赖一条
+ * **写形状**的路由。而真正的问题是它**在真 socket 上是 405**：`SplitEditor` 的
+ * `fetchPage` 从 #14 起就踩在这条死缝上，可它的测试全靠注入 `pageData`，所以**从没红过**
+ * ——判据的层级与坏掉的那一层错开一格，这是这一类缺口能活下来的唯一原因。
+ * 现在读与写分开，这里只发一个纯 GET。
+ */
+export async function readPage(apiBase, pageId) {
+  const envelope = await fetchPage(apiBase, pageId);
+  const page = envelope?.data?.page;
+  if (!page) {
+    throw new ApiError(
+      {
+        code: 'page_missing_in_envelope',
+        message: `读这一页的回执里没有 page：${pageId}`,
+        hint: '按契约，读一页的回执带整份 page；没有就是端点形状变了，照服务的原话查。',
+      },
+      200,
+      `/api/page/${encodeURIComponent(pageId)}`,
+    );
+  }
+  return {envelope, page};
+}
+
+/**
+ * 「重置为预设」：**破坏性**，会丢掉人工增删改的块（契约 §10.2.1b，本版语义改动）。
+ *
+ * `confirmDiscardManual: false`（缺省）时带一个**空** body 先试一次：这一页若存在任何
+ * 人工改动，服务会给 **409** `resegment_needs_confirmation`，`details.discarded` 报清
+ * 「将丢弃几处人工改动」。界面把那份读数**原话**摆出来**再问一次**，用户点头之后才
+ * 带 `{"confirm_discard_manual": true}` 重发。**不信**界面自己估的数字——那个口径只有在
+ * 服务那一处实现（`page_edit` 的分派表旁边）。
+ */
+export function resegmentPage(apiBase, pageId, {confirmDiscardManual = false} = {}) {
+  return requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}/resegment`, {
+    method: 'POST',
+    body: confirmDiscardManual ? {confirm_discard_manual: true} : {},
+  });
+}
 
 /**
  * 页的整页照片 URL。页文件与照片**同目录并列**（D5），照片经图片端点取。
