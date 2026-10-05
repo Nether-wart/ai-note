@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import errors, page_edit, segmentation
+from . import assets, errors, page_edit, segmentation
 from .intake import _load_page
 from .model_client import ModelUnavailable
 from .warnings import _warn
@@ -193,6 +193,29 @@ class PageEndpoint:
             "message": parsed.get("message"),
             **report,
         }, warnings + list(report.get("warnings") or [])
+
+    # ------------------------------------------------------------ 整页照片
+
+    def image(self, page_id: str) -> tuple[bytes, str]:
+        """`GET /api/page/<id>/image`：整页照片的字节（界面上画块框要它）。
+
+        它是**页文件旁边**那张照片（D5：同名不同后缀），所以路径由页文件里的
+        `image`（一个**纯文件名**）定，并再过一次不变式——与写回路径同一条纪律：
+        **绝不由载荷内容决定读到哪**。
+
+        「页在、照片不在」是**真矛盾**（页实体已经在场）→ 404 并说清缺的是哪一张，
+        而不是给一张替身图（同 D4 的口径：不许回退成别的东西）。
+        """
+        page = _load_page(self.catalog, page_id)
+        page_edit.assert_page_payload_matches_id(page, page_id)
+        path = self._image_path(page)
+        if not path.is_file():
+            raise errors.not_found(
+                f"页 {page_id} 的整页照片不在：{path}",
+                hint="页文件与照片同目录并列（D5）；照片被删了这一页就没法画框了",
+                what="page_image", id=page_id, image=str(page.get("image") or ""),
+            )
+        return path.read_bytes(), assets.content_type_for(path)
 
     # ------------------------------------------------------------ 建 / 入库（归 #15）
 

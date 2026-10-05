@@ -364,3 +364,62 @@ def test_wrong_methods_are_405_with_the_allowed_list(tmp_path, target, method):
     assert r.status == 405
     assert envelope["error"]["code"] == "method_not_allowed"
     assert envelope["error"]["details"]["allowed"]
+
+
+# ---------------------------------------------------------------- 整页照片
+
+
+def test_the_page_image_route_serves_the_photo_next_to_the_page_file(tmp_path):
+    """界面要「把块框画在整页照片上」，所以它要取得到那张照片（D5：与页文件并列）。"""
+    import base64
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+    )
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+    (api.catalog.pages_dir / f"{PAGE_ID}.png").write_bytes(png)
+
+    r = api.handle("GET", f"/api/page/{PAGE_ID}/image")
+
+    assert r.status == 200
+    assert r.content_type.startswith("image/png")
+    assert r.body == png
+
+
+def test_a_missing_page_photo_is_a_404_that_names_the_file(tmp_path):
+    """D9：页在、照片不在是**真矛盾** → 404 说清缺的是哪一张（不给替身图）。"""
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+
+    r = api.handle("GET", f"/api/page/{PAGE_ID}/image")
+    envelope = json.loads(r.body)
+
+    assert r.status == 404
+    assert envelope["error"]["code"] == "not_found"
+    assert envelope["error"]["details"]["what"] == "page_image"
+    assert envelope["error"]["details"]["image"] == f"{PAGE_ID}.png"
+
+
+def test_the_page_image_route_refuses_a_traversing_image_field(tmp_path):
+    """D9：`image` 可穿越 → 必须拒（这是 #12 那条漏洞的派生症状）。"""
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+    (api.catalog.pages_dir / f"{PAGE_ID}.json").write_text(json.dumps({
+        "version": 1, "id": PAGE_ID, "image": "../../problems/p-x.json",
+        "blocks": [block("b1", [0.02, 0.02, 0.9, 0.2])],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    r = api.handle("GET", f"/api/page/{PAGE_ID}/image")
+    envelope = json.loads(r.body)
+
+    assert r.status == 400
+    assert envelope["error"]["details"]["param"] == "page_id"
+
+
+def test_the_page_image_route_only_answers_get(tmp_path):
+    """用错方法 → 405 带 allowed（契约 §5.1）。"""
+    api = build_api(tmp_path, pages=[page([block("b1", [0.02, 0.02, 0.9, 0.2])])])
+
+    r = api.handle("POST", f"/api/page/{PAGE_ID}/image")
+    envelope = json.loads(r.body)
+
+    assert r.status == 405
+    assert "GET" in envelope["error"]["details"]["allowed"]

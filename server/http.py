@@ -231,6 +231,15 @@ class Api:
             data, warnings = self.pages.resegment(match.group("pid"))
             return json_response(200, data=data, warnings=warnings)
 
+        match = re.fullmatch(r"/api/page/(?P<pid>.*?)/image", path)
+        if match:
+            self._require(method, "GET")
+            blob, content_type = self.pages.image(match.group("pid"))
+            return Response(
+                200, blob, content_type,
+                headers={"Cache-Control": "no-store", "Content-Length": str(len(blob))},
+            )
+
         match = re.fullmatch(r"/api/page/(?P<pid>.*?)/commit", path)
         if match:
             self._require(method, "POST")

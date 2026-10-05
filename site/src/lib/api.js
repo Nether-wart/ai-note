@@ -91,3 +91,26 @@ export const postAttempt = (apiBase, pid, payload) =>
 /** 图片 URL。**只喂契约里给的 `images.*`**，界面不许自己拼路径。 */
 export const assetUrl = (apiBase, path) =>
   path ? `${String(apiBase || '').replace(/\/+$/, '')}${path}` : null;
+
+/**
+ * 页资源（契约 §10.2，工单 #14）。四个动作一个接缝：
+ * **模型调用与图像统计都在服务内部，界面不碰照片处理**。
+ *
+ * 界面只提交「人做了什么」（`edits` 里的动作与块的 id／边界／题号／题型／收不收）；
+ * 判定字段与取舍规则一律由服务给（#12）。`dry_run` 是预演，服务一个字节都不写。
+ */
+export const fetchPage = (apiBase, pageId) =>
+  requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}`);
+
+export const patchPage = (apiBase, pageId, payload) =>
+  requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}`, {method: 'PATCH', body: payload});
+
+export const resegmentPage = (apiBase, pageId) =>
+  requestJson(apiBase, `/api/page/${encodeURIComponent(pageId)}/resegment`, {method: 'POST'});
+
+/**
+ * 页的整页照片 URL。页文件与照片**同目录并列**（D5），照片经图片端点取。
+ * 界面**不许自己拼盘上路径**——这里只拼这一个已知形状的服务地址。
+ */
+export const pageImageUrl = (apiBase, pageId) =>
+  `${String(apiBase || '').replace(/\/+$/, '')}/api/page/${encodeURIComponent(pageId)}/image`;

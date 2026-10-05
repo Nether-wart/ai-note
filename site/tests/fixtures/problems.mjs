@@ -21,7 +21,7 @@ export function problem(overrides = {}) {
     created_at: '2026-10-04T08:00:00+00:00',
     type: 'choice',
     type_cn: '选择题',
-    transcript: '1. 下列哪个是充分不必要条件？',
+    transcript: '1. 夹具题面：下列哪个选项正确？',
     options: [
       {label: 'A', text: '甲'},
       {label: 'B', text: '乙'},

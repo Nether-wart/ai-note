@@ -31,7 +31,7 @@ const pid = 'p-a';
 const CLEAN = `${API}/api/problem/${pid}/image/clean`;
 const ORIGINAL = `${API}/api/problem/${pid}/image/original`;
 const MASK = `${API}/api/problem/${pid}/image/mask`;
-const PAGE_PHOTO = `${API}/api/page/41c86bcfc007/image`;
+const PAGE_PHOTO = `${API}/api/page/aaaabbbbcccc/image`;
 
 /** React 19 的 `renderToStaticMarkup` 会给 `<img>` 额外吐一个 preload link。 */
 const cleanQuestionHtml = (extra = '') =>
@@ -297,7 +297,7 @@ test('不变量 4 坏输入：建了个缓存目录（哪怕不在数据目录�
 const LEAKY_PROBLEM = {
   id: pid,
   type: 'choice',
-  transcript: '1. 下列哪个是充分不必要条件？',
+  transcript: '1. 夹具题面：下列哪个选项正确？',
   options: [{label: 'A', text: '甲'}, {label: 'B', text: '乙'}],
   standard_answer: 'A',
   original_answer: 'B',
