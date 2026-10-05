@@ -162,7 +162,7 @@ class PageEndpoint:
             # D1：把「没能问成」翻成 502，并把**哪一页**带进 `details`——
             # 调用方要能一眼看出是哪一页的切分没跑成（不许含糊）。
             raise errors.model_unavailable(str(exc), pid=page_id) from exc
-        parsed = self._as_candidates(outcome)
+        parsed = page_create.as_candidates(outcome)
         warnings = list(parsed.get("warnings") or [])
         if not parsed.get("parsed", True):
             # 答了话但解析不出块 → 明确的报告（不是「这一页没有题」）
@@ -276,15 +276,6 @@ class PageEndpoint:
             return ink.page_ink_regions(ink.read_png(self._image_path(page)))
         except (OSError, ink.UnsupportedImage):
             return None
-
-    @staticmethod
-    def _as_candidates(outcome) -> dict:
-        """切分接缝的返回值 → `parse_candidate_blocks` 的统一形状。
-
-        **这一处实现搬到 `page_create.as_candidates` 了**（「建」与「重切」都要它，
-        两份就会各判各的）；这里保留同名委托，免得调用点与测试要改。
-        """
-        return page_create.as_candidates(outcome)
 
 
 __all__ = ["PageEndpoint", "parse_json_body", "SEGMENTATION_NOT_IMPLEMENTED",
