@@ -198,6 +198,29 @@ test('answerMode：填空题给一个空（一个输入就是一道题）', () =
   assert.equal(mode.mode, 'fillin');
 });
 
+test('answerMode：选择题但选项缺失（options: []）→ 单输入框的填空回退，不是死胡同', () => {
+  // 最终修复 pass 作业单 1：索引里真有 `options: []` 的选择题（来源 #7 的只读验证者）。
+  // 修前 `mode` 仍是 'choice'，而组件只在 options.length > 0 时渲染输入 → 零个 <input>、
+  // 提交永远 disabled，界面上却写着一句自相矛盾的「只能自己敲答案」。
+  // 标准答案还在，敲字母是合法作答（spec #1 故事 4：选择题只敲一个字母），
+  // 所以正确做法是**给一个输入框**并如实说明选项缺失。
+  const mode = answerMode(problem({type: 'choice', options: []}));
+
+  assert.equal(mode.mode, 'fillin', '要回退到单输入框，而不是一个永远 disabled 的死胡同');
+  assert.equal(mode.fallback, 'options_missing');
+  assert.match(mode.notice, /选项/);
+  assert.match(mode.notice, /敲答案/);
+  assert.deepEqual(mode.options, []);
+});
+
+test('answerMode：选项齐全的选择题照旧给选项（回退不许反过来影响正常路径）', () => {
+  const mode = answerMode(problem({type: 'choice'}));
+
+  assert.equal(mode.mode, 'choice');
+  assert.equal(mode.fallback, null);
+  assert.deepEqual(mode.options.map((o) => o.label), ['A', 'B']);
+});
+
 test('answerMode：解答题不给作答框，理由是服务端 autojudge 的原话', () => {
   const mode = answerMode(
     problem({

@@ -57,6 +57,23 @@ export function problem(overrides = {}) {
 /** 选择题：屏幕可做。 */
 export const CHOICE = problem();
 
+/**
+ * **选择题但索引里的 `options` 是空的**（`options: []`）——真数据里出现过这种卡
+ * （#7 的只读验证者给了最小复现）。标准答案还在，所以它**能**自动判定；
+ * 界面要给**单输入框的填空回退**（敲一个字母是合法作答，spec #1 故事 4），
+ * 而不是把人堵在一个永远 disabled 的死胡同里（最终修复 pass 作业单 1）。
+ */
+export const CHOICE_NO_OPTIONS = problem({
+  id: 'p-noopt06',
+  type: 'choice',
+  type_cn: '选择题',
+  options: [],
+  transcript: '6. 选项在索引里丢了的选择题。',
+  standard_answer: 'A',
+  auto_judge: {eligible: true, reason: null, reason_text: null},
+  screen_redo: {ready: true, blockers: [], blocker_text: []},
+});
+
 /** 填空题：屏幕可做。 */
 export const FILLIN = problem({
   id: 'p-fill02',

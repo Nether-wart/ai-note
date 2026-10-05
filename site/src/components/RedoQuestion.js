@@ -84,15 +84,18 @@ export default function RedoQuestion({problem, apiBase, onSubmit, submitting}) {
             </fieldset>
           )}
 
-          {mode.mode === 'choice' && mode.options.length === 0 && (
+          {/* 选项缺失的选择题：**单输入框的填空回退**（最终修复 pass 作业单 1）。
+              修前这里只有一句「只能自己敲答案」，却没有输入框——文案与行为矛盾，
+              提交永远 disabled。标准答案还在，敲字母是合法作答，所以给框、并如实说明。 */}
+          {mode.fallback === 'options_missing' && (
             <p className="ai-note-warn" data-options-empty="true">
-              这是选择题，但索引里的选项是空的（<code>options: []</code>）——只能自己敲答案。
+              {mode.notice}
             </p>
           )}
 
           {mode.mode === 'fillin' && (
             <label data-answer-input="fillin">
-              填空：
+              {mode.fallback === 'options_missing' ? '答案：' : '填空：'}
               <input
                 type="text"
                 value={answer}

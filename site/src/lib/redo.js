@@ -126,25 +126,63 @@ export function removeAt(queue, i) {
  * 给不给作答框、给什么样的：判据是**服务端的读数**，不是界面再判一遍。
  *
  *   `auto_judge.eligible === false` → 一个框都不给（服务已经说清为什么）
- *   `choice` → 选项按钮；`fillin` → 一个空；`solution` → 没有框
+ *   `choice` → 选项按钮；**选项缺失（`options: []`）→ 单输入框的填空回退**；
+ *   `fillin` → 一个空；`solution` → 没有框
  *   `default` → **不退回选择题**（「题型枚举静默退回默认值」是这个项目真踩过的坑）
+ *
+ * 返回的读数里 `fallback` / `notice` 说明这一档有没有回退、界面该如实说哪句话：
+ * 选项缺失时 `fallback === 'options_missing'`、`notice` 是那句给人看的话。
+ * 选项齐全时两者都是 `null`——形状统一，组件不必写「有没有这个键」的分支。
  */
 export function answerMode(problem) {
   const judge = problem?.auto_judge || {};
   if (judge.eligible !== true) {
-    return {mode: 'none', reason: judge.reason ?? 'not_auto_judgeable', reason_text: judge.reason_text ?? null};
+    return {
+      mode: 'none',
+      options: [],
+      fallback: null,
+      notice: null,
+      reason: judge.reason ?? 'not_auto_judgeable',
+      reason_text: judge.reason_text ?? null,
+    };
   }
   switch (problem?.type) {
-    case 'choice':
-      return {mode: 'choice', options: problem.options || [], reason: null, reason_text: null};
+    case 'choice': {
+      const options = problem.options || [];
+      if (options.length > 0) {
+        return {mode: 'choice', options, fallback: null, notice: null, reason: null, reason_text: null};
+      }
+      // 选项在索引里丢了（真数据里出现过 `options: []`）。**给单输入框的填空回退**，
+      // 不是把人堵在一个永远 disabled 的死胡同里：标准答案还在，选择/填空的答案
+      // 本来就是一个字母（spec #1 故事 4），敲字母是合法作答，服务端照判。
+      // 界面**如实说明**这一点（不许一边说「只能自己敲答案」一边不给输入框）。
+      return {
+        mode: 'fillin',
+        options: [],
+        fallback: 'options_missing',
+        notice: '这是选择题，但索引里的选项是空的 → 请直接敲答案（选择题通常敲一个字母）',
+        reason: null,
+        reason_text: null,
+      };
+    }
     case 'fillin':
-      return {mode: 'fillin', reason: null, reason_text: null};
+      return {mode: 'fillin', options: [], fallback: null, notice: null, reason: null, reason_text: null};
     case 'solution':
       // 服务说可判、题型说解答：两份读数自相矛盾。按保守的一侧走——不给作答框。
-      return {mode: 'none', reason: SOLVE_TYPE_REASON, reason_text: judge.reason_text ?? null};
+      return {
+        mode: 'none',
+        options: [],
+        fallback: null,
+        notice: null,
+        reason: SOLVE_TYPE_REASON,
+        reason_text: judge.reason_text ?? null,
+      };
     default:
       return {
         mode: 'none',
+        options: [],
+        fallback: null,
+        notice: null,
         reason: 'unknown_type',
         reason_text: `题型认不出：'${problem?.type}' ——不退回默认题型`,
       };

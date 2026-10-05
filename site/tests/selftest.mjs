@@ -30,7 +30,7 @@ import {
 import {createHarness, HarnessUnavailable} from './ssr.mjs';
 import {snapshotTree} from './snapshot-tree.mjs';
 import {redoHeader} from '../src/lib/redo.js';
-import {API, CHOICE, FILLIN, INDEX, NO_CLEAN, SOLUTION, UNREVIEWED} from './fixtures/problems.mjs';
+import {API, CHOICE, CHOICE_NO_OPTIONS, FILLIN, INDEX, NO_CLEAN, SOLUTION, UNREVIEWED} from './fixtures/problems.mjs';
 
 const checks = [];
 
@@ -92,6 +92,26 @@ for (const fixture of [CHOICE, FILLIN]) {
     checkAnswerBox({html, problem: fixture}));
   expectClean(`不变量 5 · ${fixture.id}：提交之前页面上没有答案`,
     checkNoAnswerLeak({html, problem: fixture}));
+}
+
+// 选项缺失的选择题（`options: []`）：**单输入框的填空回退**，不是死胡同（最终修复 pass）。
+// 判据吃的是**真组件渲出来的 HTML**，所以它证明的是「页面上真的有一个能敲的输入框」，
+// 而不是「逻辑上算出来应该有一个」（手写 HTML 只能证明判据自己会算）。
+{
+  const html = harness.renderQuestion(CHOICE_NO_OPTIONS, {apiBase: API});
+  const inputs = html.match(/<input\b/g) || [];
+  const disabledInputs = html.match(/<input\b[^>]*\bdisabled\b/g) || [];
+
+  record('不变量 2 · 选项缺失的选择题：页面上有**一个**可敲的输入框（不是零个）',
+    inputs.length === 1 && disabledInputs.length === 0, `inputs=${inputs.length}`);
+  record('不变量 2 · 选项缺失的选择题：界面如实说明「选项缺失，请直接敲答案」',
+    html.includes('data-options-empty="true"') && html.includes('请直接敲答案'));
+  record('不变量 2 · 选项缺失的选择题：作答区是一个 fillin 表单，题面图仍然是擦除图',
+    html.includes('data-answer-form="fillin"') && html.includes('data-answer-mode="fillin"'));
+  expectClean('不变量 2 · 选项缺失的选择题：判据本身认这条回退（不再报选择题缺选项）',
+    checkAnswerBox({html, problem: CHOICE_NO_OPTIONS}));
+  expectClean('不变量 1 · 选项缺失的选择题：题面仍然是擦除手写后的图',
+    checkQuestionImage({html, pid: CHOICE_NO_OPTIONS.id, apiBase: API}));
 }
 
 for (const fixture of [SOLUTION, UNREVIEWED]) {
