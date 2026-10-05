@@ -85,7 +85,11 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
             if response.body:
                 self.wfile.write(response.body)
 
-        def do_GET(self) -> None:  # noqa: N802（http.server 的命名约定）
+        # `do_*` 是 `http.server` 的命名约定，ruff 的 N802 看不惯它。
+        # 说明写在**上一行**，而不是塞在 noqa 指令后面：指令后面跟一段中文说明会被
+        # ruff 解析成非法的规则码，于是那个 noqa **从来没生效**，只留下一行每次跑
+        # ruff 都刷的警告——而噪声会训练人忽略输出。
+        def do_GET(self) -> None:  # noqa: N802
             self._respond("GET")
 
         def do_OPTIONS(self) -> None:  # noqa: N802
@@ -105,6 +109,18 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
             # 的纯函数接缝，**绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。
             # 现在有一条真 socket 的测试盯着它（`test_server_smoke.py`）。
             self._respond("PATCH")
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            # 同一件事的**另一半**：路由表里没有哪条路收 `DELETE`／`PUT`，所以它们该得到
+            # **405 带 `allowed`**（契约 §5.1）。但 `http.server` 只认自己有的 `do_*`——
+            # 没这几个的话，真实 socket 上拿到的是框架自带的 **501 + `text/html`**，
+            # 又一次违反「每个响应都是同一个信封」（§2）。
+            # 写在这里的三个方法自己不做路由：它们只是把请求送进 `Api._route`，
+            # 由那一层按 `_require` 决定 405 还是 404——**方法清单只有一处实现**。
+            self._respond("DELETE")
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._respond("PUT")
 
         def log_message(self, fmt: str, *args) -> None:  # 别把访问日志吞掉
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))

@@ -135,6 +135,41 @@ class PageEndpoint:
         self.catalog = catalog
         self.segmenter = segmenter
 
+    # ------------------------------------------------------------ 读（GET）
+
+    def read(self, page_id: str) -> tuple[dict, list[dict]]:
+        """`GET /api/page/<id>`：读出**整份页**（页文件 + 路径 + 照片名）。
+
+        **为什么这条路由必须存在**（而不是拿「一次空修正的预演」当读来用）：
+        界面要打开一页来改它，第一步就是读；而预演是 `PATCH`、要一个 body、
+        语义是「先看看这么改会怎样」——把它当读用，等于让**读**依赖一条**写形状**的路由，
+        下一个读代码的人会先花十分钟确认「它到底写不写」。读与写分开，是契约 §10.2.1b
+        五个动作之外的第**六**个动作，形状与别的读端点一致（纯 GET、无 body）。
+
+        返回 `{page_id, page_path, image, page}`：`page` 是页文件**原样**（块列表、
+        `segmentation`、`removed_blocks`、`subject` 都在里面）。`image` 是**纯文件名**
+        （照片与页文件同目录并列，D5）——整页照片由 `GET /api/page/<id>/image` 给。
+        """
+        page, read_error = pages.read_page(self.catalog, page_id)
+        if read_error:
+            raise errors.ApiError(
+                500, "internal_error", read_error,
+                hint="页文件在却读不了：先修好这个文件（索引与审计都会报它）",
+                details={"what": "page", "id": page_id},
+            )
+        if page is None:
+            raise errors.not_found(
+                f"没有这一页：{page_id}",
+                hint="页 id 是整页照片内容哈希的前 12 位；POST /api/page 建页时会给你",
+                what="page", id=page_id,
+            )
+        return {
+            "page_id": page_id,
+            "page_path": str(pages.page_path(self.catalog, page_id)),
+            "image": page.get("image"),
+            "page": page,
+        }, []
+
     # ------------------------------------------------------------ 改（PATCH）
 
     def edit(self, page_id: str, body) -> tuple[dict, list[dict]]:

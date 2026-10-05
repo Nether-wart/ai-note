@@ -383,7 +383,16 @@ class Api:
         # 而不是掉进「没有这条路由」的 404——客户端少给一段路径不是路由写错了。
         match = re.fullmatch(r"/api/page/(?P<pid>.*)", path)
         if match:
-            self._require(method, "PATCH")
+            # 读与写分两条路：`GET` 读整份页（界面打开一页来改的第一步），
+            # `PATCH` 才改。以前这里只有 `PATCH`，于是「读一页」只能拿一次
+            # **空修正的预演**去凑——让读依赖一条写形状的路由，下一个读代码的人
+            # 得先确认它到底写不写。
+            # `_require` 收**两个**方法：用错方法时的 405 要把 `GET` 也列进去，
+            # 否则那条 `allowed` 会漏掉一个真允许的方法（那就是一句误导）。
+            self._require(method, "GET", "PATCH")
+            if method == "GET":
+                data, warnings = self.pages.read(match.group("pid"))
+                return json_response(200, data=data, warnings=warnings)
             data, warnings = self.pages.edit(match.group("pid"), body)
             return json_response(200, data=data, warnings=warnings)
 
