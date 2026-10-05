@@ -257,7 +257,7 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
             这道题不能屏幕重做，只能纸上重做：
             {(problem.screen_redo?.blocker_text || []).join('；') ||
               problem.auto_judge?.reason_text ||
-              '（服务没给理由，照原话上报）'}
+              '（服务没给理由）'}
           </p>
         )}
       </section>

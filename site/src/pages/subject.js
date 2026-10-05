@@ -159,7 +159,7 @@ function BriefView({apiBase, name, data}) {
     <section data-brief={state.phase}>
       {readout?.stale && (
         <p className="ai-note-warn" data-brief-stale="true">
-          简报已过期：有 {readout.new_problems} 道新题没进去（N 是服务给的读数）。
+          简报已过期：有 {readout.new_problems} 道新题没进去。
         </p>
       )}
 

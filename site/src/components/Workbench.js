@@ -849,7 +849,7 @@ function ResegmentPanel({resegment, busy, onConfirm}) {
           </>
         ) : (
           <p className="ai-note-meta">
-            服务没有给出 `details.discarded`：不知道会丢掉几处——这本身就是一句要照原话上报的话。
+            服务没有说明会丢掉几处。
           </p>
         )}
         {resegment.error?.hint && <p className="ai-note-meta">怎么办：{resegment.error.hint}</p>}

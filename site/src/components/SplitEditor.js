@@ -134,11 +134,11 @@ export default function SplitEditor({apiBase, pageId, pageData = null}) {
         <img src={pageImageUrl(apiBase, view.page_id)} alt="整页照片（上面画的是切出来的块框）"
              data-image-kind="page" />
         <figcaption className="ai-note-meta" data-coordinate-basis="page">
-          块框画在整页照片上（**整页**坐标，就是页文件里的 `bbox_norm`）
+          块框画在整页照片上（整页坐标，就是页文件里的 bbox_norm）
         </figcaption>
       </figure>
       <p className="ai-note-meta" data-coordinate-basis="crop">
-        题面**裁剪图**上的掩膜框是另一套坐标（`clean.boxes_norm`／`manual`）；
+        题面裁剪图上的掩膜框是另一套坐标（clean.boxes_norm／manual）；
         要把掩膜画到上面那张整页照片上，必须换算（`maskBoxOntoPage`）——混用会静默错位。
       </p>
 

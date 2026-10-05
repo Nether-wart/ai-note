@@ -127,7 +127,11 @@
 .ai-note-shell__main {
   /* 正文栏固定宽：一行读数的长度由排版决定，不由屏幕宽度决定。
      窄屏由下面的媒体查询改成整宽。 */
-  flex: 0 0 52rem;
+  /* `shrink` 留 1（不是 0）：basis 与 width 都写死 52rem，窗口宽了不拉伸；
+     但侧栏 18rem ＋ 间隙 1.5rem ＋ 52rem 在 997–1176px 这一档装不下，
+     写 `0` 会横向溢出、把横幅与表格的右边**切掉**（实测 1000px 正是切掉的）。
+     允许压缩只在装不下时生效——装得下时「固定宽」照旧成立。 */
+  flex: 0 1 52rem;
   width: 52rem;
   max-width: 100%;
   min-width: 0;
@@ -155,9 +159,21 @@
 }
 
 .ai-note-sidebar__count {
-  float: right;
+  /* 不用 `float`：`.menu__link` 是 **flex**，而浮动对 flex 子项**无效**——
+     计数会紧贴科目名，渲染成「数学2」。`margin-left: auto` 在 flex 里把它推到最右。 */
+  margin-left: auto;
   color: var(--ifm-color-emphasis-600);
   font-size: 0.8rem;
+  /* 等宽数字：道数变化时那一列不跳。 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 侧栏每一行都是「名字 …… 计数／标记」两端对齐；显式写成 flex，
+   免得依赖主题内部的 display 值（那正是上面那个 bug 的来源）。 */
+.ai-note-sidebar .menu__link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 @media (max-width: 996px) {
