@@ -114,7 +114,8 @@ def api_for(tmp_path):
     from server.http import Api
 
     def build(cards=None, *, files=None, extra_files=None, images=None, root=None, clock=None,
-              judge=None, runs_dir=None, config=None):
+              judge=None, runs_dir=None, config=None, max_upload_bytes=None,
+              max_attempt_bytes=None):
         base = root or make_data_dir(tmp_path, cards or [])
         for name, card in (files or {}).items():
             (base / "problems" / f"{name}.json").write_text(
@@ -126,7 +127,8 @@ def api_for(tmp_path):
         if images:
             for name, blob in images.items():
                 (base / "assets" / name).write_bytes(blob)
-        return Api(base, clock=clock, judge=judge, runs_dir=runs_dir, config=config)
+        return Api(base, clock=clock, judge=judge, runs_dir=runs_dir, config=config,
+                   max_upload_bytes=max_upload_bytes, max_attempt_bytes=max_attempt_bytes)
 
     return build
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import assets, inbox as inbox_mod
-from .attempt import AttemptEndpoint
+from .attempt import MAX_BODY_BYTES, AttemptEndpoint
 from .catalog import Catalog
 from .config import load_judge_config
 from . import errors
@@ -72,13 +72,18 @@ def json_response(
 class Api:
     def __init__(self, data_dir: Path | str, clock=None, public_base: str | None = None,
                  *, inbox: Path | str | None = None, bind_host: str | None = None,
-                 max_upload_bytes: int | None = None, segmenter=None,
+                 max_upload_bytes: int | None = None, max_attempt_bytes: int | None = None,
+                 segmenter=None,
                  judge=None, runs_dir: Path | str | None = None, config=None) -> None:
         self.catalog = Catalog(data_dir, clock=clock, public_base=public_base,
                                inbox=inbox, bind_host=bind_host)
         # 上传上限是**可注入**的：测试不必真造一个 32MB 的 body 去验 413。
         self.max_upload_bytes = inbox_mod.MAX_UPLOAD_BYTES if max_upload_bytes is None \
             else max_upload_bytes
+        # 写端点的 body 上限也是可注入的（作业单 2），但默认就是那个紧上限：
+        # 合法请求只有几个键，64 KiB 没有理由放宽。
+        self.max_attempt_bytes = MAX_BODY_BYTES if max_attempt_bytes is None \
+            else max_attempt_bytes
         # 切分（#10）还没实现。这是一个**接缝**：注入一个 `(path) -> blocks` 就能接上，
         # 不注入就必须显式报「切分不可用」——绝不返回假的块列表。
         self.segmenter = segmenter
@@ -179,6 +184,7 @@ class Api:
         # 写端点（#5）：GET 到它要说清「它收的是 POST」，不是含糊的 404（契约 §9）
         if path.startswith("/api/attempt/"):
             self._require(method, "POST")
+            self._reject_oversized_attempt(body, declared_length)
             return self._post(path, body)
 
         # 页资源（契约 §10.2）：四个动作一个接缝。路由在这里显式列出，
@@ -303,6 +309,36 @@ class Api:
     def _inbox_scan(self) -> Response:
         data, warnings, skipped = inbox_mod.scan(self.catalog.inbox, self.segmenter)
         return json_response(200, data=data, warnings=warnings, skipped=skipped)
+
+    # ------------------------------------------------------------ 输入错
+
+    def body_limit(self, path: str) -> int:
+        """这条路由的 body 上限。`app.py` 靠它在**读 body 之前**决定读不读。
+
+        按路由分档：写端点收的是几个键的 JSON（`MAX_BODY_BYTES`），上传收的是
+        多部分照片（`max_upload_bytes`）。上限只有这一处判据，`app.py` 与
+        `_reject_oversized_attempt` 都从这里取——两处各写一份迟早分叉。
+        """
+        raw_path = path.partition("?")[0]
+        if raw_path.startswith("/api/attempt/"):
+            return self.max_attempt_bytes
+        return self.max_upload_bytes
+
+    def _reject_oversized_attempt(self, body: bytes | str | None,
+                                  declared_length: int | None) -> None:
+        """写端点的 body 超限 → 400 `body_too_large`，**在进模型之前**（作业单 2）。
+
+        声明长度与真读到的字节数取大的那个：`app.py` 只按 `Content-Length` 判、
+        超限时**不读** body（`body` 是空的），所以不能只看 `len(body)`，否则
+        真起服务时这条会退化成「空 body 400」而把真实大小丢掉。
+        """
+        if isinstance(body, str):
+            read = len(body.encode("utf-8"))
+        else:
+            read = len(body or b"")
+        size = max(declared_length or 0, read)
+        if size > self.max_attempt_bytes:
+            raise errors.body_too_large(size, limit=self.max_attempt_bytes)
 
     # ---------------------------------------------------------------- 写
 

@@ -58,9 +58,12 @@ def build_server(data_dir: Path | str, host: str = DEFAULT_HOST, port: int = DEF
         def _respond(self, method: str) -> None:
             api = holder["api"]
             declared = self._declared_length()
+            # 上限**按路由**取（`Api.body_limit`）：写端点是 64 KiB，上传是 32MB。
+            # 在**读 body 之前**判：读一个超限的 body 再拒绝不是拒绝。
+            limit = api.body_limit(self.path)
             body = b""
             if declared is not None:
-                if declared <= api.max_upload_bytes:
+                if declared <= limit:
                     body = self.rfile.read(declared) if declared else b""
                 else:
                     # 太大：**不读进内存**，明确拒绝并关连接（HTTP/1.1 不能留下半截 body，

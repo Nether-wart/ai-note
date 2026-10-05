@@ -771,7 +771,16 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 盘上操作失败（`filesystem_error`，`message` 带异常类名）——**不许用裸回溯代替信封**（D1）。
 `bad_request` 下的 `reason` 取值（都是 400，`code` 不变，`details.param` 点名字段）：
 页里的 `id` 与目标页 id 不一致（`page_id_mismatch`）、页里的 `image` 不是纯文件名
-（`page_image_unsafe`）——写盘路径只认调用方给的页 id，页里的 `id`/`image` 只用于对账（§8）。
+（`page_image_unsafe`）——写盘路径只认调用方给的页 id，页里的 `id`/`image` 只用于对账（§8）；
+写端点的 body 超过**显式上限**（`body_too_large`，见 §10.1）。
+
+**写端点 body 的显式上限（64 KiB）**：`POST /api/attempt/*` 的 body 合法形状只有
+`{channel, answer}`（或定点修正那三个键），所以上限远小于上传那一档——
+没有上限时一个 2MB 的**合法 JSON** 会被整段读进内存、作答还会发给模型。
+超限 → **400 `{code:"bad_request", reason:"body_too_large", details:{param:"body", value, max}}`**，
+`hint` 指向「照片请走 `POST /api/inbox`」。**判在读 body 之前**（`app.py` 按
+`Api.body_limit(path)` 决定读不读），且拒绝**不留下任何记录**（D1/D9）。
+上限按路由分档：写端点 64 KiB、上传 32MB——`Api.body_limit` 是唯一判据。
 
 补充硬规则（编排裁决 D1）：
 
@@ -810,6 +819,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | 三个拒绝理由 | **422** | `{code:"not_auto_judgeable", reason:"solution_type"\|"no_standard_answer"\|"unreviewed", message:"<autojudge 那句原话>", details:{id}, }` + `warnings[]` = 该卡的自检警告 |
 | 模型调用失败 | **502** | `{code:"model_unavailable", reason:"model_unavailable", message:"…", hint:"可以直接重试；这一次没有留下任何记录"}` |
 | `channel`／`verdict` 取值非法 | 400 | `{code:"bad_request", details:{param,value,allowed}}` |
+| body 超过 **64 KiB** 上限 | 400 | `{code:"bad_request", reason:"body_too_large", details:{param:"body", value, max:65536}}`。**判在读 body 之前**，拒绝不留记录（D1/D9）；照片走 `POST /api/inbox`（那一档上限 32MB，超限是 413） |
 | 定点修正：`attempt_at` **不存在** | **404** | `{code:"not_found", reason:"attempt_not_found", message:"…", details:{id, attempt_at, available:[…]}}` + `warnings[]` = 该卡的自检警告。`available` 是这道题**实际有哪些**重做时刻。**绝不落到最近一次、也绝不按「最接近」匹配** |
 | 定点修正：`attempt_at` **定位到不止一次** | **409** | `{code:"ambiguous_attempt_at", reason:"ambiguous_attempt_at", details:{id, attempt_at, candidates:[索引…]}}`。同一秒里有两次重做时不许静默挑一个 |
 
@@ -1206,6 +1216,8 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（D10 / #6） | §10.1 的「**掌握只能重算**」改成「**按 payload 是否改判据分流**」：改判（`verdict` 与现值不同）仍必须重放重算；只改错因（没给 `verdict` 或与现值相同）**不重算**，卡上 `mastery` 与既有 `attempts[i].note` 逐字保留。`mastery` 的「被改那一次的读数」由 `mastery.peek_step` **只读地**给（与重放共用同一份冷却门，故两条路径逐字一致，幂等不受影响）。§12 的 `mastery.py`／`amend.py` 两行跟上 | 独立验证者在 #6 上找到的边界：**只改 `error_causes`** 时，若卡上存的 `mastery` 不是历史的重放固定点，`recompute_mastery` 会把它重放改写——一张「已毕业、连对 5 次」的卡因一次纯标注编辑被**静默重置回池**，连 `attempts[i].note` 也被重写。理由三条：无关编辑不该销毁人动过的状态（spec #2 同一原则）、不许静默（ADR 0007 第 6 条）、漂移该由审计报出来（#15）而不是被顺手改掉。**修法是分流，不是取消重放**（#6 验收 1 一条都不许取消） |
 | 本版（B7 / #15） | §10 状态表把 §10.2 改成**已实现**（四个动作都有路由）；§10.2.1b 补「建」「入库」的请求/响应形状与各四条规矩；§10.2.2 与 §12 加 `server/page_create.py`／`page_commit.py`／`audit.py`；§8 加「页资源建/入库与审计码表」14 条（含 `hint` 级），逐卡表加 `problem_transcript_missing`；§9 的 `problem_missing_field` **语义收窄**成「连 `problem` 对象都没有」并写明「题面还没转录不再跳过」；§12.1 补审计与端到端的测试接缝 | 工单 #15 验收 1/2/3。**先写进 issue #15 的评论再动手**（BRIEF 硬规则 3）。要点：①入库建的是**骨架卡**（块上只有边界与题号），所以索引必须**收录还没转录的卡**并报 `problem_transcript_missing`——落盘了看不见就是静默丢题，与 spec #2 第 17 条冲突；②只给「收」的块发卡号（丢给弃块发号＝幽灵绑定）；**先写页再建卡**是幂等的一部分（反过来会换 id）；③页绑定那一条**不另造码**，消费 `pages.page_binding`：旧卡 `hint`／页↔卡对不上账 `warning`，两级不许混；④同页题干逐字相同的判据与索引级**共用一份实现**（`duplicate_transcript_groups`），没有模糊比、没有相似度；⑤审计 `checked[]` **永远在**、退出码只认 `warning` 级发现；⑥真数据只读复核（跑前跑后 `data/` 逐字节不变）：两张存量卡的 `page_binding_missing` 都是 `hint`，那张解答题卡（标准答案空、考点空）的两条 warning 是真问题，没被提示淹掉 |
 | 本版（#12 数据安全修复） | §8 加「写盘路径的纵深防御」三个码（`page_id_mismatch`/`page_image_unsafe` 为 400 + `details.param`、`filesystem_error` 为 500）；§9 补 `internal_error`/`bad_request` 的 `reason` 取值；`save_page(catalog, page, *, page_id, …)` 的写盘路径只认 `page_id`，身份闸在算路径之前、预演走同一道闸 | 独立验证者实测的真反例：页 id 的校验只挡「传进来的 id」，挡不住「页文件里 `id` 字段」——`save_page` 拿它拼路径，`{"id":"../problems/p-20261004-41c86b"}` 会让 `run_intake(apply=True)` 把整份页 JSON **覆盖一张真题卡**（受害者 md5 变、`warnings == []`、CLI rc=0），`"id":"../../problems/p-nope"` 则是 CLI 裸 `FileNotFoundError`。同类入口还有 `image` 拼 `image_path`（可借读取穿越 `pages/`）与 `backfill` 的写回。**先写进 issue #12 的评论再动手**（BRIEF 硬规则 3） |
+| 本版（最终修复 pass） | §9 补 `bad_request` 的 `reason: "body_too_large"` 与「写端点 body 的显式上限 64 KiB」一段；§10.1 的错误表加一行；上限按路由由 `Api.body_limit` 一处判，`app.py` 在读 body 之前就用它 | 最终修复 pass 作业单 2（来源 #5 的 merger 给的真反例：2MB 合法 JSON → 200，`_read_body` 按 `Content-Length` 整段读进内存、作答还会发给模型）。#13 之后服务要经 Tailscale 给手机用，所以这条要在**进模型之前**拒绝且不留记录（D1/D9）。裁决用 **400**（不是上传那档的 413）：写端点的 body 只有几个键，超限是「参数写错」那一类；上传那档仍是 413（见 §10.3） |
+| 本版（最终修复 pass） | §8 没有改码表，但补齐了三个出口的 `level`：`catalog.problem_id_mismatch`、`pages.backfill_pages` 的 5 条、`pages.rebind` 的 3 条一律走 `warnings._warn`（裁决 (a)：`rebind` 不是「内部结构、由消费方补级别」）；`card_warnings` 的 `standard_answer_missing` 在 `problem.type == "solution"` 时降为 `hint`（非解答题仍是 `warning`） | 最终修复 pass 作业单 3/3b/5/9。§2 要求 `level` **总是显式发出来**，手搓 dict 让它取决于「谁在读」；解答题没有标准答案是**预期状态**（原型 `--audit` 一直这么降级），报 `warning` 会把它淹在噪声里，与 D3/D4「提示与警告分级」的一贯口径冲突 |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 

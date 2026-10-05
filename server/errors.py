@@ -48,6 +48,28 @@ def bad_request(message: str, *, hint: str | None = None, **details) -> ApiError
     return ApiError(400, "bad_request", message, hint=hint, details=details)
 
 
+def body_too_large(size: int, *, limit: int) -> ApiError:
+    """请求体超过这条路由的**显式上限** → **400 `body_too_large`**（作业单 2）。
+
+    写端点的 body 只有 `{channel, answer}`（或定点修正那三个键），64 KiB 已经比任何
+    合法请求大三个数量级；没有上限时一个 2MB 的**合法 JSON** 会被整段读进内存，
+    作答还会发给模型。拒绝发生在**进模型之前**，所以这一次重做不留任何记录（D1/D9）。
+
+    `details` 给 `{param, value, max}`：和上传那条 413 同一个形状，人一眼看得出
+    超了多少、上限是多少。**上限是按路由的**（`Api.body_limit`）——上传是多部分、
+    照片本来就有几 MB，用的是 32MB 那一档；这条紧上限只属于写端点。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"这次请求的 body 有 {size} 字节，超过上限 {limit} 字节",
+        reason="body_too_large",
+        hint=f"写端点的 body 只有 {{channel, answer}} 这几个键，上限 {limit} 字节；"
+             f"照片请走 POST /api/inbox（上限 32MB）",
+        details={"param": "body", "value": size, "max": limit},
+    )
+
+
 def not_found(message: str, hint: str | None = None, **details) -> ApiError:
     return ApiError(404, "not_found", message, hint=hint, details=details)
 

@@ -425,3 +425,69 @@ def test_the_write_survives_a_card_whose_created_at_is_long_ago(api_for):
 
     assert status == 200
     assert body["data"]["mastery"]["gap_days"] > 0
+
+
+# ------------------------------------------------- body 的显式上限（最终修复 pass 作业单 2）
+
+def test_an_oversized_body_is_rejected_before_anything_happens(api_for):
+    """body 有**显式上限**（64 KiB）：超限 → 结构化 400，一个字节都不写、不问模型。
+
+    没有上限时，2MB 的**合法 JSON** 会被整段读进内存、作答还会发给模型（#13 之后
+    服务要经 Tailscale 给手机用）。这条拒绝必须在**进模型之前**发生（D1 / D9）。
+    """
+    stub, api = attempt(api_for, plain_card())
+    before = (api.catalog.problems_dir / f"{PID}.json").read_bytes()
+    # 合法 JSON、远小于上传上限（32MB），只是作答长了——正是「能过 JSON 校验」的那一类
+    oversized = {"channel": "screen", "answer": "A" * (70 * 1024)}
+
+    status, body = post_json(api, f"/api/attempt/{PID}", oversized)
+
+    assert status == 400, body
+    assert body["ok"] is False
+    assert body["error"]["code"] == "bad_request"
+    assert body["error"]["reason"] == "body_too_large"
+    assert body["error"]["details"]["param"] == "body"
+    assert body["error"]["details"]["max"] == 64 * 1024
+    assert stub.calls == [], "超限的 body 根本不该去问模型（不花钱）"
+    assert (api.catalog.problems_dir / f"{PID}.json").read_bytes() == before, \
+        "拒绝就该一个字节都不动"
+
+
+def test_a_declared_length_over_the_limit_is_rejected_without_reading_the_body(api_for):
+    """`app.py` 只按 `Content-Length` 判大小、**不读** body；HTTP 层仍要给出同一个 400。
+
+    这是真起服务时走的那条路（声明 2MB、body 根本没读进内存），不能因为
+    「body 是空的」就掉进 `_parse_body` 的空 body 400——那样 reason 会说错、
+    而且 `details` 里看不到真实大小。
+    """
+    stub, api = attempt(api_for, plain_card())
+
+    response = api.handle("POST", f"/api/attempt/{PID}", body=b"", declared_length=2 * 1024 * 1024)
+    body = json.loads(response.body)
+
+    assert response.status == 400, body
+    assert body["error"]["reason"] == "body_too_large"
+    assert body["error"]["details"]["value"] == 2 * 1024 * 1024
+    assert stub.calls == []
+
+
+def test_a_normal_request_is_unaffected_by_the_limit(api_for):
+    """正常请求不受影响：**恰好在上限内**的合法 body 照旧请求-判定-回写。"""
+    stub, api = attempt(api_for, plain_card(), max_attempt_bytes=4096)
+    payload = {"channel": "screen", "answer": "A"}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    response = api.handle("POST", f"/api/attempt/{PID}", body=raw, declared_length=len(raw))
+    body = json.loads(response.body)
+
+    assert response.status == 200, body
+    assert stub.calls == [("A", "A")]
+
+
+def test_only_the_write_endpoint_gets_the_tight_limit(api_for):
+    """上限是**按路由**的：上传（多部分、照片本来就有几 MB）仍用 32MB 那一档。"""
+    _, api = attempt(api_for, plain_card())
+
+    assert api.body_limit(f"/api/attempt/{PID}") == 64 * 1024
+    assert api.body_limit("/api/inbox") == api.max_upload_bytes
+    assert api.body_limit(f"/api/page/{PID}") == api.max_upload_bytes

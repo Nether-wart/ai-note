@@ -39,6 +39,11 @@ from .mastery import apply_attempt
 # 屏幕重做这一种形态**只收这两个键**（契约 §10.1）。多一个键就 400：
 # 静默忽略是「不许静默」最讨厌的那种做法。
 SCREEN_FORM_KEYS = frozenset({"channel", "answer"})
+# 这个端点的 body **显式上限**（最终修复 pass 作业单 2）。合法请求只有
+# `{channel, answer}`（定点修正那三个键），64 KiB 给足余量；没有上限时一个 2MB 的
+# 合法 JSON 会被整段读进内存、作答还会发给模型。#13 之后服务要经 Tailscale 给手机用，
+# 所以这条闸必须在**进模型之前**（`Api.handle` 在路由到本端点前就判掉，D1/D9）。
+MAX_BODY_BYTES = 64 * 1024
 # 这些字段一旦从客户端出现，就是「客户端在替服务下判定」——硬规则，必须喊。
 CLIENT_MUST_NOT_JUDGE = ("verdict", "source", "confidence", "provider", "model",
                          "overrode", "attempt_at", "evidence_image")
