@@ -324,19 +324,22 @@ def test_commit_is_implemented_and_reports_what_it_wrote(tmp_path):
     assert list(api.catalog.problems_dir.glob("*.json")) == [], "不许悄悄建题卡"
 
 
-def test_creating_a_page_from_a_photo_is_wired_to_the_owner_issue(tmp_path):
-    """**建归 #15**（它要把照片跑完切分再建页）；本工单不许自己发明一条建页路径。
+def test_creating_a_page_needs_a_multipart_photo_and_writes_nothing_otherwise(tmp_path):
+    """**建也已在 #15 落地**（`server/page_create.py`）：这条路不再是「预留」的 404。
 
-    所以它现在给的是「预留、还没实现」+ 指向归属工单的形状。
+    它在**任何写盘之前**先要一张能读的照片（形状与 `POST /api/inbox` 一致：
+    multipart + 字段名 `file`），所以这里给 JSON 得到的是 **400 带 `allowed`**，
+    而不是含糊的 404，更不是「其实什么也没做」的 200。
+    建页的正路（存图、块列表、幂等、模型失败不留痕迹）在 `test_page_create.py`。
     """
     api = build_api(tmp_path)
 
     status, envelope = post_json(api, "/api/page", {"image": "x.png"})
 
-    assert status in (404, 501)
-    assert envelope["ok"] is False
-    assert "15" in json.dumps(envelope["error"], ensure_ascii=False)
-    assert list(api.catalog.pages_dir.glob("*.json")) == []
+    assert status == 400
+    assert envelope["error"]["code"] == "bad_request"
+    assert envelope["error"]["details"]["allowed"] == ["multipart/form-data"]
+    assert list(api.catalog.pages_dir.glob("*.json")) == [], "拒绝路径不许留下页文件"
 
 
 # ---------------------------------------------------------------- 其他方法

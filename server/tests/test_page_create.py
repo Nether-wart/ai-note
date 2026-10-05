@@ -1,0 +1,235 @@
+"""页资源的「建」动作：照片 → 存图 + 建页文件 + 跑切分 + 红笔统计与建议去留（#15、契约 §10.2.1b）。
+
+打的是**外部行为**：一个 multipart 请求进去、一个信封出来、盘上的照片与页文件变/没变。
+切分是注入的接缝（`segmenter`），测试不联网、不碰真照片；合成图用 `server/ink.py` 自己的
+PNG 编码器画（与 #11 的测试同一套做法，零依赖）。
+
+三条纪律在这里被钉住：
+
+1. **模型失败 → 502，且 data/ 里一个字节都不留**（D1/D9）：照片先落在系统临时目录里跑切分，
+   成功之后才写进数据目录。测试断言「连 pages/ 目录都没有被建出来」。
+2. **幂等**：同一张照片再传一次是同一个页 id → 报 `page_already_exists`（hint），
+   **不重跑切分、不覆盖块列表**（块可能被人改过，「人动过的部分不许被抹掉」）。
+3. **切分不可用 / 解析不出块**都不是「这一页没有题」：页文件**不建**，`blocks` 给 `null`。
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+
+from conftest import multipart_body
+from server import ink
+from test_ink import RED, white_with_blocks
+
+
+def data_root(tmp_path, *, make_pages: bool = False):
+    root = tmp_path / "data"
+    (root / "problems").mkdir(parents=True, exist_ok=True)
+    (root / "assets").mkdir(parents=True, exist_ok=True)
+    if make_pages:
+        (root / "pages").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def build_api(tmp_path, *, segmenter=None, make_pages: bool = False):
+    from server.http import Api
+
+    return Api(data_root(tmp_path, make_pages=make_pages), segmenter=segmenter)
+
+
+def a_photo(tmp_path, *, w: int = 100, h: int = 60):
+    """白底 100×60：左半红笔块、右半黑笔块（与 #11 的合成图同一形状）。"""
+    img = white_with_blocks(w, h, [(0, 0, 40, 20, RED), (60, 0, 100, 20, (20, 20, 20))])
+    blob = ink.encode_png(img)
+    path = tmp_path / "page.png"
+    path.write_bytes(blob)
+    return blob, path
+
+
+def static_segmenter(blocks):
+    """一个假切分器：记下被调用了几次，回一份**统一形状**的候选块。"""
+    calls: list = []
+
+    def run(path):
+        calls.append(str(path))
+        return {"parsed": True, "blocks": list(blocks), "rejected": [],
+                "warnings": [], "message": f"读到 {len(blocks)} 块"}
+
+    run.calls = calls
+    return run
+
+
+def post_page(api, blob: bytes, name: str = "page.png"):
+    body, content_type = multipart_body([(name, blob)])
+    r = api.handle("POST", "/api/page", body, content_type=content_type)
+    return r.status, json.loads(r.body)
+
+
+TWO_BLOCKS = [
+    {"id": "b1", "bbox_norm": [0.0, 0.0, 0.4, 1 / 3], "question_no": 17},
+    {"id": "b2", "bbox_norm": [0.6, 0.0, 0.4, 1 / 3], "question_no": 18},
+]
+
+
+# ---------------------------------------------------------------- 建起来了
+
+
+def test_a_photo_becomes_a_page_with_the_stored_image_and_the_blocks(tmp_path):
+    """照片进 → 存图（内容哈希前 12 位，与 #13 同一套命名）+ 建页文件 + 返回块列表。"""
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    status, envelope = post_page(api, blob)
+
+    assert status == 200, envelope
+    page_id = envelope["data"]["created"][0]
+    assert page_id == hashlib.sha256(blob).hexdigest()[:12]
+    # 照片真的落盘了，且逐字节相同
+    assert (api.catalog.pages_dir / f"{page_id}.png").read_bytes() == blob
+    saved = json.loads((api.catalog.pages_dir / f"{page_id}.json").read_text(encoding="utf-8"))
+    assert saved["id"] == page_id and saved["image"] == f"{page_id}.png"
+    assert saved["origin"]["original_file"] == "page.png"
+    assert [b["question_no"] for b in saved["blocks"]] == [17, 18]
+    assert [b["card_id"] for b in saved["blocks"]] == [None, None]
+    # 报告的块就是页文件里那些（含统计与建议去留）
+    report = envelope["data"]["pages"][0]
+    assert [b["id"] for b in report["blocks"]] == ["b1", "b2"]
+    assert report["created"] is True and report["segmentation"] == "ran"
+
+
+def test_the_blocks_carry_the_page_pixel_box_derived_from_the_photo_size(tmp_path):
+    """块边界的两套基准：`bbox_norm` 用模型给的（规范基准），`bbox_px` 按照片尺寸推出来。
+
+    #11 的红笔统计读的是 `bbox_px`（整页像素 xyxy），所以这一栏必须有值——它是**新增页**
+    的初值（回填那条路照抄盘上原值，D5；新页没有原值可抄）。
+    """
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    _, envelope = post_page(api, blob)
+    blocks = envelope["data"]["pages"][0]["blocks"]
+
+    assert blocks[0]["bbox_px"] == [0, 0, 40, 20]
+    assert blocks[1]["bbox_px"] == [60, 0, 100, 20]
+
+
+def test_blocks_get_ink_statistics_and_a_suggested_keep_from_the_one_implementation(tmp_path):
+    """建的产出含**每块的红笔统计与建议去留**——统计归 #11、去留归 #12，本动作不另判。"""
+    from server import intake
+
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    _, envelope = post_page(api, blob)
+    blocks = {b["id"]: b for b in envelope["data"]["pages"][0]["blocks"]}
+
+    # 左块是红笔 → 有红笔、没有语义可问 → 判不准 → 收（#12 的规则，兜底那一档）
+    assert blocks["b1"]["ink"]["colored_px"] > ink.COLOR_MIN_PIXELS
+    assert blocks["b1"]["keep"] is True
+    assert blocks["b1"]["decision"]["source"] == intake.SOURCE_FALLBACK
+    # 右块只有黑笔 → 没有红笔痕迹 → 不入库（唯一那个「不收」的例外之外的一档）
+    assert blocks["b2"]["ink"]["colored_px"] == 0
+    assert blocks["b2"]["keep"] is False
+    assert blocks["b2"]["decision"]["rule"] == intake.RULE_NO_RED_INK
+    # 「没问模型」这件事必须说出来，不许安静兜底
+    assert intake.INTAKE_SEMANTICS_FALLBACK in {w["code"] for w in envelope["warnings"]}
+
+
+# ---------------------------------------------------------------- 幂等
+
+
+def test_uploading_the_same_photo_twice_keeps_the_first_page_and_does_not_cut_again(tmp_path):
+    """同一张照片再传一次 = 同一个页 id：报「已经有了」，**不重跑切分、不覆盖块列表**。"""
+    blob, _ = a_photo(tmp_path)
+    segmenter = static_segmenter(TWO_BLOCKS)
+    api = build_api(tmp_path, segmenter=segmenter)
+    _, first = post_page(api, blob)
+    page_id = first["data"]["created"][0]
+    before = (api.catalog.pages_dir / f"{page_id}.json").read_bytes()
+
+    status, second = post_page(api, blob)
+
+    assert status == 200
+    assert second["data"]["created"] == []
+    assert second["data"]["existing"] == [page_id]
+    assert len(segmenter.calls) == 1, "第二次不许再调切分（那是花钱的那一步）"
+    assert (api.catalog.pages_dir / f"{page_id}.json").read_bytes() == before
+    assert "page_already_exists" in {w["code"] for w in second["warnings"]}
+
+
+# ---------------------------------------------------------------- 拒绝/跳过路径（D9）
+
+
+def test_a_model_failure_leaves_not_one_byte_behind(tmp_path):
+    """模型失败 → **502**，而且连 `pages/` 目录都不该被建出来（D1/D9：拒绝不留痕迹）。"""
+    from server.model_client import ModelUnavailable
+
+    def broken(path):
+        raise ModelUnavailable("连接超时（假的）")
+
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=broken)
+
+    status, envelope = post_page(api, blob)
+
+    assert status == 502
+    assert envelope["error"]["code"] == "model_unavailable"
+    assert envelope["error"]["reason"] == "model_unavailable"
+    assert envelope["error"]["details"]["id"] == hashlib.sha256(blob).hexdigest()[:12]
+    assert not api.catalog.pages_dir.exists(), "拒绝路径不许把目录建出来"
+    assert list(api.catalog.problems_dir.glob("*.json")) == []
+
+
+def test_without_a_segmenter_the_page_is_not_created(tmp_path):
+    """切分不可用 → 页**不建**、`blocks` 给 `null`（不是 `[]`），并说清是哪一项没做。"""
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path)
+
+    status, envelope = post_page(api, blob)
+
+    assert status == 200
+    assert envelope["data"]["created"] == []
+    row = envelope["data"]["pages"][0]
+    assert row["blocks"] is None and row["created"] is False
+    assert envelope["data"]["segmentation"]["available"] is False
+    assert "segmentation_not_implemented" in {w["code"] for w in envelope["warnings"]}
+    assert not api.catalog.pages_dir.exists()
+    assert list(api.catalog.pages_dir.glob("*.png")) == []
+
+
+def test_a_segmentation_that_cannot_be_parsed_is_not_an_empty_page(tmp_path):
+    """模型答了话但抠不出块 → 这是「切分没跑成」，**不是**「这一页没有题」：页不建。"""
+    blob, _ = a_photo(tmp_path)
+    api = build_api(tmp_path, segmenter=lambda path: "这一页我看不清，就不给 JSON 了")
+
+    status, envelope = post_page(api, blob)
+
+    assert status == 200
+    assert envelope["data"]["created"] == []
+    row = envelope["data"]["pages"][0]
+    assert row["blocks"] is None and row["segmentation"] == "unparsed"
+    assert row["message"]
+    assert "page_segmentation_unparsed" in {w["code"] for w in envelope["warnings"]}
+    assert not api.catalog.pages_dir.exists()
+
+
+def test_a_request_without_a_photo_is_400_and_creates_nothing(tmp_path):
+    """不是 multipart / 没有 file 段 / 全是空文件 → **400**，且一个字节都不写。"""
+    api = build_api(tmp_path, segmenter=static_segmenter(TWO_BLOCKS))
+
+    raw = api.handle("POST", "/api/page", json.dumps({"image": "x.png"}).encode(),
+                     content_type="application/json")
+    json_envelope = json.loads(raw.body)
+
+    assert raw.status == 400
+    assert json_envelope["error"]["code"] == "bad_request"
+    assert json_envelope["error"]["details"]["allowed"] == ["multipart/form-data"]
+
+    body, content_type = multipart_body([("empty.png", b"")])
+    response = api.handle("POST", "/api/page", body, content_type=content_type)
+    envelope = json.loads(response.body)
+
+    assert response.status == 400
+    assert envelope["error"]["details"]["param"] == "file"
+    assert not api.catalog.pages_dir.exists()

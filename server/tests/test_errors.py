@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from conftest import get_json
 
 
@@ -32,23 +30,22 @@ def test_write_methods_on_read_only_endpoints_are_405(api_for):
     assert body["error"]["details"]["allowed"] == ["GET", "OPTIONS"]
 
 
-def test_reserved_write_namespaces_say_they_are_reserved():
-    """预留的动作要**明说自己还没实现**：含糊的 404 会让人以为是打错了字。
+def test_no_write_namespace_is_reserved_any_more(api_for):
+    """预留机制现在**一个动作都不剩**：#14 落了「改」「重切」，#15 落了「建」「入库」。
 
-    `/api/page*`（#14/#15）现在**路由都在**了，所以整条前缀不再是「预留命名空间」：
-    「改」「重切」在 #14 落地，「入库」在 #15 落地（见 `test_page_endpoints.py`
-    与 `test_page_commit.py`）；只剩「建」（归 #15 的下一块）走**带说明的 404**。
+    所以 `/api/page*` 的坏输入给的是 **400 带 `allowed`**（输入错），而不是
+    「预留、还没实现」的 404——两者混起来会让人分不清「我发错了」与「还没做」。
+    `RESERVED` 这张表本身留着：它是**将来**新增预留端点时的形状，不是死代码。
     """
-    from server.errors import ApiError
-    from server.page_api import PageEndpoint
+    from server.http import RESERVED
 
-    with pytest.raises(ApiError) as excinfo:
-        PageEndpoint.create_reserved()
-    payload = excinfo.value.payload()
-    assert excinfo.value.status == 404
-    assert payload["code"] == "not_found"
-    assert payload["details"]["reserved"] is True
-    assert "#15" in payload["details"]["owner"]
+    assert RESERVED == {}
+    r = api_for([]).handle("POST", "/api/page", b"{}", content_type="application/json")
+    body = json.loads(r.body)
+
+    assert r.status == 400
+    assert body["error"]["code"] == "bad_request"
+    assert "reserved" not in body["error"].get("details", {})
 
 
 def test_every_response_carries_cors_headers(api_for):

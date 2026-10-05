@@ -195,29 +195,37 @@ def parse_multipart(body: bytes, content_type: str) -> list[dict]:
     return parts
 
 
-def accept(inbox: Inbox, body: bytes, content_type: str, segmenter) -> tuple[dict, list, list]:
-    """`POST /api/inbox` 的全部逻辑。返回 `(data, warnings, skipped)`。"""
-    all_parts = parse_multipart(body, content_type)
-    files = [p for p in all_parts if p["field"] == "file"]
+def upload_files(parts: list[dict]) -> list[dict]:
+    """一次上传里的 `file` 段。**这两条拒绝是唯一实现**（#13 的收件目录与 #15 的「建」共用）。
+
+    - 没有 `file` 段 → 400：这次上传没有一个文件。
+    - **全是空文件** → 400，而且在**碰磁盘之前**：请求本身合法，只是没有一条记录建得出来
+      （裁决 D1：拒绝一律结构化 400，绝不裸 500）。这条分支只有「一次传的全部是空文件」
+      才走到——写错一个变量名就会退化成兜底 500 而没人发现，所以它必须有自己的测试，
+      且拒绝之后**一个字节都不该动**（连目录都不建）。
+    """
+    files = [p for p in parts if p["field"] == "file"]
     if not files:
         raise bad_request(
             "这次上传里没有一个名叫 file 的文件",
             hint="multipart 里每个文件都应该是 name=\"file\"；"
                  "手机上传页与 curl -F file=@照片.png 都会这么发",
-            param="file", value=sorted({p["field"] or "?" for p in all_parts}),
+            param="file", value=sorted({p["field"] or "?" for p in parts}),
             allowed=["file"],
         )
-
-    # 「全是空文件」在这里就拒掉，**在碰磁盘之前**：请求本身合法，只是没有一条记录
-    # 建得出来（裁决 D1：拒绝一律结构化 400，绝不裸 500）。这条分支只有「一次传的
-    # 全部是空文件」才走到——写错一个变量名就会退化成兜底 500 而没人发现，所以它
-    # 必须有自己的测试，且拒绝之后**一个字节都不该动**（连收件目录都不建）。
     if not any(part["blob"] for part in files):
         raise bad_request(
             "这次上传里没有一个非空的文件",
             hint="选一张照片或一个文件夹再试；空文件不会被收进收件目录",
             param="file", value=[p["name"] for p in files],
         )
+    return files
+
+
+def accept(inbox: Inbox, body: bytes, content_type: str, segmenter) -> tuple[dict, list, list]:
+    """`POST /api/inbox` 的全部逻辑。返回 `(data, warnings, skipped)`。"""
+    all_parts = parse_multipart(body, content_type)
+    files = upload_files(all_parts)
 
     inbox.ensure()
     warnings: list[dict] = []

@@ -5,7 +5,7 @@ spec #2 把界面的所有读写都收在**一个**接缝上：**模型调用与
 
 | 动作 | 路由 | 归属 |
 |---|---|---|
-| **建** | `POST /api/page` | 照片进 → 存图 + 建页文件 + 跑切分（照片管道归 #13，切分归 #10）→ **#15** 收口 |
+| **建** | `POST /api/page` | 照片进 → 存图 + 建页文件 + 跑切分（**#15 已落地**，`server/page_create.py`） |
 | **改** | `PATCH /api/page/<id>` | **#14**（`server/page_edit.py`），本模块接线 |
 | **重切** | `POST /api/page/<id>/resegment` | 跑切分 → 逐块**新增／保留**对照，**不写题卡**（#10 的 `classify_resegment`），本模块接线 |
 | **入库** | `POST /api/page/<id>/commit` | 按当前块列表生成题卡并回写绑定（**#15 已落地**，`server/page_commit.py`） |
@@ -16,9 +16,8 @@ spec #2 把界面的所有读写都收在**一个**接缝上：**模型调用与
 - 「重切」的三态在 `segmentation.classify_resegment` 里（匹配在 `pages.rebind` 里，#10）；
 - 页 id 的校验在 `pages.is_page_id` 里，加载/拒绝路径在 `intake._load_page` 里（#12）。
 
-**「建」为什么在这里是「预留、还没实现」**：#15 才拥有建页（它要 #13 的照片管道 +
-#10 的切分接缝一起）。本模块**不冒充**它成功——冒充成功比 404 更坏（ADR 0007 第 6 条），
-所以给 `reserved` + 归属工单。**「入库」已经在 #15 落地**（`commit` → `page_commit`）。
+四个动作现在**都落地了**（#14 两个、#15 两个）：建在 `server/page_create.py`、
+入库在 `server/page_commit.py`——本模块只做 HTTP 形状的翻译，一条规则都不实现。
 
 **模型失败 → 502**（D1）：切分是模型调用，`ModelUnavailable` 往上抛给 HTTP 层变成
 502 `model_unavailable`，**页文件一个字节都不动**——重切本来也不写盘。
@@ -29,7 +28,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import assets, errors, page_commit, page_edit, segmentation
+from . import assets, errors, page_commit, page_create, page_edit, segmentation
 from .intake import _load_page
 from .model_client import ModelUnavailable
 from .warnings import _warn
@@ -38,9 +37,6 @@ from .warnings import _warn
 # 同一个码——不然界面上会有两个说法（契约 §8 的码表纪律）。
 SEGMENTATION_NOT_IMPLEMENTED = "segmentation_not_implemented"
 
-# 「建」的归属工单（`reserved` 的说明里点名，别让人以为是打错了字）。
-# 「入库」在 #15 已经落地（`commit` → `page_commit.commit_page`），不再是预留。
-CREATE_OWNER = "页资源的「建」（照片 → 存图 + 建页文件 + 跑切分）归 #15（#13 的照片管道 + #10 的切分）"
 
 
 def parse_json_body(body) -> dict:
@@ -219,6 +215,16 @@ class PageEndpoint:
 
     # ------------------------------------------------------------ 建 / 入库
 
+    def create(self, body, content_type: str) -> tuple[dict, list[dict]]:
+        """`POST /api/page`（建）：照片 → 存图 + 建页文件 + 跑切分 + 红笔统计与建议去留。
+
+        **规则不在这里**（`server/page_create.py: create_pages` 是唯一实现）：
+        本模块只把 body／content_type 交给它。请求形状与 `POST /api/inbox` 一致
+        （multipart、字段名 `file`），所以手机上传页与 curl 用同一套发法。
+        """
+        return page_create.create_pages(
+            self.catalog, body=body, content_type=content_type, segmenter=self.segmenter)
+
     def commit(self, page_id: str) -> tuple[dict, list[dict]]:
         """`POST /api/page/<id>/commit`（入库）：按块列表生成题卡 + 回写绑定 + 重建索引。
 
@@ -229,15 +235,6 @@ class PageEndpoint:
         页 id 非法/载荷不对账 → 400、页不在 → 404、页文件读不了 → 500，**一个字节都不写**。
         """
         return page_commit.commit_page(self.catalog, page_id)
-
-    @staticmethod
-    def create_reserved() -> None:
-        """`POST /api/page`（建）归 #15：**明说自己还没实现**，绝不冒充成功。"""
-        raise errors.not_found(
-            "页资源的「建」还没实现（归 #15）",
-            hint=CREATE_OWNER,
-            reserved=True, owner=CREATE_OWNER,
-        )
 
     # ------------------------------------------------------------ 内部
 
@@ -266,16 +263,11 @@ class PageEndpoint:
     def _as_candidates(outcome) -> dict:
         """切分接缝的返回值 → `parse_candidate_blocks` 的统一形状。
 
-        接缝可以给**模型原文**（走 `segmentation.parse_candidate_blocks` 那套抠 JSON
-        与逐条拒块的理由），也可以给已经解析好的对象（注入的假切分器）。两种都收，
-        与 `parse_candidate_blocks` 自己的入口口径一致。
+        **这一处实现搬到 `page_create.as_candidates` 了**（「建」与「重切」都要它，
+        两份就会各判各的）；这里保留同名委托，免得调用点与测试要改。
         """
-        if isinstance(outcome, (str, bytes)):
-            return segmentation.parse_candidate_blocks(outcome)
-        if isinstance(outcome, dict) and "parsed" in outcome and "blocks" in outcome:
-            return outcome        # 已经是统一形状（假切分器常这么给）
-        return segmentation.parse_candidate_blocks(outcome)
+        return page_create.as_candidates(outcome)
 
 
 __all__ = ["PageEndpoint", "parse_json_body", "SEGMENTATION_NOT_IMPLEMENTED",
-           "CREATE_OWNER", "ModelUnavailable"]
+           "ModelUnavailable"]

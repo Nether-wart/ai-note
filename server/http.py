@@ -185,7 +185,7 @@ class Api:
         # 好让「用错方法」得到 405（带 allowed）而不是含糊的 404。
         if path == "/api/page":
             self._require(method, "POST")
-            return self._page_create()
+            return self._page_create(body, content_type)
         if path.startswith("/api/page/"):
             return self._page_route(method, path, body)
 
@@ -256,10 +256,10 @@ class Api:
 
         raise not_found(f"没有这条路由：{path}", hint="页资源的动作见契约 §10.2")
 
-    def _page_create(self) -> Response:
-        """`POST /api/page`（建）归 #15——明说自己还没实现，不冒充成功。"""
-        self.pages.create_reserved()
-        raise AssertionError("unreachable")   # pragma: no cover —— create_reserved 总会抛
+    def _page_create(self, body: bytes | str | None, content_type: str) -> Response:
+        """`POST /api/page`（建）：照片 → 存图 + 建页文件 + 跑切分（#15，`page_create`）。"""
+        data, warnings = self.pages.create(body, content_type)
+        return json_response(200, data=data, warnings=warnings)
 
     # ------------------------------------------------------------ 上传页
 
