@@ -8,7 +8,9 @@ user story 明写「端到端测试用临时题卡、测完即删，真实的题
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +28,37 @@ PNG_1X1 = base64.b64decode(
 
 # 一个远在过去、远离冷却窗口的时刻，让「是否在冷却」不随运行时刻漂移。
 LONG_AGO = "2020-01-01T00:00:00+08:00"
+
+
+# 代理环境变量：真传输（`model_client.default_transport` → stdlib `urllib`）会读它们。
+# 脱网自证用的死代理、公司代理都会让「连 127.0.0.1」的请求被送到代理上去，于是
+# 「真 HTTP 客户端能把请求发出去」那几条用例因为**环境**而红——而它们测的不是
+# 代理配置对不对（作业单 8）。
+PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+             "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,0.0.0.0"
+
+
+@contextlib.contextmanager
+def loopback_transport_env():
+    """临时把代理环境变量收干净，让真传输只走本机回环（作业单 8）。
+
+    「连接失败时的形状」另有**注入的** `FakeTransport(OSError(...))` 桩
+    （`test_judge_client.py` / `test_intake_client.py` 各一条），不依赖真网络；
+    这里解决的是另一半：本机回环那两条真传输用例不许依赖「环境里恰好没设代理」。
+    """
+    saved = {name: os.environ.get(name) for name in PROXY_ENV}
+    for name in PROXY_ENV:
+        os.environ.pop(name, None)
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = LOOPBACK_NO_PROXY
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def make_card(pid: str = "p-20200101-aaaaaa", **overrides) -> dict:

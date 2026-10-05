@@ -290,9 +290,15 @@ def test_the_real_transport_really_sends_the_image(cfg, tmp_path, page_png):
 
     这是「接缝后面那一层」唯一没有假 transport 覆盖的地方：Authorization 头、
     多段 content、以及**图真的发出去了**。仍然不联网、不花钱（本机回环）。
+
+    `loopback_transport_env()`：机器上设了代理（脱网自证的死代理、公司代理）时，
+    `urllib` 会把连 `127.0.0.1` 的请求也送去代理——这条用例不该因为**环境里有代理**
+    而红（作业单 8）。
     """
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from conftest import loopback_transport_env
 
     seen: dict = {}
 
@@ -323,7 +329,8 @@ def test_the_real_transport_really_sends_the_image(cfg, tmp_path, page_png):
         semantics = intake_client.HttpSemantics(cfg, tmp_path / "runs",
                                                 env={"DEEPSEEK_API_KEY": KEY})
 
-        answer = semantics(BLOCK, STATS, page_png)
+        with loopback_transport_env():
+            answer = semantics(BLOCK, STATS, page_png)
     finally:
         httpd.shutdown()
         httpd.server_close()

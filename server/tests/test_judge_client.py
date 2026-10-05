@@ -247,9 +247,15 @@ def test_the_real_urllib_transport_works_against_a_local_server(tmp_path):
 
     这是「接缝后面那一层」唯一没有假 transport 覆盖的地方：Authorization 头、
     JSON body、状态码与响应读取。仍然不联网、不花钱（本机回环）。
+
+    `loopback_transport_env()`：机器上设了代理（脱网自证的死代理、公司代理）时，
+    `urllib` 会把连 `127.0.0.1` 的请求也送去代理——这条用例测的是真客户端能不能
+    把请求发出去，不该因为**环境里有代理**而红（作业单 8）。
     """
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from conftest import loopback_transport_env
 
     seen: dict = {}
 
@@ -280,7 +286,8 @@ def test_the_real_urllib_transport_works_against_a_local_server(tmp_path):
                                  threshold=0.9)
         judge = HttpJudge(cfg, tmp_path / "runs", env={"DEEPSEEK_API_KEY": KEY})
 
-        call = judge("A", "B")
+        with loopback_transport_env():
+            call = judge("A", "B")
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -291,3 +298,59 @@ def test_the_real_urllib_transport_works_against_a_local_server(tmp_path):
     assert [m["role"] for m in seen["payload"]["messages"]] == ["system", "user"]
     assert json.loads(call.text)["equivalent"] is True
     assert (tmp_path / "runs" / call.run_id).is_file()
+
+
+def test_a_dead_proxy_does_not_break_a_loopback_transport_call(monkeypatch, tmp_path):
+    """死代理摆在环境里，本机回环的真传输仍然通（作业单 8 要的那条性质）。
+
+    **修前**：`urllib` 把连 `127.0.0.1` 的请求也送去死代理 → `URLError: Connection
+    refused`，于是「死代理下全套全绿」这条脱网证明不再成立。#14 与 #15 都在基线 tip
+    上撞到过这两条（`test_judge_client` / `test_intake_client` 各一条）。
+    **修后**：本机回调的用例显式把代理环境收干净，仍然真走一遍 stdlib transport。
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from conftest import loopback_transport_env
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            blob = OK_BODY.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+
+        def log_message(self, *args):
+            pass
+
+    # 死代理 + **不含 127.0.0.1 的 NO_PROXY**：这正是让本机回环被送去代理的组合
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "localhost,0.0.0.0")
+    monkeypatch.setenv("no_proxy", "localhost,0.0.0.0")
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+        cfg = config.JudgeConfig(role="judge", provider="deepseek", base_url=base,
+                                 model="deepseek-flash", key_env="DEEPSEEK_API_KEY",
+                                 threshold=0.9)
+        judge = HttpJudge(cfg, tmp_path / "runs", env={"DEEPSEEK_API_KEY": KEY})
+
+        with loopback_transport_env():
+            call = judge("A", "B")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    assert json.loads(call.text)["equivalent"] is True
