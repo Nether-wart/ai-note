@@ -472,3 +472,58 @@ def page_block_reports(image: InkImage, page: dict) -> list[dict]:
             report["message"] = None
         reports.append(report)
     return reports
+
+
+def page_ink_regions(image: InkImage) -> list[dict]:
+    """整页墨迹 → **连通区域**列表（`{"bbox_norm": [x, y, w, h], "px": N}`）。
+
+    这是覆盖率对账（`segmentation.check_coverage`）唯一的输入来源：它问的是
+    「**一片墨迹**有没有被框住」，所以要把散落的墨迹像素聚回成片。判据是
+    **八连通**（对角贴着算同一片）——笔画是连着画的，四连通会把一笔拆成几片。
+
+    **红笔与深色都算墨迹**（两个掩膜的并集）：墨迹不只是黑笔——红笔订正同样是
+    页面上该被框住的内容；只数深色会把一整片红笔订正漏出覆盖率之外。
+    这**不是**判定：本函数只回答「哪一片、多少像素」，语义归 #12。
+
+    输出按**行优先**（左上角先）——同一张图永远给同一个列表（确定性；
+    测试与界面都按这个顺序读）。`bbox_norm` 是整页归一化 xywh（D5 的规范基准），
+    `px` 是这一片里的墨迹像素数（与 `check_coverage` 的 `px` 同一口径）。
+    """
+    width, height = image.width, image.height
+    colored, dark = ink_masks(image)      # 整张图只走一遍：两个掩膜一起造
+    ink_px = [c or d for c, d in zip(colored, dark)]
+    seen = bytearray(width * height)
+    regions: list[dict] = []
+    for start in range(width * height):
+        if not ink_px[start] or seen[start]:
+            continue
+        # 显式栈的洪泛填充：百万像素级的整页照片不许用递归（栈会爆）。
+        seen[start] = 1
+        stack = [start]
+        count = 0
+        min_x = max_x = start % width
+        min_y = max_y = start // width
+        while stack:
+            index = stack.pop()
+            count += 1
+            x, y = index % width, index // width
+            min_x, max_x = min(min_x, x), max(max_x, x)
+            min_y, max_y = min(min_y, y), max(max_y, y)
+            for ny in (y - 1, y, y + 1):
+                if ny < 0 or ny >= height:
+                    continue
+                base = ny * width
+                for nx in (x - 1, x, x + 1):
+                    if nx < 0 or nx >= width:
+                        continue
+                    neighbour = base + nx
+                    if ink_px[neighbour] and not seen[neighbour]:
+                        seen[neighbour] = 1
+                        stack.append(neighbour)
+        regions.append({
+            "bbox_norm": [min_x / width, min_y / height,
+                          (max_x - min_x + 1) / width, (max_y - min_y + 1) / height],
+            "px": count,
+        })
+    return regions
+

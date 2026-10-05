@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import assets, errors, page_commit, page_create, page_edit, segmentation
+from . import assets, errors, ink, page_commit, page_create, page_edit, segmentation
 from .intake import _load_page
 from .model_client import ModelUnavailable
 from .warnings import _warn
@@ -181,14 +181,21 @@ class PageEndpoint:
 
         cards = {card.get("id"): card for card in self._cards() if card.get("id")}
         report = segmentation.classify_resegment(page, parsed["blocks"], cards=cards)
+        # 对账（R1）：三条确定性判据跑在**这次重切给出的块列表**上——题号连续性／
+        # 块重叠是纯几何，覆盖率读页文件旁边那张整页照片（读不出来就明说「没查」）。
+        # **只报不改**：重切本来就不写盘（见 docstring）。
+        reconciliation = segmentation.reconcile_response(
+            report["blocks"], self._ink_regions(page))
         return {
             "page_id": page_id,
             "segmentation": "ran",
             "ran": True,
             "rejected": parsed.get("rejected") or [],
             "message": parsed.get("message"),
+            "checks": reconciliation["checks"],
+            "reconciliation": reconciliation["reconciliation"],
             **report,
-        }, warnings + list(report.get("warnings") or [])
+        }, warnings + list(report.get("warnings") or []) + reconciliation["warnings"]
 
     # ------------------------------------------------------------ 整页照片
 
@@ -258,6 +265,17 @@ class PageEndpoint:
             if isinstance(card, dict) and card.get("id"):
                 cards.append(card)
         return cards
+
+    def _ink_regions(self, page: dict):
+        """页文件旁边那张整页照片 → 墨迹区域（覆盖率对账的输入，契约 §8）。
+
+        读不了 / 不在 → `None`：`check_coverage` 会明说**这一条没查**（hint），
+        而不是冒充「没有未覆盖的墨迹」——「没查」与「查过没问题」必须长得不一样。
+        """
+        try:
+            return ink.page_ink_regions(ink.read_png(self._image_path(page)))
+        except (OSError, ink.UnsupportedImage):
+            return None
 
     @staticmethod
     def _as_candidates(outcome) -> dict:

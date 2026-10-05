@@ -1006,10 +1006,23 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | 动作 | 路由 | 请求 | 响应 `data` | 状态 |
 |---|---|---|---|---|
 | 改 | `PATCH /api/page/<id>` | `{dry_run?: bool, edits: [{action, …}]}` | `{page_id, page_path, apply, preview, changed, edits[], page, wrote_cards, wrote_page}` | **已实现** |
-| 重切 | `POST /api/page/<id>/resegment` | 无 body | `{page_id, segmentation, ran, blocks\|null, matches[]\|null, removed[]\|null, summary\|null, rejected[], wrote_cards, wrote_page}` | **已实现** |
+| 重切 | `POST /api/page/<id>/resegment` | 无 body | `{page_id, segmentation, ran, blocks\|null, matches[]\|null, removed[]\|null, summary\|null, rejected[], wrote_cards, wrote_page, checks, reconciliation}` | **已实现** |
 | 整页照片 | `GET /api/page/<id>/image` | — | 图片字节（失败仍是 JSON 信封） | **已实现** |
-| 建 | `POST /api/page` | `multipart/form-data`，字段名 `file`（与 `POST /api/inbox` 同一形状；一个文件 = 一页） | `{pages: [{page_id, page_path, image, created, existing, segmentation, blocks\|null, rejected?, message, counts?, not_kept?}], created[], existing[], segmentation{available,reason,message}, wrote_pages}` | **已实现（#15，`server/page_create.py`）** |
+| 建 | `POST /api/page` | `multipart/form-data`，字段名 `file`（与 `POST /api/inbox` 同一形状；一个文件 = 一页） | `{pages: [{page_id, page_path, image, created, existing, segmentation, blocks\|null, rejected?, message, counts?, not_kept?, checks?, reconciliation?}], created[], existing[], segmentation{available,reason,message}, wrote_pages}` | **已实现（#15，`server/page_create.py`）** |
 | 入库 | `POST /api/page/<id>/commit` | 无 | `{page_id, page_path, at, blocks{total,kept,dropped,pending,not_an_object}, created[], reused[], skipped[], refused[], wrote_page, wrote_cards, index{count,card_ids,built_at,warnings,skipped}}` | **已实现（#15，`server/page_commit.py`）** |
+
+**`checks` 与 `reconciliation`：确定性对账进生产路径（R1）**。「建」与「重切」两条路都跑
+`segmentation.reconcile` 的三条判据（题号连续性／块重叠／覆盖率），只报不改：
+
+| 键 | 是什么 |
+|---|---|
+| `checks` | 三条判据各自的**事实**：`{question_numbers, overlaps, coverage}`。§8 说的「排除了哪些在 `checks.coverage.excluded` 里」就是这里；`coverage.checked: false` 表示没有墨迹统计可喂（覆盖率这一条**没查**，不许当成通过） |
+| `reconciliation` | 汇总读数：`{blocks, checks_run, checks_skipped, alarms, ok, complete}`。`ok` 只覆盖**查过的**那部分，`complete` 说清有没有判据在瞎着——「查过且通过」与「没查」必须长得不一样 |
+
+覆盖率要整页墨迹区域（`ink.page_ink_regions`：八连通，红笔与深色取并集）。重切那条路读
+页文件旁边那张整页照片；读不出来 / 不在 → `ink` 为 `None` → `coverage_not_checked`（hint）。
+「建」的 `checks`/`reconciliation` 只在 `segmentation == "ran"` 那一行出现（已存在的页不重跑
+切分，也就没有新的对账结论要说）。
 
 **「建」的四条规矩**（#15）：
 
@@ -1225,6 +1238,8 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（最终修复 pass） | §9 补 `bad_request` 的 `reason: "body_too_large"` 与「写端点 body 的显式上限 64 KiB」一段；§10.1 的错误表加一行；上限按路由由 `Api.body_limit` 一处判，`app.py` 在读 body 之前就用它 | 最终修复 pass 作业单 2（来源 #5 的 merger 给的真反例：2MB 合法 JSON → 200，`_read_body` 按 `Content-Length` 整段读进内存、作答还会发给模型）。#13 之后服务要经 Tailscale 给手机用，所以这条要在**进模型之前**拒绝且不留记录（D1/D9）。裁决用 **400**（不是上传那档的 413）：写端点的 body 只有几个键，超限是「参数写错」那一类；上传那档仍是 413（见 §10.3） |
 | 本版（最终修复 pass） | §10.3 加第 5 条：切分接缝上的模型失败 → 502 `model_unavailable`（`message` 点名哪一页、`hint` 说明照片没丢、不回滚收件目录里的照片）。`errors.model_unavailable` 加可覆盖的 `hint` | 最终修复 pass 作业单 7（#10 明说的未做项）。`inbox.run_pipeline` 以前直接调 `segmenter(...)`：`ModelUnavailable` 只能靠 HTTP 层的兜底 catch 变成 502（`details.id` 是 `null`），既不点名哪一页，`hint` 还写着「没有留下任何记录」——可照片明明已经收在收件目录里，那是**说反话**。现在接缝显式走 `errors.py` 的唯一实现；扫描那条路上的照片不是这次请求建的，回滚它在语义上根本不成立 |
 | 本版（最终修复 pass） | §8 没有改码表，但补齐了三个出口的 `level`：`catalog.problem_id_mismatch`、`pages.backfill_pages` 的 5 条、`pages.rebind` 的 3 条一律走 `warnings._warn`（裁决 (a)：`rebind` 不是「内部结构、由消费方补级别」）；`card_warnings` 的 `standard_answer_missing` 在 `problem.type == "solution"` 时降为 `hint`（非解答题仍是 `warning`） | 最终修复 pass 作业单 3/3b/5/9。§2 要求 `level` **总是显式发出来**，手搓 dict 让它取决于「谁在读」；解答题没有标准答案是**预期状态**（原型 `--audit` 一直这么降级），报 `warning` 会把它淹在噪声里，与 D3/D4「提示与警告分级」的一贯口径冲突 |
+| 本版（R1：对账进生产路径） | §10.2.1b：`POST /api/page` 与 `POST …/resegment` 的响应加 `checks` / `reconciliation` 两键（定义见该节的表）；§12 的 `server/ink.py`／`server/segmentation.py` 两行点明 `page_ink_regions`／`reconcile_response` | 第二轮修复 pass R1。#10 交付了确定性的三条判据，但**只有测试调用它**——生产路径上「静默丢题」照样是静默的。现在两条路都跑并结构化报出来，**只报不改**（切分仍由人确认）。覆盖率必须真的跑：`ink.page_ink_regions` 是整页墨迹区域唯一的实现（八连通，红笔∪深色），读不出来时明说「没查」而不是冒充通过 |
+
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
@@ -1237,8 +1252,8 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/inbox.py` | **收件目录与管道接缝**：收文件（内容哈希命名）、`POST /api/inbox/scan` 的手动扫描、`multipart/form-data` 解析。**切分（#10）的接缝**在这里：可注入 `segmenter`，不注入就报 `segmentation_not_implemented`、`blocks` 给 `null`——不许编块列表 |
 | `server/static/upload.html` | 手机上传页：**一个文件**，无构建步骤、不引任何外部资源。改它不用碰 Python |
 | `server/pages.py` | **页的唯一实现**（B1）：页文件读写、`page_binding`（「这张卡有没有页绑定」，含旧卡提示 vs 页↔卡对不上账的两级）、`rebind`（重切按位置重合保留绑定）、`allocate_card_id`/`assign_card_ids`（首次入库时分配 id）。#10/#12/#14/#15 **消费它，不许再写一份**——否则「重切不给已审核的卡改名」这句话不成立 |
-| `server/segmentation.py` | **切分与对账的唯一实现**（B2 / #10）：模型候选块的解析与校验、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`classify_resegment` 的新增／保留对照。它**消费** `pages.rebind`，不重写匹配；对账码表见 §8 的「页级对账码表」 |
-| `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出 |
+| `server/segmentation.py` | **切分与对账的唯一实现**（B2 / #10）：模型候选块的解析与校验、三条确定性判据（题号连续性／块重叠／覆盖率）、`reconcile` 的结构化结论、`reconcile_response`（把它摊成响应形状 `checks`／`reconciliation`，建与重切共用一处映射）、`classify_resegment` 的新增／保留对照。它**消费** `pages.rebind` 与 `ink.page_ink_regions`，不重写匹配也不碰图；对账码表见 §8 的「页级对账码表」 |
+| `server/ink.py` | **红笔痕迹阈值的唯一定义处 + 统计的唯一实现**（B3）：`COLORED_SATURATION_MIN`（像素级，一颗像素算不算红笔）与 `COLOR_MIN_PIXELS`（框级，一个框里几个像素才算有红笔）是**两颗回答不同问题的常量**，筛选、体检、擦除三条路径都读它们；深色掩膜的两颗（`DARK_MAX_LIGHTNESS`/`DARK_MAX_SATURATION`）也在这里。`ink_statistics` **只回答「有没有红笔、多少」**，不出任何语义字段（勾／订正由模型判，归 #12）；`cropcheck` 才是「框里有没有红笔」的判据。契约 §10.2.1 为块预留的 `ink` 键由 `page_block_reports` 产出；`page_ink_regions` 产出**整页墨迹区域**（八连通，覆盖率对账唯一的输入来源，R1） |
 | `server/model_client.py` | **与角色无关的模型调用底座**（B4 / #12 抽出）：`default_transport`（标准库 HTTP，`server/` 零第三方依赖）、`extract_json`、`ModelUnavailable`、`save_run`（`runs/<stamp>-<tag>.json`，图片一律不入档）。#5 的判定角色与 #12 的抽取角色共用这一条管道——**留两份 HTTP 客户端就是两份重试/留档/失败分类** |
 | `server/intake.py` | **收入决策的唯一实现**（B4 / #12）：`decide_block`（规则表：错痕迹→收／纯对勾→不收／判不准→收／没有红笔→不入库／统计读不出来→待定）、`plan_decisions`（写 `keep`+`ink`+`decision`，报出「另有 M 道…未入库」的可枚举报告）、`include_blocks`（一键补收）、`run_intake`。它**消费** `ink`（统计）与 `pages`（页文件），自己既不数像素也不造页结构 |
 | `server/intake_client.py` | **抽取角色的接缝**（B4 / #12）：红笔语义的提示词与消息形状（**要看图**，与判定角色的纯文本相反）、`parse_semantics`（答不出语义是「判不准」不是调用失败）、`image_data_url`。留档 tag `redpen-semantics`；改提示词必须重跑抽取角色的考卷 |

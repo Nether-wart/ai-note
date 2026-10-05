@@ -566,6 +566,21 @@ def reconcile(blocks, ink=None, *, covered_min: float = COVERED_MIN,
     }
 
 
+def reconcile_response(blocks, ink=None) -> dict:
+    """`reconcile` 的结论 → **生产路径要的三个键**（`checks` / `reconciliation` / `warnings`）。
+
+    「建」（`server/page_create.py`）与「重切」（`server/page_api.py`）两条路都要把
+    同一条对账结论摊成同一个响应形状；两处各写一遍映射迟早会长歪，而**形状是契约的
+    一部分**（§8「排除了哪些在 `checks.coverage.excluded` 里」），所以只有这一处。
+
+    **只报不改**：这里不碰块列表、不写盘——切分仍由人确认（spec #2）。
+    `ink` 为 `None` 时覆盖率那一条会明说「没查」（hint），不冒充通过。
+    """
+    report = reconcile(blocks, ink)
+    return {"checks": report["checks"], "reconciliation": report["summary"],
+            "warnings": report["warnings"]}
+
+
 def _cards_by_id(cards) -> dict:
     """`cards` 可以是「id → 卡」的映射，也可以是一串卡；两种都收。"""
     if not cards:

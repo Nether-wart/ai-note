@@ -213,6 +213,11 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
     _write_photo(catalog, stored_as, blob)
     pages.save_page(catalog, saved, page_id=page_id, apply=True)
 
+    # 对账（R1）：三条确定性判据跑在**刚落盘的块列表**上，把「静默丢题」变成响声。
+    # **只报不改**（切分仍由人确认）；墨迹区域读不出来时覆盖率那一条会明说「没查」。
+    reconciliation = segmentation.reconcile_response(
+        saved["blocks"], ink.page_ink_regions(image) if image is not None else None)
+
     return {
         "page_id": page_id,
         "page_path": str(path),
@@ -225,7 +230,9 @@ def _create_one(catalog, part: dict, segmenter, moment, stamp: str) -> tuple[dic
         "message": parsed.get("message"),
         "counts": plan["counts"],
         "not_kept": plan["not_kept"],
-    }, warnings + list(plan["warnings"])
+        "checks": reconciliation["checks"],
+        "reconciliation": reconciliation["reconciliation"],
+    }, warnings + list(plan["warnings"]) + reconciliation["warnings"]
 
 
 def create_pages(catalog, *, body, content_type, segmenter, at=None) -> tuple[dict, list[dict]]:
