@@ -190,3 +190,19 @@ def test_the_map_can_name_a_card_that_does_not_exist(tmp_path):
 
     assert report["counts"]["skipped"] == 1
     assert report["skipped"][0]["code"] == subject_assign.CARD_MISSING
+
+
+def test_the_summary_says_whether_it_actually_wrote(tmp_path, capsys):
+    """`--apply` 之后仍印「会改」是**说反话**——而那一行是人做完回填之后唯一会读的一句话。"""
+    from server import subject_assign
+
+    root = make_data_dir(tmp_path, [make_card("p-20200101-aaaaaa", **{"subject": None})])
+    mapping = _map_file(tmp_path, {"p-20200101-aaaaaa": "数学"})
+
+    assert subject_assign.main(["--data", str(root), "--map", mapping]) == 0
+    assert "会改 1 张" in capsys.readouterr().err
+
+    assert subject_assign.main(["--data", str(root), "--map", mapping, "--apply"]) == 0
+    err = capsys.readouterr().err
+    assert "已改 1 张" in err
+    assert "会改 1 张" not in err, "写过了还说「会改」——那句话会让人以为没生效，再跑一遍"

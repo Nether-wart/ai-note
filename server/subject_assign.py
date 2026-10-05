@@ -173,9 +173,13 @@ def main(argv: list[str] | None = None) -> int:
     verdict = ("已写回" if args.apply and not blocked
                else "预演（一个字节都没写；要写加 --apply）" if not blocked
                else "**什么都没写**：映射表里有不在词表里的科目")
+    # 「已改」还是「会改」要看这一趟到底写没写：`--apply` 之后仍印「会改」是**说反话**，
+    # 而这一行是人做完回填之后唯一会读的那句话。
+    verb = "已改" if (args.apply and not blocked) else "会改"
     print(
         f"{verdict}：{counts['cards_on_disk']} 张卡，映射表给了 {counts['in_map']} 条"
-        f"（会改 {counts['will_change']} 张、不变 {counts['unchanged']} 张，跳过 {counts['skipped']} 条）；"
+        f"（{verb} {counts['will_change']} 张、不变 {counts['unchanged']} 张，"
+        f"跳过 {counts['skipped']} 条）；"
         f"仍有 {counts['still_unclassified']} 张**未归类**",
         file=sys.stderr,
     )
