@@ -533,6 +533,65 @@ def test_a_page_that_is_not_there_is_a_404_not_a_crash(api_for):
     assert excinfo.value.payload()["code"] == "not_found"
 
 
+def test_a_page_whose_payload_id_points_outside_the_pages_dir_is_refused(api_for):
+    """**页载荷里的 `id` 不许决定写到哪**——写回路径只能由「我加载时用的那个页 id」定。
+
+    这是一条真实的攻击路径（#12 的独立验证发现）：`pages.save_page` 用 `page["id"]`
+    拼路径，所以一份 `id: "../problems/p-xxx"` 的页文件会让一次"改页"**覆盖一张真题卡**，
+    而且报告里的 `page_path` 还是假的（指向没被碰过的那份页文件）——零警告。
+
+    拒绝时**一个字节都不许动**：题卡与页文件都要原封不动（D9 第 2 条）。
+    """
+    from server.errors import ApiError
+
+    api = api_for([make_card("p-20261004-aaaaaa")])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    # 文件名正常、载荷里 id 穿越。**直接写盘**造这份坏页文件：`save_page` 按载荷 id
+    # 拼路径，所以它自己也不该被用来造这种文件（那是另一条已经收口的路）。
+    (api.catalog.pages_dir / f"{PAGE_ID}.json").write_text(json.dumps({
+        "version": 1, "id": "../problems/p-20261004-aaaaaa", "image": f"{PAGE_ID}.png",
+        "blocks": [block("b1", [0.02, 0.02, 0.9, 0.2])],
+    }, ensure_ascii=False), encoding="utf-8")
+    page_file = api.catalog.pages_dir / f"{PAGE_ID}.json"
+    card_file = api.catalog.problems_dir / "p-20261004-aaaaaa.json"
+    page_before, card_before = page_file.read_bytes(), card_file.read_bytes()
+
+    with pytest.raises(ApiError) as excinfo:
+        page_edit.apply_edit(api.catalog, PAGE_ID,
+                             [{"action": "question_no", "block_id": "b1", "question_no": 17}],
+                             at=AT)
+
+    assert excinfo.value.status == 400
+    assert excinfo.value.payload()["details"]["param"] == "page_id"
+    assert card_file.read_bytes() == card_before, "题卡绝不许被页载荷里的 id 带走"
+    assert page_file.read_bytes() == page_before
+
+
+def test_a_page_whose_image_is_not_a_plain_filename_is_refused(api_for):
+    """派生症状：`image` 同样可穿越（读得到 `pages/` 外的文件）。
+
+    页文件与照片**同目录并列**（D5），所以 `image` 只能是一个纯文件名——
+    带路径分隔符或 `..` 的一律拒绝，一个字节都不写。
+    """
+    from server.errors import ApiError
+
+    api = api_for([])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    # 同上：直接写盘造这份坏页文件（`save_page` 会按载荷 id 写到别处去）
+    (api.catalog.pages_dir / f"{PAGE_ID}.json").write_text(json.dumps({
+        "version": 1, "id": PAGE_ID, "image": "../../etc/passwd",
+        "blocks": [block("b1", [0.02, 0.02, 0.9, 0.2])],
+    }, ensure_ascii=False), encoding="utf-8")
+    before = (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes()
+
+    with pytest.raises(ApiError) as excinfo:
+        page_edit.apply_edit(api.catalog, PAGE_ID,
+                             [{"action": "drop", "block_id": "b1"}], at=AT)
+
+    assert excinfo.value.status == 400
+    assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
+
+
 def test_a_chain_of_edits_is_applied_in_order_to_one_page(api_for):
     """一串修正是**按顺序**累加的（先合并再拖边界 ≠ 先拖再合并）。"""
     api = api_for([])
