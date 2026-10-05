@@ -408,3 +408,28 @@ def test_create_shouts_about_a_large_patch_of_ink_no_block_covers(tmp_path):
     assert row["created"] is True
     assert (api.catalog.pages_dir / f"{row['page_id']}.json").is_file()
 
+
+
+def test_create_says_which_ink_it_excluded_as_a_full_page_draft(tmp_path):
+    """R3/D9：`page_ink_draft_excluded`（hint）——按启发式排除了「整页草稿式手写」。
+
+    排除**必须看得见**：`checks.coverage.excluded` 里带 `reason` 与像素数——
+    「排除了什么」是覆盖率这条判据可信度的一部分（spec #2 点名这一步是启发式）。
+    """
+    img = white_with_blocks(100, 60, [(1, 1, 99, 59, (20, 20, 20))])
+    blocks = [{"id": "b1", "bbox_norm": [0.0, 0.0, 1.0, 0.5], "question_no": 1}]
+    api = build_api(tmp_path, segmenter=static_segmenter(blocks))
+
+    _, envelope = post_page(api, ink.encode_png(img))
+
+    hits = [w for w in envelope["warnings"] if w["code"] == "page_ink_draft_excluded"]
+    assert len(hits) == 1, envelope["warnings"]
+    assert hits[0]["level"] == "hint", "排除是启发式，不是真矛盾"
+    assert hits[0]["id"] is None
+    assert "排除" in hits[0]["message"] and "启发式" in hits[0]["message"]
+    coverage = envelope["data"]["pages"][0]["checks"]["coverage"]
+    assert coverage["checked"] is True
+    (excluded,) = coverage["excluded"]
+    assert excluded["reason"] == "page_span"
+    assert excluded["px"] == 98 * 58
+    assert coverage["ok"] is True, "排除之后没有可对账的墨迹——这不是「没覆盖」"

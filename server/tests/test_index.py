@@ -180,3 +180,40 @@ def test_a_problem_that_is_not_an_object_is_still_skipped(api_for):
     assert status == 200
     assert body["data"]["count"] == 0
     assert [row["code"] for row in body["skipped"]] == ["problem_missing_field"]
+
+
+# ------------------------------------------------- 跳过码的形状（R3/D9）
+#
+# 「读不了 / 不是一个对象」这两档以前只被断言了「进了 skipped」，码与指针从没被断言过。
+# 一条建不出来的记录是**比警告更重**的一档：索引里少一张卡必须是一个看得见的数字。
+
+
+def test_an_unreadable_card_file_is_skipped_with_a_named_code(api_for):
+    """题卡读不了 → `skipped[]` 点名（`problem_file_unreadable` + 路径 + 文件名主干）。"""
+    api = api_for([], extra_files={"p-20200101-aaaaaa.json": b"{ not json"})
+
+    status, body = get_json(api, "/api/index")
+
+    assert status == 200
+    (row,) = body["skipped"]
+    assert row["code"] == "problem_file_unreadable"
+    assert row["id"] == "p-20200101-aaaaaa", "指针要落到文件名主干上"
+    assert "p-20200101-aaaaaa.json" in row["message"], "message 里带全路径"
+    assert "JSONDecodeError" in row["message"], "message 带异常类名"
+    assert body["data"]["count"] == 0
+    assert body["data"]["stats"]["problems_skipped"] == 1
+
+
+def test_a_card_file_that_is_not_an_object_is_skipped_with_a_named_code(api_for):
+    """文件里不是 JSON 对象 → `problem_not_dict`（与「读不了」分开的两档）。"""
+    api = api_for([], extra_files={"p-20200101-aaaaaa.json": b"[1, 2, 3]"})
+
+    status, body = get_json(api, "/api/index")
+
+    assert status == 200
+    (row,) = body["skipped"]
+    assert row["code"] == "problem_not_dict"
+    assert row["id"] == "p-20200101-aaaaaa"
+    assert "不是一个 JSON 对象" in row["message"]
+    assert body["data"]["count"] == 0
+    assert body["data"]["stats"]["problems_skipped"] == 1

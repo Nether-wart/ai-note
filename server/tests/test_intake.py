@@ -431,6 +431,31 @@ def test_naming_a_block_that_does_not_exist_is_reported_not_ignored():
     assert result["unknown"] == ["b9"]
     assert result["summary"]["unknown"] == 1
     assert result["summary"]["included"] == 1
+    # R3/D9：`intake_block_unknown` 这条码的形状（以前只断言了 `unknown` 列表）
+    (warning,) = result["warnings"]
+    assert warning["code"] == "intake_block_unknown"
+    assert warning["level"] == "warning", "点了不存在的块 id 是真矛盾，不是「没查全」"
+    assert warning["id"] is None, "页级警告不属于某一张卡"
+    assert "b9" in warning["message"], "点名是哪几个 id"
+    assert "找不到" in warning["message"]
+
+
+def test_the_cli_names_a_block_id_it_could_not_find(tmp_path):
+    """命令形态（`--include-block`）里那条码也要真的发出来，且退出码仍是 0。
+
+    「点了不存在的块」不是失败：别的块照收，只是这件事要说出来（跳过 ≠ 失败）。
+    """
+    catalog, path = make_pages_dir(tmp_path, blocks=[plain_block()])
+
+    code, envelope, _ = cli("--data", str(catalog.root), "--page", "41c86bcfc007",
+                            "--include-block", "b9", at=AT)
+
+    assert code == 0
+    assert envelope["data"]["summary"]["unknown"] == 1
+    (warning,) = [w for w in envelope["warnings"] if w["code"] == "intake_block_unknown"]
+    assert warning["level"] == "warning"
+    assert warning["id"] is None
+    assert "b9" in warning["message"]
 
 
 def test_include_keeps_the_red_pen_readout_so_the_audit_does_not_lose_why():

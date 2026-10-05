@@ -320,3 +320,60 @@ def test_commit_names_a_card_file_it_could_not_read(tmp_path):
     # 正常那一块照样入库（读不了的卡不挡别人的路），坏文件一个字节没动
     assert envelope["data"]["created"], envelope["data"]
     assert (api.catalog.problems_dir / "p-20261004-zzzzzz.json").read_bytes() == b"{ not json"
+
+
+# ------------------------------------------- 拒绝/跳过分支的码与形状（R3/D9）
+#
+# 这两条码以前从没被断言过：一条把「记着收的块建不出卡」报出来，一条把「没收的块
+# 为什么不入库」报出来——都是「少了一张卡」的可见化（ADR 0007 第 6 条）。
+
+
+def test_a_block_that_says_keep_but_has_no_usable_box_gets_no_card(tmp_path):
+    """`page_commit_block_without_box`：记着收但边界读不出来 → **没有建卡、没有分配 id**。
+
+    否则会生成一张定位不到的幽灵卡（它连自己在页面的哪儿都说不出来）。
+    """
+    api = build_api(tmp_path, pages=[a_page([block("b1", None, keep=True)])])
+
+    status, envelope = commit(api)
+
+    assert status == 200, envelope
+    data = envelope["data"]
+    assert data["created"] == [] and data["wrote_cards"] is False
+    assert [row["block_id"] for row in data["refused"]] == ["b1"]
+    assert data["refused"][0]["reason"] == "block_without_box"
+    hits = [w for w in envelope["warnings"] if w["code"] == "page_commit_block_without_box"]
+    assert len(hits) == 1, envelope["warnings"]
+    assert hits[0]["level"] == "warning"
+    assert "没有为它建卡" in hits[0]["message"] and "分配 id" in hits[0]["message"]
+    # 拒绝就该一个字节都不动：页文件没改写，盘上也没有新卡
+    assert data["wrote_page"] is False
+    assert list(api.catalog.problems_dir.glob("*.json")) == []
+
+
+def test_blocks_that_are_not_kept_are_skipped_with_their_reason(tmp_path):
+    """`page_commit_blocks_skipped`（hint）：没收的块不进库，理由在页文件的 `decision` 里。
+
+    跳过 ≠ 失败：HTTP 200、没有拒绝项、只是没有为它们建卡——这件事必须说出来。
+    """
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=False,
+              decision={"keep": False, "rule": "tick_only",
+                        "reason": "红笔只是一个对勾 → 不收"}),
+        block("b2", [0.02, 0.40, 0.9, 0.2], keep=None),
+    ])])
+
+    status, envelope = commit(api)
+
+    assert status == 200, envelope
+    data = envelope["data"]
+    assert data["created"] == [] and data["refused"] == []
+    assert [row["block_id"] for row in data["skipped"]] == ["b1", "b2"]
+    assert [row["keep"] for row in data["skipped"]] == [False, None]
+    assert data["skipped"][0]["rule"] == "tick_only"
+    assert data["blocks"]["dropped"] == 1 and data["blocks"]["pending"] == 1
+    hits = [w for w in envelope["warnings"] if w["code"] == "page_commit_blocks_skipped"]
+    assert len(hits) == 1, envelope["warnings"]
+    assert hits[0]["level"] == "hint", "「我没做什么」是 hint，不是真矛盾"
+    assert "b1" in hits[0]["message"] and "b2" in hits[0]["message"], "点名是哪几块"
+    assert list(api.catalog.problems_dir.glob("*.json")) == []
