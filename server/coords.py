@@ -36,6 +36,11 @@ from .pages import usable_box
 # 那不是「一个空框」，是「这个框在父框里没有位置」——照旧给 `None`，由调用方报出来。
 BOX_KEYS = ("x", "y", "w", "h")
 
+# 掩膜被裁过的警告码（契约 §2 的形状）。级别是 `hint`：裁了不是矛盾，
+# 是「这一步替你做了个决定」——把它报成 warning 会训练人忽略体检
+# （`proto/server.py:1046-1047` 的口径）。
+MASK_BOX_CLAMPED = "mask_box_clamped"
+
 
 def _xywh(box):
     """一个读得出来的 xywh 框 → `(x, y, w, h)`；读不出来 → `None`。
@@ -201,7 +206,7 @@ def crop_boxes_to_page(boxes, block_box, *, clamp: bool = True, report: bool = F
     warnings = []
     if clamped:
         warnings.append({
-            "code": "mask_box_clamped",
+            "code": MASK_BOX_CLAMPED,
             "level": "hint",
             "message": f"有 {len(clamped)} 个掩膜框越出了它所属的块边界（第 {clamped} 项）"
                        f"→ 已裁到块内；裁到没有面积的框没有画出来",

@@ -70,7 +70,7 @@ def test_moving_a_boundary_writes_the_normalised_box_and_drops_the_stale_pixel_b
     moved = result["page"]["blocks"][1]
     assert moved["bbox_norm"] == [0.05, 0.3, 0.8, 0.18]
     assert moved["bbox_px"] is None
-    assert any(w["code"] == "page_block_box_changed" for w in result["warnings"])
+    assert page_edit.BLOCK_BOX_CHANGED in [w["code"] for w in result["warnings"]]
     # 其余块一个字节都没动
     assert result["page"]["blocks"][0] == three_blocks()["blocks"][0]
 
@@ -385,7 +385,7 @@ def test_a_block_list_with_a_non_object_is_shouted_about_not_skipped():
     result = page_edit.move_block(blocks, "b1", [0.05, 0.05, 0.8, 0.3], at=AT)
 
     assert result["changed"] is True
-    assert any(w["code"] == "block_not_an_object" for w in result["warnings"])
+    assert page_edit.BLOCK_NOT_AN_OBJECT in [w["code"] for w in result["warnings"]]
 
 
 def test_the_edit_records_when_and_what_on_the_page_itself():
@@ -452,7 +452,7 @@ def test_an_empty_edit_list_is_reported_and_the_page_is_untouched(api_for):
 
     assert report["changed"] is False
     assert (api.catalog.pages_dir / f"{PAGE_ID}.json").read_bytes() == before
-    assert "page_edit_empty" in [w["code"] for w in report["warnings"]]
+    assert page_edit.EDIT_EMPTY in [w["code"] for w in report["warnings"]]
 
 
 def test_an_unknown_action_is_rejected_inside_the_report():
@@ -462,7 +462,41 @@ def test_an_unknown_action_is_rejected_inside_the_report():
 
     assert result["changed"] is False
     assert result["page"] is before
-    assert "page_edit_unknown_action" in [w["code"] for w in result["warnings"]]
+    refused = [w for w in result["warnings"] if w["code"] == page_edit.EDIT_UNKNOWN_ACTION]
+    assert refused and refused[0]["level"] == "warning"
+    # 拒绝形状要说清可取值（D9：断言形状，不是「没崩」）
+    assert "move" in refused[0]["message"]
+
+
+def test_an_edit_item_that_is_not_an_object_is_rejected():
+    """D9：修正项不是对象 → 明确拒绝那一项（不是静默跳过）。"""
+    before = three_blocks()
+    result = page_edit.apply_one(before, "把 b1 往右拖", at=AT)
+
+    assert result["changed"] is False
+    assert result["page"] is before
+    refused = [w for w in result["warnings"] if w["code"] == page_edit.EDIT_NOT_AN_OBJECT]
+    assert refused and refused[0]["level"] == "warning"
+
+
+def test_a_successful_merge_and_split_announce_what_they_did():
+    """合并/拆分成了要有一条会喊的记录（审计面：页文件要能回答「谁把这块并了」）。"""
+    merged = page_edit.merge_blocks(three_blocks(), ["b1", "b2"], at=AT)
+    assert page_edit.BLOCKS_MERGED in [w["code"] for w in merged["warnings"]]
+
+    blocks = page([block("b1", [0.02, 0.02, 0.9, 0.4], question_no=7)])
+    split = page_edit.split_block(blocks, "b1", [[0.02, 0.02, 0.9, 0.19],
+                                                 [0.02, 0.23, 0.9, 0.19]],
+                                  question_numbers=[7, 8], at=AT)
+    assert page_edit.BLOCK_SPLIT in [w["code"] for w in split["warnings"]]
+
+
+def test_every_problem_type_in_the_enum_is_accepted():
+    """枚举里的三个取值都要能写进去（只测其中一个会让另外两个成为没人走过的分支）。"""
+    for wanted in page_edit.PROBLEM_TYPES:
+        blocks = page([block("b1", [0.02, 0.02, 0.9, 0.2], problem_type=None)])
+        result = page_edit.set_problem_type(blocks, "b1", wanted, at=AT)
+        assert result["page"]["blocks"][0]["problem_type"] == wanted
 
 
 def test_a_page_id_that_could_escape_the_pages_dir_is_refused(api_for):

@@ -140,7 +140,10 @@ def test_a_box_that_sticks_out_of_its_parent_is_clamped_and_said_out_loud():
 
     assert result["clamped"] == 1
     assert result["boxes"][0] == pytest.approx([0.628, 0.372, 0.152, 0.028])
-    assert result["warnings"], "裁过的框必须有一条会喊的警告"
+    # 断言**形状**（码 + 级别 + 关键字段），不是「有一条警告」（D9 第 1 条）
+    assert [w["code"] for w in result["warnings"]] == [coords.MASK_BOX_CLAMPED]
+    assert result["warnings"][0]["level"] == "hint"
+    assert "1" in result["warnings"][0]["message"]
 
 
 def test_a_box_that_ends_up_with_no_area_is_none_and_counted_as_clamped():
@@ -154,7 +157,7 @@ def test_a_box_that_ends_up_with_no_area_is_none_and_counted_as_clamped():
     assert result["boxes"] == [None]
     assert result["clamped"] == 1
     assert result["clamped_indexes"] == [0]
-    assert result["warnings"]
+    assert [w["code"] for w in result["warnings"]] == [coords.MASK_BOX_CLAMPED]
     # 一个位置没错、形状也对的框不能被误报
     clean = coords.crop_boxes_to_page([REAL_MASK_BOX_IN_CROP], REAL_PAGE_BOX_NORM, report=True)
     assert clean["clamped"] == 0 and clean["warnings"] == []

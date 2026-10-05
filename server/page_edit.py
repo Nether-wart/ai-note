@@ -39,6 +39,14 @@ MERGE_DIFFERENT_TYPES = "page_merge_type_conflict"    # hint：合并的两块�
 BOX_NOT_USABLE = "page_block_box_unusable"            # warning：边界读不出来（形状同 #9）
 QUESTION_NO_INVALID = "page_question_no_invalid"      # warning：题号不是正整数
 TYPE_UNKNOWN = "page_type_unknown"                    # warning：题型不在枚举里
+BLOCK_BOX_CHANGED = "page_block_box_changed"          # hint：边界真的动了（含 bbox_px 作废）
+BLOCKS_MERGED = "page_blocks_merged"                  # hint：合并成了（记下并了谁）
+BLOCK_SPLIT = "page_block_split"                      # hint：拆成了（记下拆成几块）
+EDIT_NOT_AN_OBJECT = "page_edit_not_an_object"        # warning：修正项不是对象
+EDIT_UNKNOWN_ACTION = "page_edit_unknown_action"      # warning：不认识的动作名
+EDIT_EMPTY = "page_edit_empty"                        # hint：这次请求里一条修正都没有
+# 与 #9/#10 共用的两个码（形状同那里，本模块只复用字面量，不重复定义实现）
+BLOCK_NOT_AN_OBJECT = "block_not_an_object"           # warning：列表里混进了非对象
 
 # 题型枚举（契约 §3 `Problem.type` 的三取值 + 未定）。
 # `None` = 「还没人定过」，与 `"solution"`（解答题）是两件事——
@@ -66,7 +74,7 @@ def _blocks(page: dict) -> tuple[list[dict], list[dict]]:
     for index, raw in enumerate(page.get("blocks") or []):
         if not isinstance(raw, dict):
             warnings.append(_page_warn(
-                "block_not_an_object",
+                BLOCK_NOT_AN_OBJECT,
                 f"页 {page.get('id')!r} 的块列表第 {index} 项不是对象（{raw!r}）"))
             continue
         usable.append(raw)
@@ -240,7 +248,7 @@ def merge_blocks(page: dict, block_ids, *, at=None) -> dict:
                     note=f"合并 {[b.get('id') for b in targets]} → {first.get('id')}，"
                          f"边界取并集 {merged_box}")
     warnings.append(_page_warn(
-        "page_blocks_merged",
+        BLOCKS_MERGED,
         f"块 {removed_ids} 并进 {first.get('id')!r}，新边界 {merged_box}", "hint",
         card_id=first.get("card_id")))
     return _result(page, at=stamp, action="merge", warnings=warnings, changed=True,
@@ -365,7 +373,7 @@ def split_block(page: dict, block_id, boxes, *, question_numbers=None, at=None) 
                     note=f"块 {block_id} 拆成 {len(pieces)} 块："
                          f"{[p['id'] for p in pieces]}")
     warnings.append(_page_warn(
-        "page_block_split",
+        BLOCK_SPLIT,
         f"块 {block_id!r} 拆成 {len(pieces)} 块"
         f"（第一块保留原块 id 与绑定）", "hint", card_id=block.get("card_id")))
     return _result(page, at=stamp, action="split", warnings=warnings, changed=True,
@@ -573,7 +581,7 @@ def apply_edit(catalog, page_id, edits, *, at=None, apply: bool = True) -> dict:
         pages.save_page(catalog, page, apply=bool(apply and changed))
     else:
         warnings.append(_page_warn(
-            "page_edit_empty", "这次请求里一条修正都没有（`edits` 是空的）→ 页文件没动", "hint"))
+            EDIT_EMPTY, "这次请求里一条修正都没有（`edits` 是空的）→ 页文件没动", "hint"))
 
     return {
         "page_id": page_id,
@@ -612,13 +620,13 @@ def apply_one(page: dict, edit, *, at=None) -> dict:
     stamp = _iso(moment)
     if not isinstance(edit, dict):
         return _result(page, at=stamp, action=None, warnings=[_page_warn(
-            "page_edit_not_an_object", f"修正项不是一个对象：{edit!r} → 页文件没动")],
+            EDIT_NOT_AN_OBJECT, f"修正项不是一个对象：{edit!r} → 页文件没动")],
             changed=False)
     action = edit.get("action")
     handler = DISPATCH.get(action)
     if handler is None:
         return _result(page, at=stamp, action=action, warnings=[_page_warn(
-            "page_edit_unknown_action",
+            EDIT_UNKNOWN_ACTION,
             f"不认识的修正动作 {action!r}（可取值：{list(EDITABLE_ACTIONS)}）→ 页文件没动")],
             changed=False)
     return handler(page, edit, moment)
