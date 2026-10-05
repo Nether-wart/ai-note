@@ -95,7 +95,7 @@ def not_auto_judgeable(reason: str, message: str, *, pid: str, warnings: list | 
         "not_auto_judgeable",
         message,
         reason=reason,
-        hint="这道题只能在纸上重做（人工确认）；屏幕重做只收字符串答案",
+        hint="这道题只能在纸上重做（人工确认）；屏幕重做只收字符串作答",
         details={"id": pid},
         warnings=warnings,
     )

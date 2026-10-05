@@ -104,8 +104,8 @@ for (const fixture of [CHOICE, FILLIN]) {
 
   record('不变量 2 · 选项缺失的选择题：页面上有**一个**可敲的输入框（不是零个）',
     inputs.length === 1 && disabledInputs.length === 0, `inputs=${inputs.length}`);
-  record('不变量 2 · 选项缺失的选择题：界面如实说明「选项缺失，请直接敲答案」',
-    html.includes('data-options-empty="true"') && html.includes('请直接敲答案'));
+  record('不变量 2 · 选项缺失的选择题：界面如实说明「选项缺失，请直接填写作答」',
+    html.includes('data-options-empty="true"') && html.includes('请直接填写作答'));
   record('不变量 2 · 选项缺失的选择题：作答区是一个 fillin 表单，题面图仍然是擦除图',
     html.includes('data-answer-form="fillin"') && html.includes('data-answer-mode="fillin"'));
   expectClean('不变量 2 · 选项缺失的选择题：判据本身认这条回退（不再报选择题缺选项）',
