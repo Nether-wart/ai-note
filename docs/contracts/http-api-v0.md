@@ -580,6 +580,7 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `original_answer_equals_standard_answer` | 原答与标准答案相同 | 原答与标准答案相同（都是 'A'）→ 这是错题本，录进来的是做错的题；两者相同通常意味着订正被当成了原答 |
 | `topics_empty` | 考点为空 | 考点为空 → 考点是检索入口 |
 | `reviewed_but_incomplete` | 已审核但标准答案或考点为空 | 已标为已审核，但标准答案或考点是空的 |
+| `problem_transcript_missing` （`level: "warning"`，**B7 新增**） | 题面还没转录（`problem.transcript` 空） | 题面还没有转录（`problem.transcript` 空）→ 先收录在清单里，审核时填；没有题面就不进重做纸。**#15 的入库建的是骨架卡**（块上只有边界与题号），所以「缺 `problem.transcript`」**不再让索引跳过这张卡**（`skipped` 只剩「连 `problem` 对象都没有」那一档）——落盘了却在清单里看不见就是静默丢题 |
 | `no_clean_image` | 没有擦除手写后的题面图 | 没有擦除手写后的题面图 → 不进屏幕重做，也不进重做纸 |
 | `clean_image_file_missing` | 卡里记了 `clean_image`，文件不在 | 卡里记了擦除图 …，但文件不在 → 屏幕重做会拿到一个 404 |
 | `original_image_file_missing` | 卡里记了题面图，文件不在 | 同上 |
@@ -657,6 +658,33 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `mask_box_clamped` | `hint` | 掩膜框越出它所属的块 → 已裁到块内（裁到没面积的框没有画出来） |
 | `segmentation_not_implemented` | `warning` | 重切时服务没接上切分那一层 → `blocks` 给 `null`（**不是 `[]`**）。与 #13 的收件管道**同一个码** |
 
+**页资源「建」「入库」与审计码表（B7 / #15 落地）**——出现在 `POST /api/page`、
+`POST /api/page/<id>/commit` 的 `warnings` 里，以及 `python3 -m server.audit` 的
+`findings[]`（审计的每条发现还带 `check`（哪一项查出来的）、`scope` 与能定位的指针）。
+
+| `code` | `level` | 触发 |
+|---|---|---|
+| `page_already_exists` | `hint` | 同一张照片（内容哈希前 12 位）已经建过页 → 不重跑切分、不覆盖块列表（块可能被人改过） |
+| `page_file_unreadable` | `warning` | 页文件在却读不了 → **不覆盖**、也不写照片（先留证据） |
+| `page_commit_nothing_kept` | `hint` | 这一页没有一块「收」的块 → 这次没有生成任何题卡（补收入口在 `server.intake.include_blocks` / CLI `--include`） |
+| `page_commit_blocks_skipped` | `hint` | 另有 N 块没入库（`keep` 为 false／null）→ 没有为它们建卡，理由在页文件的 `decision` 里 |
+| `page_commit_block_without_box` | `warning` | 记着收、但 `bbox_norm` 读不出可用的整页归一化框 → **没有建卡、也没有分配 id**（否则会生成一张定位不到的卡），先修边界 |
+| `page_commit_card_unreadable` | `warning` | 块绑的卡片在盘上却读不了 → **不覆盖**（先留证据），这张卡没有重新生成 |
+| `page_photo_missing` | `warning` | 页指向的整页照片不在（**同一个事实、同一个码**：#9 的回填、#15 的入库与审计都用它）→ 入库的卡指向一张取不到的页图（不是拒绝：页与块都还在）；审计说「它是最后的底，不该删」 |
+| `card_file_unreadable` | `warning` | （审计）题卡文件读不了 → 点名报出来，不是安静少一张 |
+| `page_card_missing` | `warning` | （审计）页里记着收（`keep=true`）又绑了卡，但那张卡不在盘上 → 页说它进库了、盘上没有它（重跑一次入库可以补建） |
+| `page_block_not_committed` | `hint` | （审计）收了的块还没有绑定 = 还没入库（正常中间态，说出来而不是当成问题） |
+| `card_block_not_kept` | `hint` | （审计）卡片绑的块被标成不收 → **卡不会被自动删**，删不删由人定 |
+| `card_bound_to_other_page` | `warning` | （审计）卡片自己的 `source.page_image` 指的是**另一页**，却被绑在这一页上 → 页↔卡对不上账 |
+| `card_page_image_missing` | `hint` | （审计）卡片绑在页上，但它自己的 `source.page_image` 空/推不出页 id → 来源信息不全（那条检查能抓住的只有它判据覆盖的部分） |
+| `duplicate_transcript_on_page` | `warning` | （审计）**同一页**两张卡的题干逐字相同 → 判据与索引级 `duplicate_transcript` **共用一份实现**（`warnings.duplicate_transcript_groups`：`strip()` 之后 `==`，没有模糊比、没有相似度），只是把范围收到这一页；跨页的重复仍由索引那条报 |
+
+审计还有一档只出现在 `card_self_check`／`card_page_binding` 两项里、但码与级别都沿用别处：
+卡片字段自检的码（§8 逐卡表）、页绑定两级（`page_binding_missing` = hint、
+`page_binding_lost` = warning，**由 `pages.page_binding` 一处定**）。
+审计的退出码**只认 `warning` 级发现**：hint 不算问题（把按设计如此的事报成问题，
+会训练人忽略体检）。
+
 **「替换」不是一个可以自动产生的状态**：`classify_resegment` 的 `summary.replaced`
 恒为 0——配上的块继承旧绑定（保留），配不上的块本来就没有绑定（新增），
 没有第三条路径能让「同一个位置换一张卡」成为重切的自动结果（有会红的测试钉住）。
@@ -709,11 +737,18 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 |---|---|---|
 | `problem_file_unreadable` | 文件读不了（JSON 解析失败、权限、编码） | `<路径> 读不了：<异常类名>: <说明>` |
 | `problem_not_dict` | 文件里不是 JSON 对象 | `<路径> 不是一个 JSON 对象` |
-| `problem_missing_field` | 缺 `problem.transcript` 这类必需字段 | `<路径> 缺 problem.transcript，建不出这条记录` |
+| `problem_missing_field` | 缺 `problem` **对象**（B7 / #15 起语义收窄：题面还没转录**不再**跳过，见下） | `<路径> 缺 problem 对象（题面转录、题型、选项都在里面），建不出这条记录` |
 | `inbox_part_empty` | 一次上传里某个 part 是空文件（#13） | 第 N 个 part（`<原名>`）是空的，没有收进收件目录 |
 
 `skipped` 非空时 `stats.problems_skipped` 也非零，且 `count` **不含**被跳过的那些
 ——「少了一张卡」必须是一个看得见的数字，不是一个安静的空位。
+
+⚠ **B7 / #15 收窄了这一档**：以前「缺 `problem.transcript`」会让整张卡进 `skipped`
+（`count` 里看不见它）。而 #15 的**入库建的是骨架卡**——块上只有边界与题号，
+题面要等抽取角色或审核时填；静默跳过它就是「入库了却看不见」，与 spec #2 第 17 条
+「入库后直接进审核队列」直接冲突。现在有 `problem` 对象、只差转录的卡**收录进清单**
+并报 `problem_transcript_missing`（`warning`，由 `warnings.card_warnings` 一处产出，
+索引／审计／`POST /api/attempt` 的 422 信封三处自动一致）。
 
 ## 9. 错误码表（v0）
 
@@ -754,7 +789,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | 小节 | 状态 |
 |---|---|
 | §10.1 `POST /api/attempt/<pid>` | **已实现**：屏幕重做（#5）与定点修正（#6）；`channel:"paper"`（人工确认）仍是预留 |
-| §10.2 `/api/page*` | **部分已实现**：「改」（`PATCH`）与「重切」（`POST …/resegment`）**已落地**（#14），另加 `GET …/image`（画块框要整页照片）；「建」（`POST /api/page`）与「入库」（`POST …/commit`）仍**预留**、归 #15。页文件的块已长出 `question_no`（#10）／`ink`（#11）／`decision`（#12）／`problem_type`（#14） |
+| §10.2 `/api/page*` | **已实现**（四个动作都有路由）：「改」（`PATCH`，#14）、「重切」（`POST …/resegment`，#10/#14）、`GET …/image`（画块框要整页照片，#14）、「建」（`POST /api/page`，#15）、「入库」（`POST …/commit`，#15）。页文件的块已长出 `question_no`（#10）／`ink`（#11）／`decision`（#12）／`problem_type`（#14）／`card_id`（#15 的入库写入） |
 | §10.3 收件目录与手机上传页 | **已实现**（#13） |
 
 ### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
@@ -963,8 +998,44 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | 改 | `PATCH /api/page/<id>` | `{dry_run?: bool, edits: [{action, …}]}` | `{page_id, page_path, apply, preview, changed, edits[], page, wrote_cards, wrote_page}` | **已实现** |
 | 重切 | `POST /api/page/<id>/resegment` | 无 body | `{page_id, segmentation, ran, blocks\|null, matches[]\|null, removed[]\|null, summary\|null, rejected[], wrote_cards, wrote_page}` | **已实现** |
 | 整页照片 | `GET /api/page/<id>/image` | — | 图片字节（失败仍是 JSON 信封） | **已实现** |
-| 建 | `POST /api/page` | 照片 | — | **预留，归 #15** |
-| 入库 | `POST /api/page/<id>/commit` | 无 | — | **预留，归 #15** |
+| 建 | `POST /api/page` | `multipart/form-data`，字段名 `file`（与 `POST /api/inbox` 同一形状；一个文件 = 一页） | `{pages: [{page_id, page_path, image, created, existing, segmentation, blocks\|null, rejected?, message, counts?, not_kept?}], created[], existing[], segmentation{available,reason,message}, wrote_pages}` | **已实现（#15，`server/page_create.py`）** |
+| 入库 | `POST /api/page/<id>/commit` | 无 | `{page_id, page_path, at, blocks{total,kept,dropped,pending,not_an_object}, created[], reused[], skipped[], refused[], wrote_page, wrote_cards, index{count,card_ids,built_at,warnings,skipped}}` | **已实现（#15，`server/page_commit.py`）** |
+
+**「建」的四条规矩**（#15）：
+
+1. **页 id = 照片内容哈希的前 12 位**（与 #13 收件目录同一套口径）→ 同一张照片再传一次
+   就是同一个页 id，报 `page_already_exists`（`hint`）、**不重跑切分、不覆盖块列表**。
+2. **模型失败 → 502 且 `data/` 里一个字节都不留**：照片先在**系统临时目录**里跑切分，
+   成功之后才写进数据目录（D1/D9「拒绝就该一个字节都不动」——#13 曾经先 `ensure()`
+   建目录再判空）。
+3. **切分不可用／解析不出块都不是「这一页没有题」**：页文件**不建**、`blocks` 给 `null`
+   （不是 `[]`），报 `segmentation_not_implemented`／`page_segmentation_unparsed`。
+4. **统计与去留不在这里判**：块上的 `ink` 来自 #11 的 `ink.page_block_reports`，
+   建议去留来自 #12 的 `intake.plan_decisions`（这一趟 `semantics` 为空 → 有红笔的块
+   按「判不准 → 收」落向收，并报 `intake_semantics_fallback`）。**建只花一次模型调用：
+   切分那一次**；红笔语义那一趟是 `python3 -m server.intake --apply`。
+   块的 `bbox_px`（整页像素 xyxy）是**新页的初值**，按照片真实像素尺寸推一次
+   （回填那条路仍照抄盘上原值，D5）；#14 的拖边界会让它作废置 `null`。
+
+**「入库」的四条规矩**（#15）：
+
+1. **只给「收」的块发卡号**：`keep` 为 `false`（明确不收）或 `null`（统计读不出来，待定）
+   的块进 `skipped[]`，**连 id 都不分配**——给丢弃的块发卡号就是造一条幽灵绑定。
+2. **id 首次入库时分配**（`pages.assign_card_ids`，seed = `<页 id>#<块 id>`，
+   唯一性在「盘上已有的 id 集合」上做碰撞消解）；**已经生成过的块不重复生成**
+   （进 `reused[]`，卡文件逐字节不动）。
+3. **先写页、再建卡**（这条顺序是幂等的一部分）：绑定先落盘，中断后重跑走 `reused`
+   那条路，id 不会变；反过来先建卡则会因为候选 id 已被占用而碰撞到下一个候选，
+   同一块换了 id。半途而废的状态是**看得见**的（`page_card_missing`，warning），
+   重跑一次 `commit` 又能补齐。
+4. **骨架卡**：`review.status = "unreviewed"`、`standard_answer.value = null`、
+   `problem.transcript = ""`、`problem.image`／`clean_image` 是 `null`
+   （**不记一个取不到的路径**，否则 `original_image_file_missing` 会误报）。
+   卡的 `source` 记 `{page_image, bbox_norm, bbox_px, original_file}`，其中 `page_image`
+   是**相对数据目录**的 `pages/<页 id>.<后缀>`（`--data` 可配，所以不写 `data/` 前缀；
+   页 id 的推法都只看文件名主干）；**卡上不加新字段**（绑定只记在页文件里）。
+   新卡因此在两处被挡住，而这两处读的是**同一份实现**：`server/autojudge.py`
+   （未审核 → 不参与自动判定）与 §6.1 的硬闸门（缺擦除图 → 不进屏幕重做）。
 
 `edits` 的 `action` 是**闭集**（spec #2 的最小集合，stable）：
 
@@ -999,7 +1070,10 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | `python3 -m server.intake --page <页 id> [--apply] [--include\|--include-block <id>]`（B4 / #12 新增） | 一页的收入决策：**默认预演**（不写盘、**不问模型**），`--apply` 才问模型并写回；`--include` 是「一键补收」的命令形态。输出是 §2 的信封（与将来的 HTTP 端点同一形状）。**不加 HTTP 端点**：v0 的只读立场不变 |
 | `server/coords.py`（B6 / #14 新增） | **两套坐标基准的显式换算**（唯一实现）：`crop_box_to_page`／`page_box_to_crop`／`crop_boxes_to_page`（掩膜框 → 整页）、`norm_to_px`／`px_to_norm`（按照片显示尺寸画块框）、`xywh_to_xyxy`／`xyxy_to_xywh`（**形状不同**，不是两种写法）、`contains_box`。读不出来的框一律 `None`（绝不返回零框）；形状判据**消费** `pages.usable_box`，不重写。**没有第二处坐标换算** |
 | `server/page_edit.py`（B6 / #14 新增） | **页资源「改」动作的唯一实现**：`move_block`／`merge_blocks`／`split_block`／`drop_block`／`keep_block`／`set_problem_type`／`set_question_no`，`apply_edit` 按序作用并写回页文件。切换去留**调 `intake.set_keep_by_human`**（不另立一套判断）；`assert_page_payload_matches_id` 是写回前的不变式（载荷 id 不许决定写到哪） |
-| `server/page_api.py`（B6 / #14 新增） | **页资源的 HTTP 翻译层**：`PageEndpoint.edit`／`resegment`／`image`，以及归 #15 的 `create_reserved`／`commit_reserved`。它自己不实现任何规则——改在 `page_edit`、三态在 `segmentation.classify_resegment`、页 id 校验在 `pages.is_page_id`、拒绝路径在 `intake._load_page` |
+| `server/page_api.py`（B6 / #14 新增） | **页资源的 HTTP 翻译层**：`PageEndpoint.create`／`edit`／`resegment`／`image`／`commit`。它自己不实现任何规则——建在 `page_create`、改在 `page_edit`、三态在 `segmentation.classify_resegment`、入库在 `page_commit`、页 id 校验在 `pages.is_page_id`、拒绝路径在 `intake._load_page` |
+| `server/page_create.py`（B7 / #15 新增） | **页资源「建」动作的唯一实现**：`create_pages`（照片 → 页 id → 存图 + 建页文件 + 跑切分 + #11 统计 + #12 建议去留）、`as_candidates`（切分接缝的归一化，建与重切共用）、`page_id_for`。`inbox.upload_files` 是「一次上传里的 `file` 段」的唯一实现（收件目录与建共用） |
+| `server/page_commit.py`（B7 / #15 新增） | **页资源「入库」动作的唯一实现**：`commit_page`（只给收的块发卡号、id 首次分配、不重复生成、先写页再建卡、回写绑定、报告索引重建）。它**消费** `pages.assign_card_ids`（分配的唯一实现）与 `intake._load_page`（页加载与拒绝形状的唯一实现） |
+| `server/audit.py`（B7 / #15 新增） | **落盘数据体检的唯一实现**：页↔卡双向对账（§8 的 B7 码表）、`CHECKS`（「我查了哪几项」的对外承诺）、`python3 -m server.audit [--data DIR]`。**只读盘、不修改、可随时重跑**；它消费 `pages.page_binding`、`warnings.card_warnings` 与 `warnings.duplicate_transcript_groups`，不另判一遍。回填是另一条显式命令（`server.backfill`） |
 | `site/src/lib/split.js` + `site/src/components/SplitEditor.js`（B6 / #14 新增） | **切分修正界面**：重切三态显示、两套坐标分开画（`maskBoxOntoPage` 与 `server/coords.py` 一一对应）、七条动作拼 `edits`。界面**只提交「人做了什么」**，判定字段一个都不含 |
 | `python3 -m server.backfill --data <dir>` | 存量卡 → 页文件的迁移，**默认预演（只读）**，`--apply` 才写；幂等（跑两次不改一个字节、不动题卡） |
 
@@ -1130,6 +1204,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（B2 / #10 收尾） | §8 的页级对账码表**改回 §2 的 `Warning` 形状**（`{code, message, id, level}`，页级 `id` 为 `null`、卡级填卡 id；`rebind` 交回的事实由出口补级别，表里没有的码按 `warning` 报） | 上一条预告写的 `{code, level, message}` 与 §2「形状一致」自相矛盾，实测也确实漏了：`pages.rebind` 手搓的三条码（`block_without_box`/`block_not_an_object`/`block_removed_with_card`）**没有 `level`**，而 `classify_resegment` 原样透传——于是页级对账的出口会漏出「没有 level 的警告」，下游只能靠猜（正是 §2 要防的）。同时发现 `classify_resegment` 在调 `rebind` 前用 `isinstance(b, dict)` 静默 filter 掉块列表里的非对象项（`rebind` 明明会报 `block_not_an_object`）——与 `proto/server.py:320-321`、`:933-936` 同一种写法。两条都有会红的测试钉住；记账见 issue #10 的评论 |
 | 本版（B6 / #14） | §10 状态表把 §10.2 改成**部分已实现**并加 §10.2.1b（四个动作的 HTTP 形状、七条 `action` 的闭集、五条偏离记账）；§10.2.2 与 §12 加 `server/coords.py`／`page_edit.py`／`page_api.py`／`site/src/lib/split.js` | 工单 #14 验收 1/2/3。**先写进 issue #14 的评论再动手**（BRIEF 硬规则 3）。要点：①「改」与「重切」落地，「建」「入库」归 #15 且**不冒充成功**；②`action`／`problem_type` 是闭集，拼错的值会**静默**让下游判据失效；③边界改动后 `bbox_px` 作废置 `null`（它是加了 pad 的盘上原值，留着就是「安静的谎」）；④**页载荷的 `id`／`image` 不许决定读写到哪**——修掉一处**真漏洞**：一份文件名正常、载荷 `id: "../problems/p-x"` 的页文件会让一次「改页」覆盖一张真题卡，且 `page_path` 是假的、零警告；现在写读前验 `page["id"] == 加载时用的页 id` 且 `image` 是纯文件名，不一致 → 400、一个字节不动；⑤隐私回归抓出一处真泄漏（真实页哈希进了 `build/`）与两处夹具里的真题原句，已清理 |
 | 本版（D10 / #6） | §10.1 的「**掌握只能重算**」改成「**按 payload 是否改判据分流**」：改判（`verdict` 与现值不同）仍必须重放重算；只改错因（没给 `verdict` 或与现值相同）**不重算**，卡上 `mastery` 与既有 `attempts[i].note` 逐字保留。`mastery` 的「被改那一次的读数」由 `mastery.peek_step` **只读地**给（与重放共用同一份冷却门，故两条路径逐字一致，幂等不受影响）。§12 的 `mastery.py`／`amend.py` 两行跟上 | 独立验证者在 #6 上找到的边界：**只改 `error_causes`** 时，若卡上存的 `mastery` 不是历史的重放固定点，`recompute_mastery` 会把它重放改写——一张「已毕业、连对 5 次」的卡因一次纯标注编辑被**静默重置回池**，连 `attempts[i].note` 也被重写。理由三条：无关编辑不该销毁人动过的状态（spec #2 同一原则）、不许静默（ADR 0007 第 6 条）、漂移该由审计报出来（#15）而不是被顺手改掉。**修法是分流，不是取消重放**（#6 验收 1 一条都不许取消） |
+| 本版（B7 / #15） | §10 状态表把 §10.2 改成**已实现**（四个动作都有路由）；§10.2.1b 补「建」「入库」的请求/响应形状与各四条规矩；§10.2.2 与 §12 加 `server/page_create.py`／`page_commit.py`／`audit.py`；§8 加「页资源建/入库与审计码表」14 条（含 `hint` 级），逐卡表加 `problem_transcript_missing`；§9 的 `problem_missing_field` **语义收窄**成「连 `problem` 对象都没有」并写明「题面还没转录不再跳过」；§12.1 补审计与端到端的测试接缝 | 工单 #15 验收 1/2/3。**先写进 issue #15 的评论再动手**（BRIEF 硬规则 3）。要点：①入库建的是**骨架卡**（块上只有边界与题号），所以索引必须**收录还没转录的卡**并报 `problem_transcript_missing`——落盘了看不见就是静默丢题，与 spec #2 第 17 条冲突；②只给「收」的块发卡号（丢给弃块发号＝幽灵绑定）；**先写页再建卡**是幂等的一部分（反过来会换 id）；③页绑定那一条**不另造码**，消费 `pages.page_binding`：旧卡 `hint`／页↔卡对不上账 `warning`，两级不许混；④同页题干逐字相同的判据与索引级**共用一份实现**（`duplicate_transcript_groups`），没有模糊比、没有相似度；⑤审计 `checked[]` **永远在**、退出码只认 `warning` 级发现；⑥真数据只读复核（跑前跑后 `data/` 逐字节不变）：两条 `page_binding_missing` 是 `hint`，`p-20261004-ef7c47` 的 `standard_answer_missing`＋`topics_empty` 是真问题，没被提示淹掉 |
 | 本版（#12 数据安全修复） | §8 加「写盘路径的纵深防御」三个码（`page_id_mismatch`/`page_image_unsafe` 为 400 + `details.param`、`filesystem_error` 为 500）；§9 补 `internal_error`/`bad_request` 的 `reason` 取值；`save_page(catalog, page, *, page_id, …)` 的写盘路径只认 `page_id`，身份闸在算路径之前、预演走同一道闸 | 独立验证者实测的真反例：页 id 的校验只挡「传进来的 id」，挡不住「页文件里 `id` 字段」——`save_page` 拿它拼路径，`{"id":"../problems/p-20261004-41c86b"}` 会让 `run_intake(apply=True)` 把整份页 JSON **覆盖一张真题卡**（受害者 md5 变、`warnings == []`、CLI rc=0），`"id":"../../problems/p-nope"` 则是 CLI 裸 `FileNotFoundError`。同类入口还有 `image` 拼 `image_path`（可借读取穿越 `pages/`）与 `backfill` 的写回。**先写进 issue #12 的评论再动手**（BRIEF 硬规则 3） |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
@@ -1150,7 +1225,10 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | `server/intake_client.py` | **抽取角色的接缝**（B4 / #12）：红笔语义的提示词与消息形状（**要看图**，与判定角色的纯文本相反）、`parse_semantics`（答不出语义是「判不准」不是调用失败）、`image_data_url`。留档 tag `redpen-semantics`；改提示词必须重跑抽取角色的考卷 |
 | `server/coords.py` | **两套坐标基准的显式换算**（B6 / #14 的唯一实现）：掩膜框（裁剪图）↔ 整页框、归一化 ↔ 像素、xywh ↔ xyxy。理由：`source.bbox_*` 是**整页**坐标而 `clean.boxes_norm`／`manual` 是**裁剪图**坐标，混用**不会报错、只会静默错位**（契约 §10.2 登记在案的坑）。界面与测试都调它，不许各处现算 |
 | `server/page_edit.py` | **页资源「改」动作的唯一实现**（B6 / #14）：七条动作 + `apply_edit` 写回。取舍**调 `intake.set_keep_by_human`**（收入决策只有一处实现）；歧义（拆出来的题号、丢弃块上的卡）**报出来而不是猜** |
-| `server/page_api.py` | **页资源的 HTTP 翻译层**（B6 / #14）：`PATCH`／`resegment`／`image` 已落地；`POST /api/page`（建）与 `/commit`（入库）归 #15，给带归属的 404。它不实现规则，只翻译形状 |
+| `server/page_api.py` | **页资源的 HTTP 翻译层**（B6 / #14，B7 / #15 补两个动作）：`PATCH`／`resegment`／`image`／`POST /api/page`（建）／`POST …/commit`（入库）都落地。它不实现规则，只翻译形状——建在 `page_create`、改在 `page_edit`、入库在 `page_commit`、三态在 `segmentation` |
+| `server/page_create.py` | **页资源「建」动作的唯一实现**（B7 / #15）：照片（内容哈希前 12 位定页 id）→ 存图 + 建页文件 + 跑切分 + #11 统计 + #12 建议去留。幂等（同图重传不重跑切分、不覆盖块列表）；模型失败先用系统临时目录跑切分，成功才写进 `data/`（拒绝不留痕迹）；`as_candidates` 是切分接缝的归一化（建与重切共用） |
+| `server/page_commit.py` | **页资源「入库」动作的唯一实现**（B7 / #15）：只给「收」的块发卡号、id 首次分配（`pages.assign_card_ids`）、已经生成过的块不重复生成、**先写页再建卡**（幂等：中断后重跑不会换 id）、把绑定写回页文件、报告索引重建。它不另判收不收（那是 #12）也不另分配 id（那是 #9） |
+| `server/audit.py` | **落盘数据体检的唯一实现**（B7 / #15）：页↔卡**双向**对账（§8 的 B7 码表）、`CHECKS`（「我查了哪几项」）、`python3 -m server.audit`。**只读盘、不修改、可随时重跑**；页绑定与字段自检分别消费 `pages.page_binding` 与 `warnings.card_warnings`，串题判据消费 `warnings.duplicate_transcript_groups`——一条规则一份实现。退出码只认 `warning` 级发现 |
 
 ## 12.1 测试接缝
 
@@ -1169,5 +1247,14 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
   `assign_card_ids`）用**构造的块列表**喂进去测，同样不联网、不画图——这是 spec #2
   「测试四层」的第 1 层，#9 的验收就落在这一层。它同时也是 HTTP 那一层的判据来源
   （`card_warnings` 里的页绑定提示由 `page_binding` 一处产出）。
+- **入库与审计也在这个 HTTP 接缝上测**（#15）：建/入库各一个 multipart／无 body 的请求进去，
+  信封出来、`problems/` 与 `pages/` 里的东西变/没变出来。切分是注入的假接缝（**不联网**），
+  合成图用 `server/ink.py` 自己的 PNG 编码器画（零依赖）。审计是纯读的入口：
+  一个数据目录进去、一份 `checked`／`findings` 出来，所以它同时是纯逻辑测试。
+- **端到端一条链**（spec #2 第 5 层）在 `server/tests/test_page_pipeline.py`：
+  合成一页 → 切分 → 收两道丢一道 → 生成两张卡 → 索引 → 审计 → **重切回到「保留」**，
+  并断言重切与入库都没有偷偷改卡/改页（逐字节比对）。骨架卡刚入库时审计**一定**有
+  「内容还没填」的 warning（题面／标准答案／擦除图），所以那条测试先把「页↔卡对账没有错误」
+  与「内容缺项」分开断言，再模拟审核把内容填上，然后断言审计一条发现都没有。
 - 测试数据**自造在临时目录里**，测完即删。真实题卡只有两张、重做次数是 0，
   测试绝不碰它们（工单 #1 的第 35 条 user story）。

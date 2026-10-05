@@ -56,7 +56,9 @@ COMMIT_NOTHING_KEPT = "page_commit_nothing_kept"              # hint：这一页
 COMMIT_BLOCKS_SKIPPED = "page_commit_blocks_skipped"          # hint：没收的块不进库
 COMMIT_BLOCK_WITHOUT_BOX = "page_commit_block_without_box"    # warning：边界读不出来 → 没建卡
 COMMIT_CARD_UNREADABLE = "page_commit_card_unreadable"        # warning：卡在却读不了 → 不覆盖
-COMMIT_PAGE_PHOTO_MISSING = "page_commit_page_photo_missing"  # warning：整页照片不在
+# 页指向的整页照片不在：**同一个事实、同一个码**（#9 的回填与 #15 的审计也用这个码，
+# 只是回填那处手搓 dict、漏了 `level`——已记进报告，留给最终修复 pass 收）。
+PAGE_PHOTO_MISSING = "page_photo_missing"                     # warning：整页照片不在
 
 
 def _warning(code: str, message: str, card_id: str | None = None, level: str = "warning") -> dict:
@@ -182,7 +184,7 @@ def commit_page(catalog, page_id: str, *, at=None) -> tuple[dict, list[dict]]:
     if image and not (catalog.pages_dir / image).is_file():
         # 不是拒绝：页还在、块还在，只是它指向的整页照片取不到。要喊出来（不许静默）。
         warnings.append(_warning(
-            COMMIT_PAGE_PHOTO_MISSING,
+            PAGE_PHOTO_MISSING,
             f"页 {page_id} 的整页照片不在（{catalog.pages_dir / image}）→ 这几次入库的卡"
             f"指向一张取不到的页图（source.page_image = {_card_page_image(page)!r}）"))
 
@@ -307,5 +309,4 @@ def commit_page(catalog, page_id: str, *, at=None) -> tuple[dict, list[dict]]:
 
 
 __all__ = ["commit_page", "COMMIT_NOTHING_KEPT", "COMMIT_BLOCKS_SKIPPED",
-           "COMMIT_BLOCK_WITHOUT_BOX", "COMMIT_CARD_UNREADABLE",
-           "COMMIT_PAGE_PHOTO_MISSING"]
+           "COMMIT_BLOCK_WITHOUT_BOX", "COMMIT_CARD_UNREADABLE", "PAGE_PHOTO_MISSING"]
