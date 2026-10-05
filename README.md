@@ -33,7 +33,8 @@
 | **复习纸** | `CONTEXT.md`「复习纸」 | **未实现** |
 | **手机上传页** | ADR 0007 决定 4 | 已实现：`GET /upload` + `POST /api/inbox`（**未在真手机上验过**） |
 | **收件目录监视** | ADR 0007 决定 4 | **未实现监视**（`inotify` 在同步盘上不可靠）；手动等价入口已实现：`POST /api/inbox/scan` |
-| **生产前端（Docusaurus 站点）** | ADR 0006 | 已实现：清单页 / 重做页 / 切分修正页（`site/`） |
+| **生产前端（Docusaurus 站点）** | ADR 0006、ADR 0009 | 已实现：清单页 / 重做页 / 切分修正页（`site/`）；**重构中**：索引栏以**科目**为根（[issue #17](https://github.com/Nether-wart/ai-note/issues/17)） |
+| **科目与受控词表** | `CONTEXT.md`「科目」、ADR 0009 | 已实现：`subject` 是题卡一等字段、`vocab/subjects.json` 只有一份来源、`stats.by_subject` 按科目汇总、**未归类**兜底、`python3 -m server.subject_assign --map … [--apply]` 显式回填 |
 | **Tauri 打包** | ADR 0006 | **未实现** |
 | **后端重写（`server/`）** | ADR 0007 | 已实现：契约 v0（[`docs/contracts/http-api-v0.md`](docs/contracts/http-api-v0.md)）+ 只读端点 + 写端点 |
 | **界面鉴权** | ADR 0003（单用户本机） | 按设计不做 |
@@ -356,12 +357,13 @@ samples/         真实照片样例（已在 .gitignore 中）
 **功能缺口**（已在「实现状态」表列出，此处补充细节）：
 
 - **一次只能处理一道题**。一页多题要靠 `--note` 指认，批量切分与红笔筛选未实现。
-- **考点大纲是种子数据**（`topic-outline.seed.json` 自称「仅供原型验证受控词表机制，不是真实大纲」），6 个一级节点、每个 2–3 个子节点。
+- **考点大纲是种子数据**（形状 `{"大纲": {<科目>: {<章>: {<节>: [<点>]}}}}`，只为验证受控词表机制，**不是完整大纲**），一门科目、6 个章、每章 2–3 个节。
 - **错因清单 6 条**：概念不清、方法不会、计算失误、审题错误、时间不够、抄写错误。
 - **判定只看最终答案，不看过程**。
 - **活页纸是浏览器打印的 HTML**，不是 PDF 生成；打孔与双面未考虑。
 - **页锚点是短码 + 本机网址，不是二维码**；「扫一下打开」未实现（它不承担回写，只是快捷入口）。
-- **屏幕重做未实现**，所以自动判定目前无处可用，判定只有人工确认一条路。
+- **切分的模型层还没接**（`segmenter` 注入点是空的）：建页与重切都会明说「切分不可用」。
+  页**照建**、`blocks` 是 `null`（不是 `[]`），人可以在照片上自己画框——机器切分只是**预设**。
 - **复习纸未实现**。
 
 **已知债务**（代码注释或 ADR 里明确记录的）：
@@ -376,8 +378,10 @@ samples/         真实照片样例（已在 .gitignore 中）
 
 ## 接下来的方向
 
-- **屏幕重做**：规格在 [issue #1](https://github.com/Nether-wart/ai-note/issues/1)，标签 `ready-for-agent`。
-- **整页切分与错题筛选**：规格在 [issue #2](https://github.com/Nether-wart/ai-note/issues/2)，标签 `ready-for-agent`。
+- **接上切分的模型层**：`segmenter` 注入点还是空的（`server/app.py` 的 `build_server` 默认不注入），
+  上岗要过三关：视觉探针、固定照片集上的人工判定、三条对账判据。
+- **前端重构**：规格在 [issue #17](https://github.com/Nether-wart/ai-note/issues/17)，标签 `ready-for-agent`
+  ——索引以**科目**为根，录入与阅读都在同一个前端里走完（[ADR 0009](docs/adr/0009-runtime-sidebar-not-docs-plugin.md)）。
 - **生产前端**：以 Docusaurus 为基、保持可编译为 Tauri（ADR 0006）。数据不进构建产物；写入服务退化为纯 JSON API。
 - **后端重写**：契约优先，`proto/server.py` 只作原型的证据（ADR 0007）。实现语言暂时仍是 Python，因为十轮实测的资产（擦除、闸门统计、裁剪体检、逐字打磨过的提示词与阈值）都在 Python 里。
 
