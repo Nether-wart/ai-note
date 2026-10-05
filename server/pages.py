@@ -28,6 +28,8 @@ import json
 import re
 from pathlib import Path
 
+from . import errors
+
 PAGE_VERSION = 1
 
 # 页 id 会直接变成文件名，所以它必须是一个安全的文件名片段。
@@ -82,6 +84,41 @@ def page_path(catalog, page_id: str) -> Path:
     return catalog.pages_dir / f"{page_id}.json"
 
 
+def is_page_image_name(image) -> bool:
+    """页里的 `image` 能不能当「与页文件并列的照片文件名」（D5）。
+
+    `None` / `""` = 这一页还没记照片（回填会报提示），**允许**；但绝不许含路径分隔符
+    （`/`、`\\`）或 `..`：那样拼出来的 `image_path` 会指到 `pages/` 外面去读。
+    """
+    if image is None or image == "":
+        return True
+    if not isinstance(image, str):
+        return False
+    return "/" not in image and "\\" not in image and ".." not in image
+
+
+def page_identity_ok(page, page_id: str) -> bool:
+    """页里记的 `id` 与**目标页 id** 一致吗——**这条判据只有这一处**。
+
+    页 id 是文件名（写盘只看它）；页里的 `id` 只用于对账，形状也在这里用 `is_page_id`
+    校验。不一致时按内容里的 id 拼路径，就会静默写到别的文件上。
+    """
+    found = page.get("id") if isinstance(page, dict) else None
+    return is_page_id(found) and found == page_id
+
+
+def require_page_identity(catalog, page, page_id: str) -> None:
+    """写盘/点名之前必须过的一道闸：页里的 `id` 与目标页 id 不一致 → `ApiError`。
+
+    拒绝发生在**算写盘路径之前**，所以预演（`apply=False`）与真写走的是同一个校验。
+    """
+    if page_identity_ok(page, page_id):
+        return
+    found = page.get("id") if isinstance(page, dict) else None
+    raise errors.page_id_mismatch(page_id=page_id, found=found,
+                                  path=page_path(catalog, page_id))
+
+
 def read_page(catalog, page_id: str) -> tuple[dict | None, str | None]:
     """读一个页文件：`(页, 错误原话)`。
 
@@ -102,13 +139,28 @@ def read_page(catalog, page_id: str) -> tuple[dict | None, str | None]:
     return page, None
 
 
-def save_page(catalog, page: dict, *, apply: bool = True) -> Path:
+def save_page(catalog, page: dict, *, page_id: str, apply: bool = True) -> Path:
     """写页文件（先写临时文件再原子替换，免得写一半留下半个页）。
 
-    `apply=False` 只算出路径、不碰盘——预演与真写走同一条代码路径，
-    所以「预演说会建什么」与「真写建了什么」不会分叉。
+    **写盘路径只由 `page_id`（调用方点名的那个 id）决定**，页里的 `id` 字段只用于对账。
+    拿内容里的 id 拼路径就是「静默写到别的文件上」——`../problems/p-xxx` 会整份覆盖
+    一张真题卡，`someotherpage` 会写错文件却报另一个 `page_path`。所以**算路径之前**
+    先过 `require_page_identity`：不一致 → 400 `page_id_mismatch`
+    （`details.param == "page_id"`），一个字节都不写。
+
+    `apply=False` 只算出路径、不碰盘——预演与真写走同一条代码路径（**含这道闸**），
+    所以「预演说会建什么」与「真写建了什么」不会分叉，预演报出的 `page_path` 也不是假的。
     """
-    path = page_path(catalog, page["id"])
+    if not is_page_id(page_id):
+        raise errors.bad_request(
+            f"目标页 id 非法：{page_id!r}",
+            hint="页 id 就是页文件名的主干，只允许字母、数字、点、下划线与连字符，"
+                 "必须以字母或数字开头，且不许出现 '..'（它会变成路径穿越）",
+            param="page_id",
+            value=page_id,
+        )
+    require_page_identity(catalog, page, page_id)
+    path = page_path(catalog, page_id)
     if not apply:
         return path
     catalog.pages_dir.mkdir(parents=True, exist_ok=True)
@@ -216,6 +268,16 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
                     "message": f"{error} → 这张卡没有回填；不覆盖坏文件，先留证据",
                     "id": pid,
                 })
+            elif page is not None and not page_identity_ok(page, page_id):
+                # 页里的 id 与文件名不一致 = 数据矛盾。**不覆盖这个文件**（同不可读那一档）：
+                # 按内容里的 id 写回去就会静默落到别的文件上，甚至覆盖一张真题卡。
+                page_errors[page_id] = (
+                    f"{page_paths[page_id]} 里的 id 与文件名不一致：{page.get('id')!r}")
+                warnings.append({
+                    "code": "page_id_mismatch",
+                    "message": f"{page_errors[page_id]} → 这张卡没有回填；不覆盖这个文件，先留证据",
+                    "id": pid,
+                })
 
         if page_id in page_errors:
             reports.append(_card_report(pid, "skipped", page_id, page_errors[page_id]))
@@ -230,7 +292,15 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
         if page_id not in photo_checked:
             photo_checked.add(page_id)
             image_name = page.get("image") or ""
-            if not image_name or not (catalog.pages_dir / image_name).is_file():
+            if not is_page_image_name(image_name):
+                # 先判「是不是纯文件名」再拼路径：坏 image 会让 `.is_file()` 去 pages/ 外面探。
+                warnings.append({
+                    "code": "page_image_unsafe",
+                    "message": f"页 {page_id} 的 image 不是纯文件名：{image_name!r}"
+                               f" → 不拿它拼路径（照片必须与页文件并列，D5）",
+                    "id": pid,
+                })
+            elif not image_name or not (catalog.pages_dir / image_name).is_file():
                 warnings.append({
                     "code": "page_photo_missing",
                     "message": f"页 {page_id} 的整页照片不在：{catalog.pages_dir / image_name}"
@@ -256,7 +326,7 @@ def backfill_pages(catalog, *, apply: bool = False) -> dict:
     for page_id in sorted(dirty):
         page = pages_by_id[page_id]
         if page is not None:
-            save_page(catalog, page, apply=apply)
+            save_page(catalog, page, page_id=page_id, apply=apply)
 
     counts: dict[str, int] = {}
     for report in reports:

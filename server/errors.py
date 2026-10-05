@@ -135,3 +135,58 @@ def ambiguous_attempt_at(raw: str, *, pid: str, candidates: list,
         details={"id": pid, "attempt_at": raw, "candidates": candidates},
         warnings=warnings,
     )
+
+
+def page_id_mismatch(*, page_id: str, found, path) -> ApiError:
+    """页里的 `id` 与**目标页 id** 不一致 → **400**，且一个字节都不写。
+
+    页 id 是**文件名**（写盘只看调用方给的那个 id）；页里那个 `id` 字段是**内容**，
+    只用于对账。按内容里的 id 拼路径就是「静默写到别的文件上」：`../problems/p-xxx`
+    会整份覆盖一张真题卡，`someotherpage` 会写错文件却报另一个 `page_path`。
+
+    `details.param == "page_id"`，HTTP 层可以把这个 400 原样透出去——**两层各守一次**
+    是刻意的纵深防御（#12 的 `run_intake` 与 #14 的改页写入路径）。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"页里的 id 与目标页 id 不一致：页里是 {found!r}，目标是 {page_id!r}"
+        f"（页 id 就是文件名；内容里的 id 只用于对账）",
+        reason="page_id_mismatch",
+        hint="页 id 只允许字母、数字、点、下划线与连字符，且必须与目标页 id 逐字相同；"
+             "拒绝写入是为了不把这份页 JSON 覆盖到别的文件上",
+        details={"param": "page_id", "value": page_id, "found": found, "path": str(path)},
+    )
+
+
+def page_image_unsafe(*, page_id: str, image) -> ApiError:
+    """页里的 `image` 不是纯文件名 → **400**，拒绝拿它拼路径。
+
+    照片必须与页文件**同目录并列**（D5）。`../` 或绝对路径拼出来的 `image_path`
+    会指到 `pages/` 外面去——坏页文件因此能变成一个读任意路径的入口。
+    `details.param == "image"`。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"页 {page_id} 的 image 不是纯文件名：{image!r}"
+        f"（它只能是与页文件并列的照片名，不许含 '/'、'\\' 或 '..'）",
+        reason="page_image_unsafe",
+        hint="照片与页文件同目录并列（D5）；image 只填文件名，不带任何目录成分",
+        details={"param": "image", "value": image, "id": page_id},
+    )
+
+
+def filesystem_error(exc: OSError) -> ApiError:
+    """盘上的失败（文件不在／无权限／盘满）→ **500**，`message` 带异常类名。
+
+    D1：CLI 也不许裸回溯。写盘是「先写临时文件再原子替换」，所以失败不会留下半个文件。
+    """
+    return ApiError(
+        500,
+        "internal_error",
+        f"盘上操作失败：{exc.__class__.__name__}: {exc}",
+        reason="filesystem_error",
+        hint="这是盘上的问题（路径不存在、无权限、盘满），不是收入决策本身；"
+             "页文件没有写到一半（先写临时文件再原子替换）",
+    )

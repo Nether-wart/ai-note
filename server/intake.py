@@ -610,10 +610,13 @@ def _human_keep(page: dict, block_ids, *, keep: bool, at=None) -> dict:
 
 
 def _load_page(catalog, page_id) -> dict:
-    """点名要一页：id 非法 → 400；不在 → 404；读不了 → 500。**拒绝路径只有这一处**。
+    """点名要一页：id 非法 → 400；不在 → 404；读不了 → 500；**页里的 id 与点名的 id
+    不一致 → 400 `page_id_mismatch`**（`details.param == "page_id"`）。**拒绝路径只有这一处**。
 
     页 id 会拼进路径（`<data>/pages/<id>.json`），所以校验必须发生在碰盘之前——
     `../../problems/p-xxx` 这种 id 会让写回打到 `pages/` 外面，可能覆盖一张真题卡。
+    同理，**页文件里**那个 `id` 字段也必须与点名的 id 一致：写盘路径只认点名这个 id，
+    内容里的 id 只用于对账（`pages.require_page_identity`，`save_page` 里还有一道）。
     """
     if not pages.is_page_id(page_id):
         raise errors.bad_request(
@@ -638,6 +641,7 @@ def _load_page(catalog, page_id) -> dict:
                  "新照片走收件目录（#13）",
             what="page", id=page_id,
         )
+    pages.require_page_identity(catalog, page, page_id)
     return page
 
 
@@ -662,14 +666,24 @@ def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False
       这里是人点名要一页，找不到就得说）。
     - 页文件读不了/不是 JSON 对象 → **500** `internal_error`（口径同 `catalog.load_card`），
       `message` 里点名是哪个文件。
+    - **页里的 `id` 与点名的 id 不一致** → **400** `page_id_mismatch`
+      （`details.param == "page_id"`）：写盘路径只认点名的那个 id，内容里的 id 只用于对账。
+    - **页里的 `image` 不是纯文件名**（含 `/`、`\\`、`..`）→ **400** `page_image_unsafe`
+      （`details.param == "image"`）：不拿它拼 `pages/` 外面的路径去读。
 
     返回值在 `plan_decisions` 的报告之上再加 `page_id` / `page_path` / `apply` / `preview` /
     `asked`（这次问了哪些块）——「我做了什么、没做什么」都要看得见（ADR 0007 第 6 条）。
     """
     page = _load_page(catalog, page_id)
 
+    # `image` 拼路径之前先保证它是**纯文件名**（不含 '/'、'\'、'..'）：坏页文件里的
+    # `../` 会让服务去 `pages/` 外面读文件。拒绝在算路径之前，一个字节都没碰。
+    image_name = page.get("image")
+    if not pages.is_page_image_name(image_name):
+        raise errors.page_image_unsafe(page_id=page_id, image=image_name)
+
     moment = at or datetime.now()
-    image_path = catalog.pages_dir / str(page.get("image") or "")
+    image_path = catalog.pages_dir / str(image_name or "")
     warnings: list[dict] = []
     reports: list[dict] = []
     if not image_path.is_file():
@@ -707,7 +721,7 @@ def run_intake(catalog, page_id, *, semantics=None, at=None, apply: bool = False
 
     plan = plan_decisions(page, ink_reports=reports, semantics=answers, at=moment)
     if apply:
-        pages.save_page(catalog, plan["page"], apply=True)
+        pages.save_page(catalog, plan["page"], page_id=page_id, apply=True)
     return {
         **plan,
         "page_id": page_id,
@@ -752,7 +766,8 @@ def main(argv: list[str] | None = None, *, semantics=None, at=None) -> int:
 
     输出是**契约 §2 的信封**（`{ok, data, warnings, skipped}` 或 `{ok, error, …}`）——
     与 HTTP 端点同一形状，所以 #14 把界面接到这里时不必要另学一套。
-    失败一律退出码 2 并把 `code`/`reason`/`message` 打出来（D1：绝不许裸回溯）。
+    失败一律退出码 2 并把 `code`/`reason`/`message` 打出来（D1：绝不许裸回溯），
+    **盘上的 `OSError`（含 `FileNotFoundError`）也一样**（`reason = "filesystem_error"`）。
 
     `semantics` 是**测试接缝**：注入假的抽取角色，测试就不联网、不花钱。
     """
@@ -783,7 +798,7 @@ def main(argv: list[str] | None = None, *, semantics=None, at=None) -> int:
         if want_include:
             result = include_blocks(_load_page(catalog, args.page), block_ids, at=moment)
             if args.apply:
-                pages.save_page(catalog, result["page"], apply=True)
+                pages.save_page(catalog, result["page"], page_id=args.page, apply=True)
             report = result
         else:
             extractor = semantics
@@ -806,6 +821,15 @@ def main(argv: list[str] | None = None, *, semantics=None, at=None) -> int:
                           "warnings": err.warnings, "skipped": []},
                          ensure_ascii=False, indent=2))
         print(f"[model_unavailable] {err.message}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # D1：盘上的失败（文件不在／无权限／盘满）也是**结构化信封**，不许裸回溯。
+        # 写盘是「先写临时文件再原子替换」，所以到这儿的失败不会留下半个页文件。
+        err = errors.filesystem_error(exc)
+        print(json.dumps({"ok": False, "error": err.payload(),
+                          "warnings": err.warnings, "skipped": []},
+                         ensure_ascii=False, indent=2))
+        print(f"[internal_error] {err.message}", file=sys.stderr)
         return 2
     except ValueError as exc:
         # 坏配置（provider 不在白名单、阈值 NaN…）——**起不来**，不许静默降级

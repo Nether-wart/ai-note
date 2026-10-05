@@ -176,7 +176,7 @@ def test_a_page_file_that_does_not_bind_the_card_is_a_warning(api_for):
         "version": 1, "id": page_id, "image": f"{page_id}.png",
         "created_at": None, "origin": {"original_file": None, "sheet": None, "page_number": None},
         "blocks": [],   # 页文件在，却一个块都没绑定这张卡
-    })
+    }, page_id=page_id)
 
     (warn,) = warnings_of(api, "page_binding_lost")
     assert warn["level"] == "warning"
