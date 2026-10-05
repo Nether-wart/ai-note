@@ -682,6 +682,21 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 顺带记账：#5 的 `judge_output_unparsed`（`level: "warning"`，`server/attempt.py:102`，
 「模型答非所问」那一档）此前没进任何码表，本版一并登记——同一个形状的两处不该一处有一处没有。
 
+**写盘路径的纵深防御（数据安全修复 / #12）**——页 id 是**文件名**，页里的 `id`/`image`
+是**内容**：内容永远不决定写到哪、读到哪。判据只有一份（`server/pages.py` 的
+`page_identity_ok` / `is_page_image_name`），三处入口共用：`save_page`（写之前）、
+`intake._load_page`（点名之后）、`backfill_pages`（回填之前）。
+
+| `code` | 形状 | 触发 |
+|---|---|---|
+| `page_id_mismatch` | **400** `bad_request`（`details.param == "page_id"`）；回填报告里是 `warning` | 页里的 `id` 与目标页 id（＝文件名主干）不逐字相同，或形状过不了 `is_page_id` → **一个字节都不写**。按内容里的 id 拼路径会静默写到别的文件上（`../problems/p-xxx` 会整份覆盖一张真题卡） |
+| `page_image_unsafe` | **400** `bad_request`（`details.param == "image"`）；回填报告里是 `warning` | 页里的 `image` 含 `/`、`\` 或 `..` → 不拿它拼 `image_path`（否则会去 `pages/` 外面**读**文件） |
+| `filesystem_error` | **500** `internal_error`（`reason`），`message` 带异常类名 | CLI 的 `main` 捕获 `OSError`（含 `FileNotFoundError`）→ D1 信封，**不许裸回溯**；写盘是「先写临时文件再原子替换」，失败不留半个页 |
+
+`save_page(catalog, page, *, page_id, apply=…)` 的写盘路径**只由 `page_id` 决定**；
+身份闸在**算路径之前**，`apply=False` 的预演走**同一道**闸——预演报出的 `page_path`
+不许是假的（它与真写不许分叉）。
+
 **「另有 M 道没有红笔痕迹、未入库」这句话由服务给**（与 §6.1 第 5 条同一条规矩）：
 `not_kept` 报告里 `message` 是服务写好的整句，`by_rule` 逐条列出**可枚举**的理由
 （`rule` / `count` / `ids` / `message`），`one_click.entry` 给出**一键补收的可调用入口**。
@@ -716,6 +731,12 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 `not_found` 下的 `reason` 取值（都是 404，`code` 不变）：没有这道题（`reason == "not_found"`）、
 没有**那一次重做**（`reason == "attempt_not_found"`，#6，`details.available` 列出实际有哪些时刻）、
 没有这张图（`reason == "not_found"`）。
+
+`internal_error` 下的 `reason` 取值（都是 500，`code` 不变）：页文件读不了（`page_file_unreadable`）、
+盘上操作失败（`filesystem_error`，`message` 带异常类名）——**不许用裸回溯代替信封**（D1）。
+`bad_request` 下的 `reason` 取值（都是 400，`code` 不变，`details.param` 点名字段）：
+页里的 `id` 与目标页 id 不一致（`page_id_mismatch`）、页里的 `image` 不是纯文件名
+（`page_image_unsafe`）——写盘路径只认调用方给的页 id，页里的 `id`/`image` 只用于对账（§8）。
 
 补充硬规则（编排裁决 D1）：
 
@@ -1109,6 +1130,7 @@ body 上限默认 32MB，超了是 **413** `payload_too_large`（§9）。
 | 本版（B2 / #10 收尾） | §8 的页级对账码表**改回 §2 的 `Warning` 形状**（`{code, message, id, level}`，页级 `id` 为 `null`、卡级填卡 id；`rebind` 交回的事实由出口补级别，表里没有的码按 `warning` 报） | 上一条预告写的 `{code, level, message}` 与 §2「形状一致」自相矛盾，实测也确实漏了：`pages.rebind` 手搓的三条码（`block_without_box`/`block_not_an_object`/`block_removed_with_card`）**没有 `level`**，而 `classify_resegment` 原样透传——于是页级对账的出口会漏出「没有 level 的警告」，下游只能靠猜（正是 §2 要防的）。同时发现 `classify_resegment` 在调 `rebind` 前用 `isinstance(b, dict)` 静默 filter 掉块列表里的非对象项（`rebind` 明明会报 `block_not_an_object`）——与 `proto/server.py:320-321`、`:933-936` 同一种写法。两条都有会红的测试钉住；记账见 issue #10 的评论 |
 | 本版（B6 / #14） | §10 状态表把 §10.2 改成**部分已实现**并加 §10.2.1b（四个动作的 HTTP 形状、七条 `action` 的闭集、五条偏离记账）；§10.2.2 与 §12 加 `server/coords.py`／`page_edit.py`／`page_api.py`／`site/src/lib/split.js` | 工单 #14 验收 1/2/3。**先写进 issue #14 的评论再动手**（BRIEF 硬规则 3）。要点：①「改」与「重切」落地，「建」「入库」归 #15 且**不冒充成功**；②`action`／`problem_type` 是闭集，拼错的值会**静默**让下游判据失效；③边界改动后 `bbox_px` 作废置 `null`（它是加了 pad 的盘上原值，留着就是「安静的谎」）；④**页载荷的 `id`／`image` 不许决定读写到哪**——修掉一处**真漏洞**：一份文件名正常、载荷 `id: "../problems/p-x"` 的页文件会让一次「改页」覆盖一张真题卡，且 `page_path` 是假的、零警告；现在写读前验 `page["id"] == 加载时用的页 id` 且 `image` 是纯文件名，不一致 → 400、一个字节不动；⑤隐私回归抓出一处真泄漏（真实页哈希进了 `build/`）与两处夹具里的真题原句，已清理 |
 | 本版（D10 / #6） | §10.1 的「**掌握只能重算**」改成「**按 payload 是否改判据分流**」：改判（`verdict` 与现值不同）仍必须重放重算；只改错因（没给 `verdict` 或与现值相同）**不重算**，卡上 `mastery` 与既有 `attempts[i].note` 逐字保留。`mastery` 的「被改那一次的读数」由 `mastery.peek_step` **只读地**给（与重放共用同一份冷却门，故两条路径逐字一致，幂等不受影响）。§12 的 `mastery.py`／`amend.py` 两行跟上 | 独立验证者在 #6 上找到的边界：**只改 `error_causes`** 时，若卡上存的 `mastery` 不是历史的重放固定点，`recompute_mastery` 会把它重放改写——一张「已毕业、连对 5 次」的卡因一次纯标注编辑被**静默重置回池**，连 `attempts[i].note` 也被重写。理由三条：无关编辑不该销毁人动过的状态（spec #2 同一原则）、不许静默（ADR 0007 第 6 条）、漂移该由审计报出来（#15）而不是被顺手改掉。**修法是分流，不是取消重放**（#6 验收 1 一条都不许取消） |
+| 本版（#12 数据安全修复） | §8 加「写盘路径的纵深防御」三个码（`page_id_mismatch`/`page_image_unsafe` 为 400 + `details.param`、`filesystem_error` 为 500）；§9 补 `internal_error`/`bad_request` 的 `reason` 取值；`save_page(catalog, page, *, page_id, …)` 的写盘路径只认 `page_id`，身份闸在算路径之前、预演走同一道闸 | 独立验证者实测的真反例：页 id 的校验只挡「传进来的 id」，挡不住「页文件里 `id` 字段」——`save_page` 拿它拼路径，`{"id":"../problems/p-20261004-41c86b"}` 会让 `run_intake(apply=True)` 把整份页 JSON **覆盖一张真题卡**（受害者 md5 变、`warnings == []`、CLI rc=0），`"id":"../../problems/p-nope"` 则是 CLI 裸 `FileNotFoundError`。同类入口还有 `image` 拼 `image_path`（可借读取穿越 `pages/`）与 `backfill` 的写回。**先写进 issue #12 的评论再动手**（BRIEF 硬规则 3） |
 
 ## 12. 模块角色（下游一眼要看到的两件事）
 
