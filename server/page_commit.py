@@ -58,6 +58,8 @@ COMMIT_BLOCK_WITHOUT_BOX = "page_commit_block_without_box"    # warning：边界
 COMMIT_CARD_UNREADABLE = "page_commit_card_unreadable"        # warning：卡在却读不了 → 不覆盖
 # 页指向的整页照片不在：**同一个事实、同一个码**（#9 的回填与 #15 的审计也用这个码）。
 PAGE_PHOTO_MISSING = "page_photo_missing"                     # warning：整页照片不在
+# 题卡文件读不了（契约 §8）：与审计的 `card_files_readable` 同一个码、同一件事。
+CARD_FILE_UNREADABLE = "card_file_unreadable"                 # warning：卡在却读不了
 
 
 def _warning(code: str, message: str, card_id: str | None = None, level: str = "warning") -> dict:
@@ -69,18 +71,36 @@ def _iso(moment) -> str:
     return moment.isoformat(timespec="seconds")
 
 
-def _existing_card_ids(catalog) -> set[str]:
-    """盘上已经被占用的题卡 id（文件名主干 + 卡里的 `id`，两者不一致时都算占用）。"""
+def _existing_card_ids(catalog) -> tuple[set[str], list[dict]]:
+    """盘上已经被占用的题卡 id + 「哪些卡读不了」的记账。
+
+    占用集合**先收文件名主干**再看卡里的 `id`：文件名就是写盘的落点，读不了也照样
+    占着（否则一次入库会把新卡写到一份坏文件上）。
+
+    读不了的卡**不许安静地 `continue`**（R4）：卡里那个 `id` 悄悄丢了，而「这张卡
+    读不了」这件事一声不响。按 §8 报 `card_file_unreadable`（与审计同一件事、同一个码）。
+    """
     taken: set[str] = set()
+    warnings: list[dict] = []
     for path in sorted(catalog.problems_dir.glob("*.json")):
         taken.add(path.stem)
         try:
             card = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as exc:
+            warnings.append(_warning(
+                CARD_FILE_UNREADABLE,
+                f"题卡 {path.name} 读不了（{exc.__class__.__name__}: {exc}）→ 它占用的 id "
+                f"只按文件名算，卡里的 id 查不到；先修好这个文件（不是安静少一张）",
+                path.stem))
             continue
         if isinstance(card, dict) and isinstance(card.get("id"), str) and card["id"]:
             taken.add(card["id"])
-    return taken
+        elif not isinstance(card, dict):
+            warnings.append(_warning(
+                CARD_FILE_UNREADABLE,
+                f"题卡 {path.name} 不是一个 JSON 对象 → 它占用的 id 只按文件名算，"
+                f"卡里没有可读的 id（不是安静少一张）", path.stem))
+    return taken, warnings
 
 
 def _card_page_image(page: dict) -> str | None:
@@ -235,7 +255,8 @@ def commit_page(catalog, page_id: str, *, at=None) -> tuple[dict, list[dict]]:
             f" `decision` 里，可一键补收）", None, "hint"))
 
     # 只给「收」且边界可用的块分配 id（补收过的块已带 card_id 的走 reused）。
-    taken = _existing_card_ids(catalog)
+    taken, card_read_warnings = _existing_card_ids(catalog)
+    warnings.extend(card_read_warnings)
     subset = {**page, "blocks": [block for _, block in kept]}
     assignment = pages.assign_card_ids(subset, taken=taken, at=moment)
     assigned_blocks = assignment["page"]["blocks"]
@@ -308,4 +329,5 @@ def commit_page(catalog, page_id: str, *, at=None) -> tuple[dict, list[dict]]:
 
 
 __all__ = ["commit_page", "COMMIT_NOTHING_KEPT", "COMMIT_BLOCKS_SKIPPED",
-           "COMMIT_BLOCK_WITHOUT_BOX", "COMMIT_CARD_UNREADABLE", "PAGE_PHOTO_MISSING"]
+           "COMMIT_BLOCK_WITHOUT_BOX", "COMMIT_CARD_UNREADABLE", "PAGE_PHOTO_MISSING",
+           "CARD_FILE_UNREADABLE"]

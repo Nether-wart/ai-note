@@ -295,3 +295,28 @@ def test_an_unsafe_page_image_is_a_400_and_no_card_is_ever_written(tmp_path):
     assert status == 400
     assert envelope["error"]["details"]["param"] == "page_id"
     assert list(api.catalog.problems_dir.glob("*.json")) == []
+
+
+def test_commit_names_a_card_file_it_could_not_read(tmp_path):
+    """R4/D9：盘上有一张读不了的卡 → 入库**点名报出来**（§8 `card_file_unreadable`）。
+
+    `_existing_card_ids` 修前对读不了的卡 `except Exception: continue`：被占用的 id 只
+    按文件名认，卡里那个 id 悄悄丢了，而这张卡「读不了」这件事**一声不响**。
+    「不是安静少一张」是 §8 给这条码写的话。
+    """
+    api = build_api(tmp_path, pages=[a_page([
+        block("b1", [0.02, 0.02, 0.9, 0.2], keep=True),
+    ])])
+    (api.catalog.problems_dir / "p-20261004-zzzzzz.json").write_bytes(b"{ not json")
+
+    status, envelope = commit(api)
+
+    assert status == 200, envelope
+    hits = [w for w in envelope["warnings"] if w["code"] == "card_file_unreadable"]
+    assert len(hits) == 1, envelope["warnings"]
+    assert hits[0]["level"] == "warning"
+    assert hits[0]["id"] == "p-20261004-zzzzzz"
+    assert "p-20261004-zzzzzz.json" in hits[0]["message"]
+    # 正常那一块照样入库（读不了的卡不挡别人的路），坏文件一个字节没动
+    assert envelope["data"]["created"], envelope["data"]
+    assert (api.catalog.problems_dir / "p-20261004-zzzzzz.json").read_bytes() == b"{ not json"

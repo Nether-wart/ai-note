@@ -37,6 +37,10 @@ from .warnings import _warn
 # 同一个码——不然界面上会有两个说法（契约 §8 的码表纪律）。
 SEGMENTATION_NOT_IMPLEMENTED = "segmentation_not_implemented"
 
+# 题卡文件读不了（契约 §8）：审计的 `card_files_readable` 用的是同一个码、同一件事——
+# 「点名报出来，不是安静少一张」。重切用它是因为读不了的卡可能正是「人动过」的那张。
+CARD_FILE_UNREADABLE = "card_file_unreadable"
+
 
 
 def parse_json_body(body) -> dict:
@@ -179,8 +183,9 @@ class PageEndpoint:
                 "wrote_page": False,
             }, warnings
 
-        cards = {card.get("id"): card for card in self._cards() if card.get("id")}
-        report = segmentation.classify_resegment(page, parsed["blocks"], cards=cards)
+        cards, card_warnings = self._cards()
+        report = segmentation.classify_resegment(
+            page, parsed["blocks"], cards={card["id"]: card for card in cards})
         # 对账（R1）：三条确定性判据跑在**这次重切给出的块列表**上——题号连续性／
         # 块重叠是纯几何，覆盖率读页文件旁边那张整页照片（读不出来就明说「没查」）。
         # **只报不改**：重切本来就不写盘（见 docstring）。
@@ -195,7 +200,8 @@ class PageEndpoint:
             "checks": reconciliation["checks"],
             "reconciliation": reconciliation["reconciliation"],
             **report,
-        }, warnings + list(report.get("warnings") or []) + reconciliation["warnings"]
+        }, (warnings + card_warnings + list(report.get("warnings") or [])
+            + reconciliation["warnings"])
 
     # ------------------------------------------------------------ 整页照片
 
@@ -253,18 +259,37 @@ class PageEndpoint:
         """
         return self.catalog.pages_dir / Path(str(page.get("image") or "")).name
 
-    def _cards(self) -> list[dict]:
-        """盘上的题卡（`{id: 卡}` 的原料）。切分对账要用它判断「这张卡人动过没有」。"""
+    def _cards(self) -> tuple[list[dict], list[dict]]:
+        """盘上的题卡 + 「哪些卡没读进来」的记账。
+
+        读不了的卡**不许安静地 `continue`**（R4）：它可能正是「人动过、不许被重切改写」
+        的那一张，丢掉它 = 这条对账查不全还不记账。按 §8 报 `card_file_unreadable`，
+        点名到文件（`id` = 文件名主干，`message` 里带全路径）——判据与审计的
+        `card_files_readable` 那一项**同一件事、同一个码**（`server/audit.py`）。
+        """
         cards: list[dict] = []
+        warnings: list[dict] = []
         for path in sorted(self.catalog.problems_dir.glob("*.json")):
             try:
                 card = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                # 读不了的卡不进对账：它由 `catalog` 的既有路径去喊（这里不重复报）。
+            except Exception as exc:
+                warnings.append(_warn(
+                    CARD_FILE_UNREADABLE,
+                    f"题卡 {path.name} 读不了（{exc.__class__.__name__}: {exc}）→ "
+                    f"这张卡**没有进**这次重切对账：「人动过的卡不许被改写」这一条对它没查，"
+                    f"先修好这个文件（它可能是人动过的那一张）",
+                    path.stem, "warning"))
                 continue
-            if isinstance(card, dict) and card.get("id"):
+            if not isinstance(card, dict):
+                warnings.append(_warn(
+                    CARD_FILE_UNREADABLE,
+                    f"题卡 {path.name} 不是一个 JSON 对象 → 这张卡**没有进**这次重切对账："
+                    f"「人动过的卡不许被改写」这一条对它没查",
+                    path.stem, "warning"))
+                continue
+            if card.get("id"):
                 cards.append(card)
-        return cards
+        return cards, warnings
 
     def _ink_regions(self, page: dict):
         """页文件旁边那张整页照片 → 墨迹区域（覆盖率对账的输入，契约 §8）。
@@ -279,4 +304,4 @@ class PageEndpoint:
 
 
 __all__ = ["PageEndpoint", "parse_json_body", "SEGMENTATION_NOT_IMPLEMENTED",
-           "ModelUnavailable"]
+           "CARD_FILE_UNREADABLE", "ModelUnavailable"]

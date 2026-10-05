@@ -401,6 +401,50 @@ def test_resegment_shouts_when_two_new_blocks_overlap(tmp_path):
     assert envelope["data"]["checks"]["overlaps"]["pairs"]
 
 
+def test_resegment_names_a_card_file_it_could_not_read(tmp_path):
+    """R4/D9：盘上有一张读不了的卡 → 重切**点名报出来**（§8 `card_file_unreadable`）。
+
+    修前 `_cards()` 里 `except Exception: continue` 把它丢掉，于是「人动过的卡不许被
+    重切改写」这条对账**查不全却不记账**——读不了的那张可能正是人动过的那张。
+    """
+    existing = page([block("b1", [0.0, 0.0, 1.0, 0.5], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=1)])
+    api = build_api(tmp_path, pages=[existing],
+                    segmenter=lambda path: {"blocks": [dict(UPPER)], "parsed": True,
+                                            "rejected": [], "warnings": []})
+    (api.catalog.problems_dir / "p-20261004-zzzzzz.json").write_bytes(b"{ not json")
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    hits = [w for w in envelope["warnings"] if w["code"] == "card_file_unreadable"]
+    assert len(hits) == 1, envelope["warnings"]
+    # 形状：warning + 文件指针（`id` 是文件名主干，`message` 里带全路径）
+    assert hits[0]["level"] == "warning"
+    assert hits[0]["id"] == "p-20261004-zzzzzz"
+    assert "p-20261004-zzzzzz.json" in hits[0]["message"]
+    # 明说这张卡**没进对账**（D1：不许安静地少一张）
+    assert "没有进" in hits[0]["message"] and "对账" in hits[0]["message"]
+
+
+def test_resegment_is_not_confused_by_a_readable_card_next_to_an_unreadable_one(tmp_path):
+    """正常卡不受影响：能读的卡照旧进对账、照旧按「人动过」喊。"""
+    existing = page([block("b1", [0.0, 0.0, 1.0, 0.5], card_id="p-20261004-aaaaaa",
+                           keep=True, question_no=1)])
+    reviewed = {"id": "p-20261004-aaaaaa", "review": {"status": "reviewed"}, "attempts": []}
+    api = build_api(tmp_path, pages=[existing], cards=[reviewed],
+                    segmenter=lambda path: {"blocks": [dict(UPPER)], "parsed": True,
+                                            "rejected": [], "warnings": []})
+    (api.catalog.problems_dir / "p-20261004-zzzzzz.json").write_bytes(b"{ not json")
+
+    status, envelope = post_json(api, f"/api/page/{PAGE_ID}/resegment")
+
+    assert status == 200, envelope
+    codes = [w["code"] for w in envelope["warnings"]]
+    assert codes.count("card_file_unreadable") == 1
+    assert "resegment_card_human_work" in codes, "能读的那张照样进对账"
+
+
 # ---------------------------------------------------------------- 入库（commit）与建（POST /api/page）
 
 
