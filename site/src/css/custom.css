@@ -30,7 +30,9 @@
 
 .ai-note-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  /* `min(24rem, 100%)`：24rem 是**想**要的一栏宽度，屏幕比它窄时以屏幕为准。
+      写死 `minmax(24rem, 1fr)` 时，比 24rem 窄的屏幕上这一栏会横向溢出。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
   gap: var(--ifm-spacing-vertical);
 }
 
@@ -168,6 +170,27 @@
   margin: 0.35rem 0 0;
 }
 
+/* 「科目索引」开关：**只在窄屏出现**（桌面上由下面的媒体查询 `display: none`），
+   展开／收起的判据是 `<nav>` 上的 `data-mobile-open`。用 `flex` 是为了让名字与
+   箭头两端对齐——跟侧栏里每一行的排法一致。 */
+.ai-note-sidebar__toggle {
+  display: none;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--ai-note-border);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-color-emphasis-100);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
 .ai-note-sidebar__count {
   /* 不用 `float`：`.menu__link` 是 **flex**，而浮动对 flex 子项**无效**——
      计数会紧贴科目名，渲染成「数学2」。`margin-left: auto` 在 flex 里把它推到最右。 */
@@ -223,7 +246,15 @@
   position: relative;
   display: block;
   margin: 1rem 0;
-  /* 触摸设备上拖块框要吃掉滚动手势，否则框一拖页面就跟着滚 */
+  /* 竖向手势留给页面滚动：阅读页／审核页的照片占掉大半屏，图上划不动就等于
+     整页划不动（手机上真会卡住）。拖块框的 `.ai-note-block-box` 与画框模式
+     各自把手势收回去，见下面两条。 */
+  touch-action: pan-y;
+}
+
+.ai-note-page-photo--draw,
+.ai-note-page-photo--draw img {
+  /* 画框模式：照片上任何方向的手势都用来拉框，不许滚页面。 */
   touch-action: none;
 }
 
@@ -241,6 +272,8 @@
   background: rgba(179, 38, 30, 0.08);
   cursor: move;
   box-sizing: border-box;
+  /* 手指按在**块框**上拖 = 移动这一块，不吃页面滚动。 */
+  touch-action: none;
 }
 
 .ai-note-block-box--selected {
@@ -258,7 +291,9 @@
   position: absolute;
   top: -1.25rem;
   left: -2px;
-  max-width: 24rem;
+  /* 窄屏上按屏宽收窄：写死 24rem 时，靠近照片右边的块框，角标会把工作台
+     撑出一条横向滚动。 */
+  max-width: min(24rem, 70vw);
   overflow: hidden;
   white-space: nowrap;
   font-size: 0.7rem;
@@ -333,7 +368,8 @@
   list-style: none;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  /* 同上：320px 的屏幕上 `minmax(20rem, 1fr)` 会溢出（工作台两侧还有内边距）。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
   gap: 0.75rem;
 }
 
@@ -468,4 +504,98 @@
   padding: 0 0 0 0.25rem;
   cursor: pointer;
   color: var(--ifm-color-emphasis-600);
+}
+
+/* ------------------------------------------------------------------
+   移动端：窄屏上真正要改的东西
+   断点照 Docusaurus／Infima 那一套（996 = 侧栏与正文堆叠，576 = 手机），
+   不另造一套刻度。这里每一条都对应一个**量到过**的读数，见 `site/README.md`
+   的「移动端」一节。
+   ------------------------------------------------------------------ */
+
+/* 独立公式**自己横向滚**，不把整页撑宽。
+   KaTeX 给 `.katex-display > .katex` 定了 `white-space: nowrap`——公式不换行，
+   而一个 cases 分段函数在手机上比正文栏宽得多（实测 389px 的公式 vs 281px 的栏）。
+   没有这一条时，360px 的手机上整页被撑到 421px：`mobile` 仿真下 Chrome 会把布局
+   视口撑宽，看起来像"页面缩小了"，其实是溢出。 */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+@media (max-width: 996px) {
+  /* 手机上把独立公式**靠左**：居中时比容器宽的那一行会向左右两边一起溢出，
+     而向左溢出的部分滚不到（滚动原点在左上角）。靠左之后只需要向右滚。 */
+  .katex-display > .katex {
+    text-align: left;
+  }
+
+  /* 表单控件字号不低于 16px：iOS Safari 在 <16px 的输入框上聚焦会**自动放大整页**
+     （实测 13.3px）。这一条修的是"点一下输入框，页面跳大"。 */
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+
+  /* 科目索引栏：手机上默认收起来，由 `Sidebar.js` 那个开关展开。
+     9 个科目 × 5 条链接在 360px 上量到 1719px 高——比一台手机还高一倍多，
+     正文要从它下面才开始。桌面不受影响：开关在桌面上 `display: none`，
+     列表照旧常开（`data-mobile-open` 只在窄屏被读）。 */
+  .ai-note-sidebar__toggle {
+    display: flex;
+  }
+
+  .ai-note-sidebar__list {
+    display: none;
+  }
+
+  .ai-note-sidebar[data-mobile-open='true'] .ai-note-sidebar__list {
+    display: block;
+  }
+}
+
+@media (max-width: 576px) {
+  /* 手机上左右各一层 1rem 的内边距（外壳一层、Infima 的 `.container` 一层）
+     把 17% 的屏宽吃掉。外壳那一层减半，正文里的容器照旧。 */
+  .ai-note-shell {
+    gap: 1rem;
+    padding: 0.75rem 0.5rem 3rem;
+  }
+
+  /* Infima 的 `.button` 是 `white-space: nowrap`：一句长标签在 320px 上会让按钮
+     比正文栏还宽（实测 288px 的按钮 vs 241px 的栏）。手机上允许换行。 */
+  .button {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  /* 工作台：左右 1rem 已经够，把竖向空间留给照片。 */
+  .ai-note-workbench {
+    padding: 0.75rem 0.5rem 4rem;
+  }
+
+  .ai-note-workbench__head h1 {
+    font-size: 1.1rem;
+  }
+
+  .ai-note-dropzone {
+    padding: 1rem;
+  }
+
+  /* 一条很长的路径／一段 JSON 不该把页面撑宽：这些地方的 `code` 允许在任意处断行。 */
+  .ai-note-meta code,
+  .ai-note-banner code,
+  .ai-note-summary code,
+  .ai-note-hint code,
+  .ai-note-warn code {
+    overflow-wrap: anywhere;
+  }
+
+  /* 「✕ 删掉这一项」原本只有一个字的点击目标，手机上点不中。 */
+  .ai-note-edit__drop {
+    padding: 0.2rem 0.45rem;
+    min-width: 1.75rem;
+    min-height: 1.75rem;
+  }
 }

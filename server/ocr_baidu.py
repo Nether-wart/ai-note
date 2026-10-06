@@ -71,6 +71,23 @@ def _norm_box(location, size) -> list[float] | None:
             round(width / image_w, 6), round(height / image_h, 6)]
 
 
+#: token 的路径（百度 aip 与千帆都用它；留着可配是为了别家形状）。
+DEFAULT_TOKEN_PATH = "/oauth/2.0/token"
+
+
+def _oauth_reason(text: str) -> str:
+    """把 OAuth 形状的错误读成人话：`invalid_client` / `unknown client id` 这种。"""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(data, dict):
+        return text
+    error = data.get("error") or data.get("error_code")
+    description = data.get("error_description") or data.get("error_msg") or ""
+    return f"{error}：{description}".strip("：") if error else text
+
+
 class _ServiceError(Exception):
     def __init__(self, code: int, message: str) -> None:
         super().__init__(f"OCR 服务报错 {code}：{message}")
@@ -107,7 +124,8 @@ class BaiduOcrEngine:
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, *, path: str = DEFAULT_PATH,
                  token: str | None = None, client_id: str | None = None,
-                 client_secret: str | None = None, transport=None,
+                 client_secret: str | None = None, bearer: str | None = None,
+                 token_path: str = DEFAULT_TOKEN_PATH, transport=None,
                  timeout: float = DEFAULT_TIMEOUT) -> None:
         if path not in PATHS:
             raise ValueError(f"认不出的 OCR 路径：{path!r}；可选：{', '.join(PATHS)}")
@@ -116,17 +134,20 @@ class BaiduOcrEngine:
         self.token = (token or "").strip() or None
         self.client_id = (client_id or "").strip() or None
         self.client_secret = (client_secret or "").strip() or None
+        # 千帆 v2 那一套用 `Authorization: Bearer <密钥>`，不取 access_token。
+        # 给哪一套就按哪一套说：两套混着猜是最糟的。
+        self.bearer = (bearer or "").strip() or None
+        self.token_path = token_path if token_path.startswith("/") else "/" + token_path
         self.transport = transport or self._default_transport
         self.timeout = timeout
         self._cached_token: str | None = None
         self._expires_at = 0.0
 
-    def _default_transport(self, url: str, blob: bytes, timeout: float):
-        request = urlrequest.Request(
-            url, data=blob, method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded",
-                     "Content-Length": str(len(blob))},
-        )
+    def _default_transport(self, url: str, blob: bytes, timeout: float, headers=None):
+        merged = {"Content-Type": "application/x-www-form-urlencoded",
+                  "Content-Length": str(len(blob))}
+        merged.update(headers or {})
+        request = urlrequest.Request(url, data=blob, method="POST", headers=merged)
         try:
             with urlrequest.urlopen(request, timeout=timeout) as response:
                 return response.status, response.read()
@@ -136,21 +157,27 @@ class BaiduOcrEngine:
     def _fetch_token(self) -> str:
         """去要一个新 token。失败抛 `_ServiceError`（由 `__call__` 变成不可用）。"""
         if not (self.client_id and self.client_secret):
-            raise _ServiceError(0, "没有凭据：要给 token，或给 client_id ＋ client_secret")
+            raise _ServiceError(0, "没有凭据：要给 token／client_id＋client_secret／bearer")
         form = urlparse.urlencode({
             "grant_type": "client_credentials",
             "client_id": self.client_id,
             "client_secret": self.client_secret,
         }).encode("ascii")
-        status, body = self.transport(f"{self.base_url}/oauth/2.0/token", form, self.timeout)
+        status, body = self.transport(f"{self.base_url}{self.token_path}", form, self.timeout)
+        text = body[:200].decode("utf-8", "replace")
         if status != 200:
-            raise _ServiceError(status, body[:200].decode("utf-8", "replace"))
+            # **真百度的 token 错误是 OAuth 形状**（`{"error":"invalid_client",
+            # "error_description":"unknown client id"}` ＋ 401），不是 `error_code`——
+            # 实测过。把它读成人话，别只丢一串 JSON 给人。
+            raise _ServiceError(status, _oauth_reason(text))
         try:
             data = json.loads(body.decode("utf-8", "replace"))
         except ValueError as exc:
             raise _ServiceError(0, f"token 回执读不出来：{exc}") from exc
         if data.get("error_code"):
             raise _ServiceError(int(data["error_code"]), str(data.get("error_msg") or ""))
+        if data.get("error"):
+            raise _ServiceError(0, _oauth_reason(text))
         value = data.get("access_token")
         if not isinstance(value, str) or not value:
             raise _ServiceError(0, f"token 回执里没有 access_token：{body[:120]!r}")
@@ -168,10 +195,14 @@ class BaiduOcrEngine:
             return self._cached_token
         return self._fetch_token()
 
-    def _once(self, access_token: str, form: bytes, size):
-        url = (f"{self.base_url}/rest/2.0/ocr/v1/{self.path}?"
-               + urlparse.urlencode({"access_token": access_token}))
-        status, body = self.transport(url, form, self.timeout)
+    def _once(self, access_token: str | None, form: bytes, size):
+        url = f"{self.base_url}/rest/2.0/ocr/v1/{self.path}"
+        headers = None
+        if access_token:
+            url += "?" + urlparse.urlencode({"access_token": access_token})
+        else:
+            headers = {"Authorization": f"Bearer {self.bearer}"}
+        status, body = self.transport(url, form, self.timeout, headers)
         if status != 200:
             raise _ServiceError(status, body[:200].decode("utf-8", "replace"))
         return _parse(body, size)
@@ -182,7 +213,8 @@ class BaiduOcrEngine:
         size = png_size(image)
         try:
             try:
-                lines, warnings = self._once(self.access_token(), form, size)
+                lines, warnings = self._once(None if self.bearer else self.access_token(),
+                                             form, size)
             except _ServiceError as exc:
                 if exc.code != 110 or self.token:
                     raise
@@ -234,5 +266,7 @@ def engine_from_config(catalog=None, *, env=None, transport=None) -> BaiduOcrEng
         token=pick("token"),
         client_id=pick("client_id"),
         client_secret=pick("client_secret"),
+        bearer=pick("bearer"),
+        token_path=(pick("token_path") or DEFAULT_TOKEN_PATH),
         transport=transport,
     )

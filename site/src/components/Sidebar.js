@@ -1,4 +1,4 @@
-import React from 'react';
+import React, {useEffect, useState} from 'react';
 import Link from '@docusaurus/Link';
 import {useLocation} from '@docusaurus/router';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
@@ -27,12 +27,23 @@ import {useIndex} from '../lib/shell-context';
  *   3. 服务没给某个科目的桶（`countsMissing`）时说「读数缺失」，**不许装作 0 道**；
  *   4. **简报过期**照 `brief.stale` / `brief.new_problems` 显示，
  *      那句话里的 N 照抄服务给的数，界面不自己算。
+ *
+ * 窄屏（≤996px，与 `custom.css` 同一个断点）上这棵树默认**收起来**，由顶上的
+ * 「科目索引」开关展开：9 个科目 × 5 条链接在 360px 上是 1719px 高，正文会被顶到
+ * 手机屏幕以外。桌面不受影响——开关本身在桌面上 `display: none`，列表常开，
+ * 所以这里的状态只对窄屏有意义（`data-mobile-open` 也只在窄屏被 CSS 读）。
+ * 换一页就收回：外壳在路由之间不重挂，不收的话点完一条链接目录还张着。
  */
 export default function Sidebar({onUpload}) {
   const index = useIndex();
   const location = useLocation();
   const {siteConfig} = useDocusaurusContext();
   const baseUrl = siteConfig.baseUrl || '/';
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location?.pathname, location?.search]);
 
   const pathname = (location?.pathname || '/').replace(/index\.html$/, '');
   const search = location?.search || '';
@@ -45,7 +56,10 @@ export default function Sidebar({onUpload}) {
   const tree = data ? sidebarTree(data) : null;
 
   return (
-    <nav className="menu ai-note-sidebar" aria-label="科目索引">
+    <nav
+      className="menu ai-note-sidebar"
+      aria-label="科目索引"
+      data-mobile-open={mobileOpen ? 'true' : 'false'}>
       <div className="ai-note-sidebar__top">
         <button
           type="button"
@@ -58,6 +72,18 @@ export default function Sidebar({onUpload}) {
         <p className="ai-note-meta ai-note-sidebar__hint">
           上传整页照片 → 切分 → 人工调整 → 入库。
         </p>
+        {/* 窄屏才有（桌面上 CSS 把它藏起来）：展开／收起下面那棵树。 */}
+        <button
+          type="button"
+          className="ai-note-sidebar__toggle"
+          aria-expanded={mobileOpen}
+          aria-controls="ai-note-sidebar-list"
+          onClick={() => setMobileOpen((open) => !open)}
+          data-action="toggle-sidebar"
+          data-mobile-open={mobileOpen ? 'true' : 'false'}>
+          <span>科目索引</span>
+          <span aria-hidden="true">{mobileOpen ? '▴' : '▾'}</span>
+        </button>
       </div>
 
       {index?.phase === 'loading' && (
@@ -72,7 +98,7 @@ export default function Sidebar({onUpload}) {
       )}
 
       {tree && (
-        <ul className="menu__list ai-note-sidebar__list">
+        <ul className="menu__list ai-note-sidebar__list" id="ai-note-sidebar-list">
           <li className="menu__list-item">
             <Link
               className={onOverview ? 'menu__link menu__link--active' : 'menu__link'}

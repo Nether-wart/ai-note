@@ -193,3 +193,20 @@ python3 -m pytest server/tests/test_acceptance_models.py -v
 | 删了一个块，页文件的 `removed_blocks[]` 里没有它 | 「删掉它才是静默丢题」——留痕是那条裁决剩下的部分 |
 | 简报里的数字在索引里找不到 | 一段读起来很顺、数字却是编的总结：闸门必须当场拦下它 |
 | 判据报「通过」，而它其实从没跑过（环境缺依赖、夹具被缴械） | 本条清单最后一次修的就是这一类，**它比没写判据更坏** |
+
+## 10. 本地 OCR（可选的第二条识图路）
+
+`server/ocr_baidu.py` 按**百度 OCR 的 REST 形状**说话（那台机器上的封装就是照它写的）。
+实测：一次约 **17 秒**；`accurate_basic` **不给框**、`general` **给像素框**（默认走它——
+有框才能把整页草稿**按块**切开）；token 30 天，适配器会**缓存**并在过期（`error_code 110`）时**自动重取一次**。
+
+| 你想接谁 | `AI_NOTE_OCR_URL` | 凭据 | 实测/说明 |
+|---|---|---|---|
+| 本机那台封装 | `http://192.168.0.105:8866` | `AI_NOTE_OCR_CLIENT_ID` ／ `AI_NOTE_OCR_CLIENT_SECRET` | 实测通（39 行、框已归一化） |
+| **真·百度智能云 OCR**（aip） | `https://aip.baidubce.com` | 同上（控制台的 API Key／Secret Key） | **协议逐字相同**：实测假凭据回的是 OAuth 形状的 401（`invalid_client`／`unknown client id`），OCR 端点回 `error_code 110`——与本地封装一模一样 |
+| 千帆 v2 那一套 | `https://qianfan.baidubce.com` | `AI_NOTE_OCR_BEARER=<API Key>` | 走 `Authorization: Bearer`，**不取** access_token |
+
+- [ ] 配好之后，**在审核页上跑一张真卡**：读数里那一行会写明本地 OCR 到底可不可用
+      （`paddleocr-local` 还是「不可用」）——**没配就是不可用，它不会去猜那台机器开没开**。
+- [ ] **真百度与本地封装要各验一次**：真服务有 QPS 与图片体积限制（本地封装没有），
+      而且它**要计费**。换端点等于换了一个输入源，按那份上岗清单重跑。

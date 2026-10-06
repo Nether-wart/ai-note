@@ -19,8 +19,8 @@ def reply(routes):
     """给人看的假传输：按 url 里的关键字分发，并记下每次调用。"""
     calls = []
 
-    def transport(url, blob, timeout):
-        calls.append({"url": url, "blob": blob, "timeout": timeout})
+    def transport(url, blob, timeout, headers=None):
+        calls.append({"url": url, "blob": blob, "timeout": timeout, "headers": headers})
         for key, answer in routes.items():
             if key in url:
                 return answer(url, blob)
@@ -43,7 +43,7 @@ def words(items, *, counted=None):
 
 
 def test_拿_token_再_OCR_表单里是图片字节的_base64():
-    def ocr_answer(url, blob):
+    def ocr_answer(url, blob, headers=None):
         form = urlparse.parse_qs(blob.decode("ascii"))
         assert base64.b64decode(form["image"][0]) == PNG, "送过去的是图片字节本身"
         return 200, words([{"words": "第一行"}, {"words": "第二行"}])
@@ -62,7 +62,7 @@ def test_拿_token_再_OCR_表单里是图片字节的_base64():
 
 def test_token_有缓存_两次调用只要一次():
     transport = reply({"oauth/2.0/token": token_ok(),
-                       "general": lambda url, blob: (200, words([{"words": "x"}]))})
+                       "general": lambda url, blob, headers=None: (200, words([{"words": "x"}]))})
     engine = BaiduOcrEngine(client_id="k", client_secret="s", transport=transport)
     engine(PNG)
     engine(PNG)
@@ -73,7 +73,7 @@ def test_token_有缓存_两次调用只要一次():
 def test_token_过期时遇_110_自动重取一次_不当成失败():
     seen = {"tokens": []}
 
-    def ocr_answer(url, blob):
+    def ocr_answer(url, blob, headers=None):
         token = urlparse.parse_qs(urlparse.urlparse(url).query)["access_token"][0]
         seen["tokens"].append(token)
         if token == "tok-old":
@@ -92,7 +92,7 @@ def test_token_过期时遇_110_自动重取一次_不当成失败():
 
 
 def test_直接给_token_时不去要_token():
-    transport = reply({"general": lambda url, blob: (200, words([{"words": "x"}]))})
+    transport = reply({"general": lambda url, blob, headers=None: (200, words([{"words": "x"}]))})
     engine = BaiduOcrEngine(token="literal", transport=transport)
     engine(PNG)
     assert all("oauth" not in call["url"] for call in transport.calls)
@@ -100,14 +100,14 @@ def test_直接给_token_时不去要_token():
 
 def test_general_的像素框按_PNG_尺寸归一化():
     items = [{"words": "半宽", "location": {"left": 320, "top": 240, "width": 64, "height": 48}}]
-    transport = reply({"general": lambda url, blob: (200, words(items))})
+    transport = reply({"general": lambda url, blob, headers=None: (200, words(items))})
     result = BaiduOcrEngine(token="t", transport=transport)(PNG)
     assert result.lines[0].box == [0.5, 0.5, 0.1, 0.1]
 
 
 def test_不是_PNG_就把框留_None_并说出来():
     items = [{"words": "x", "location": {"left": 10, "top": 10, "width": 5, "height": 5}}]
-    transport = reply({"general": lambda url, blob: (200, words(items))})
+    transport = reply({"general": lambda url, blob, headers=None: (200, words(items))})
     result = BaiduOcrEngine(token="t", transport=transport)(b"\xff\xd8\xff jpeg")
     assert result.lines[0].box is None
     assert any("不是 PNG" in warning for warning in result.warnings)
@@ -122,21 +122,21 @@ def test_没有凭据时明说没有凭据_不冒充没有字():
 
 def test_服务报错_非_200_坏回执_连不上_都是不可用():
     transport = reply({"oauth/2.0/token": token_ok(),
-                       "general": lambda url, blob: (200, json.dumps(
+                       "general": lambda url, blob, headers=None: (200, json.dumps(
                            {"error_code": 17, "error_msg": "Open api daily request limit reached"}).encode())})
     result = BaiduOcrEngine(client_id="k", client_secret="s", transport=transport)(PNG)
     assert result.available is False and "17" in result.warnings[0]
 
-    down = BaiduOcrEngine(token="t", transport=lambda url, blob, timeout: (503, b"boom"))
+    down = BaiduOcrEngine(token="t", transport=lambda url, blob, timeout, headers=None: (503, b"boom"))
     assert down(PNG).available is False
 
-    def broken(url, blob, timeout):
+    def broken(url, blob, timeout, headers=None):
         raise OSError("Connection refused")
     assert "连不上" in BaiduOcrEngine(token="t", transport=broken)(PNG).warnings[0]
 
 
 def test_数目对不上要说出来():
-    transport = reply({"general": lambda url, blob: (200, words([{"words": "只有一条"}], counted=3))})
+    transport = reply({"general": lambda url, blob, headers=None: (200, words([{"words": "只有一条"}], counted=3))})
     result = BaiduOcrEngine(token="t", transport=transport)(PNG)
     assert any("3" in warning and "1" in warning for warning in result.warnings)
 
@@ -167,3 +167,41 @@ def test_设置文件里也能配(tmp_path):
                  "client_id": "k", "client_secret": "s"}}, ensure_ascii=False), encoding="utf-8")
     engine = engine_from_config(Catalog(root), env={})
     assert engine is not None and engine.path == "accurate_basic" and engine.client_id == "k"
+
+
+def test_真百度的_token_错误是_oauth_形状_要读成人话():
+    """实测：真 aip 端点用假凭据会回 `{"error":"invalid_client",
+    "error_description":"unknown client id"}` ＋ **401**，不是 `error_code`。"""
+    def oauth_error(url, blob, headers=None):
+        return 401, json.dumps({"error": "invalid_client",
+                                "error_description": "unknown client id"}).encode()
+
+    result = BaiduOcrEngine(client_id="fake", client_secret="fake",
+                            transport=oauth_error)(PNG)
+    assert result.available is False
+    assert "invalid_client" in result.warnings[0]
+    assert "unknown client id" in result.warnings[0], "百度那句原话要带出来"
+
+
+def test_bearer_模式_不取_token_改挂请求头():
+    """千帆 v2 那一套：`Authorization: Bearer <密钥>`，没有 access_token 那一步。"""
+    transport = reply({"general": lambda url, blob, headers=None: (200, words([{"words": "x"}]))})
+    engine = BaiduOcrEngine(base_url="https://qianfan.baidubce.com", bearer="bce-v3/ALTAK-xxx",
+                            transport=transport)
+    result = engine(PNG)
+    assert result.available is True
+    assert all("oauth" not in call["url"] for call in transport.calls), "bearer 模式不该去要 token"
+    assert transport.calls[-1]["headers"] == {"Authorization": "Bearer bce-v3/ALTAK-xxx"}
+    assert "access_token" not in transport.calls[-1]["url"]
+
+
+def test_可配的_token_路径_与_没凭据时的三种说法():
+    transport = reply({"/custom/token": token_ok(), "general": lambda url, blob, headers=None:
+                       (200, words([{"words": "x"}]))})
+    engine = BaiduOcrEngine(client_id="k", client_secret="s", token_path="/custom/token",
+                            transport=transport)
+    assert engine(PNG).available is True
+    assert any("/custom/token" in call["url"] for call in transport.calls)
+
+    no_creds = BaiduOcrEngine(transport=reply({}))(PNG)
+    assert "没有凭据" in no_creds.warnings[0]

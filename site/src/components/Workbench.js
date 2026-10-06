@@ -560,7 +560,11 @@ export default function Workbench({apiBase, pageId = null, subjects = [], onClos
       {commit && <CommitPanel commit={commit} />}
       {state.error && <FailurePanel title="服务拒绝了这一步" error={state.error} />}
 
-      <figure className="ai-note-page-photo" ref={photoRef}
+      {/* `--draw` 是给触摸屏的：画框模式下照片要吃掉所有手势（`touch-action: none`），
+          不画的时候竖向手势留给页面滚动——否则手机上照片占掉大半屏，页面就滚不动了。
+          拖块框的手势由 `.ai-note-block-box` 自己收，见 `custom.css`。 */}
+      <figure className={drawMode ? 'ai-note-page-photo ai-note-page-photo--draw' : 'ai-note-page-photo'}
+        ref={photoRef}
         onPointerDown={startDraw} onPointerMove={onDrawStep} onPointerUp={endDraw}>
         <img
           ref={imageRef}
