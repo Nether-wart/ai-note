@@ -1,4 +1,4 @@
-"""百度 OCR 形状的本地适配器（`server/ocr_baidu.py`）：协议、坏回执、配置。
+"""百度 OCR 形状的本地适配器（`server/ocr_baidu.py`）：token 流程、协议、坏回执、配置。
 
 判据全部走注入的 transport——**不联网、不依赖那台机器**。
 """
@@ -10,91 +10,150 @@ import json
 from urllib import parse as urlparse
 
 from server.ocr import UNAVAILABLE_ENGINE
-from server.ocr_baidu import DEFAULT_BASE_URL, BaiduOcrEngine, engine_from_config
+from server.ocr_baidu import DEFAULT_BASE_URL, BaiduOcrEngine, engine_from_config, png_size
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
 
 
-def reply(payload, status=200):
+def reply(routes):
+    """给人看的假传输：按 url 里的关键字分发，并记下每次调用。"""
+    calls = []
+
     def transport(url, blob, timeout):
-        transport.url = url
-        transport.blob = blob
-        transport.timeout = timeout
-        if isinstance(payload, bytes):
-            return status, payload
-        return status, json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        calls.append({"url": url, "blob": blob, "timeout": timeout})
+        for key, answer in routes.items():
+            if key in url:
+                return answer(url, blob)
+        raise AssertionError(f"没有为这个 url 准备回执：{url}")
+
+    transport.calls = calls
     return transport
 
 
-GOOD = {"words_result": [{"words": "6. 设 $x^2+ax+4$ 的一个条件是（ ）"},
-                         {"words": "A. x=1   B. x=2"},
-                         {"words": "   "}],
-        "words_result_num": 3, "log_id": 123}
+def token_ok(word="tok-1", expires=2592000):
+    def answer(url, blob):
+        return 200, json.dumps({"access_token": word, "expires_in": expires}).encode()
+    return answer
 
 
-def test_好回执_解析成文本行_空行不算行():
-    transport = reply(GOOD)
-    result = BaiduOcrEngine("http://192.168.0.105:8866/", transport=transport)(b"\x89PNG", "p.png")
+def words(items, *, counted=None):
+    return json.dumps({"words_result": items,
+                       "words_result_num": len(items) if counted is None else counted},
+                      ensure_ascii=False).encode()
+
+
+def test_拿_token_再_OCR_表单里是图片字节的_base64():
+    def ocr_answer(url, blob):
+        form = urlparse.parse_qs(blob.decode("ascii"))
+        assert base64.b64decode(form["image"][0]) == PNG, "送过去的是图片字节本身"
+        return 200, words([{"words": "第一行"}, {"words": "第二行"}])
+
+    transport = reply({"oauth/2.0/token": token_ok(), "accurate_basic": ocr_answer,
+                       "general": ocr_answer})
+    engine = BaiduOcrEngine(client_id="local_api_key", client_secret="local_secret_key",
+                            transport=transport)
+    result = engine(PNG, "p.png")
 
     assert result.available is True
-    assert result.engine == "paddleocr-local"
-    assert [line.text for line in result.lines] == ["6. 设 $x^2+ax+4$ 的一个条件是（ ）",
-                                                    "A. x=1   B. x=2"]
-    assert result.lines[0].box is None, "accurate_basic 不给框——如实记 None，不编"
+    assert [line.text for line in result.lines] == ["第一行", "第二行"]
+    assert "access_token=tok-1" in transport.calls[-1]["url"]
+    assert any("general" in call["url"] for call in transport.calls), "默认走 general（带位置）"
 
 
-def test_请求按百度的形状_表单里是图片字节的_base64():
-    transport = reply(GOOD)
-    blob = b"\x89PNG\r\n\x1a\nfake"
-    BaiduOcrEngine(transport=transport)(blob, "p.png")
-
-    assert transport.url == f"{DEFAULT_BASE_URL}/rest/2.0/ocr/v1/accurate_basic"
-    form = urlparse.parse_qs(transport.blob.decode("ascii"))
-    assert base64.b64decode(form["image"][0]) == blob, "送过去的是图片字节本身"
-
-
-def test_带_token_时按百度的查询参数挂上去():
-    transport = reply(GOOD)
-    BaiduOcrEngine(token="abc", transport=transport)(b"x")
-    assert "access_token=abc" in transport.url
+def test_token_有缓存_两次调用只要一次():
+    transport = reply({"oauth/2.0/token": token_ok(),
+                       "general": lambda url, blob: (200, words([{"words": "x"}]))})
+    engine = BaiduOcrEngine(client_id="k", client_secret="s", transport=transport)
+    engine(PNG)
+    engine(PNG)
+    token_calls = [call for call in transport.calls if "oauth" in call["url"]]
+    assert len(token_calls) == 1, "30 天的 token 不该每个请求都要一遍"
 
 
-def test_服务报_error_code_时明说_不冒充没有字():
-    result = BaiduOcrEngine(transport=reply({"error_code": 110, "error_msg": "Access token invalid"}))(b"x")
-    assert result.available is False
-    assert result.engine == UNAVAILABLE_ENGINE
-    assert "110" in result.warnings[0] and "invalid" in result.warnings[0]
+def test_token_过期时遇_110_自动重取一次_不当成失败():
+    seen = {"tokens": []}
+
+    def ocr_answer(url, blob):
+        token = urlparse.parse_qs(urlparse.urlparse(url).query)["access_token"][0]
+        seen["tokens"].append(token)
+        if token == "tok-old":
+            return 200, json.dumps({"error_code": 110,
+                                    "error_msg": "Access token invalid or no longer valid"}).encode()
+        return 200, words([{"words": "重取之后拿到了"}])
+
+    transport = reply({"oauth/2.0/token": token_ok("tok-new"), "general": ocr_answer})
+    engine = BaiduOcrEngine(client_id="k", client_secret="s", transport=transport)
+    engine._cached_token, engine._expires_at = "tok-old", 9e18      # 假装缓存着一个过期的
+
+    result = engine(PNG)
+    assert result.available is True
+    assert result.lines[0].text == "重取之后拿到了"
+    assert seen["tokens"] == ["tok-old", "tok-new"], "该重取一次再打一遍"
 
 
-def test_非_200_与回执坏掉都是不可用():
-    assert BaiduOcrEngine(transport=reply(b'{"error":"boom"}', status=503))(b"x").available is False
-    bad = BaiduOcrEngine(transport=reply(b"<html>502</html>"))(b"x")
-    assert bad.available is False and "回执读不出来" in bad.warnings[0]
+def test_直接给_token_时不去要_token():
+    transport = reply({"general": lambda url, blob: (200, words([{"words": "x"}]))})
+    engine = BaiduOcrEngine(token="literal", transport=transport)
+    engine(PNG)
+    assert all("oauth" not in call["url"] for call in transport.calls)
 
 
-def test_连不上时明说连不上_并把地址带出来():
+def test_general_的像素框按_PNG_尺寸归一化():
+    items = [{"words": "半宽", "location": {"left": 320, "top": 240, "width": 64, "height": 48}}]
+    transport = reply({"general": lambda url, blob: (200, words(items))})
+    result = BaiduOcrEngine(token="t", transport=transport)(PNG)
+    assert result.lines[0].box == [0.5, 0.5, 0.1, 0.1]
+
+
+def test_不是_PNG_就把框留_None_并说出来():
+    items = [{"words": "x", "location": {"left": 10, "top": 10, "width": 5, "height": 5}}]
+    transport = reply({"general": lambda url, blob: (200, words(items))})
+    result = BaiduOcrEngine(token="t", transport=transport)(b"\xff\xd8\xff jpeg")
+    assert result.lines[0].box is None
+    assert any("不是 PNG" in warning for warning in result.warnings)
+
+
+def test_没有凭据时明说没有凭据_不冒充没有字():
+    transport = reply({})
+    result = BaiduOcrEngine(transport=transport)(PNG)
+    assert result.available is False and result.engine == UNAVAILABLE_ENGINE
+    assert "没有凭据" in result.warnings[0]
+
+
+def test_服务报错_非_200_坏回执_连不上_都是不可用():
+    transport = reply({"oauth/2.0/token": token_ok(),
+                       "general": lambda url, blob: (200, json.dumps(
+                           {"error_code": 17, "error_msg": "Open api daily request limit reached"}).encode())})
+    result = BaiduOcrEngine(client_id="k", client_secret="s", transport=transport)(PNG)
+    assert result.available is False and "17" in result.warnings[0]
+
+    down = BaiduOcrEngine(token="t", transport=lambda url, blob, timeout: (503, b"boom"))
+    assert down(PNG).available is False
+
     def broken(url, blob, timeout):
         raise OSError("Connection refused")
-
-    result = BaiduOcrEngine("http://192.168.0.105:8866", transport=broken)(b"x")
-    assert result.available is False and "连不上" in result.warnings[0]
+    assert "连不上" in BaiduOcrEngine(token="t", transport=broken)(PNG).warnings[0]
 
 
-def test_数目对不上要说出来_服务说几条_我们拿到几条():
-    result = BaiduOcrEngine(transport=reply({"words_result": [{"words": "只有一条"}],
-                                             "words_result_num": 3}))(b"x")
+def test_数目对不上要说出来():
+    transport = reply({"general": lambda url, blob: (200, words([{"words": "只有一条"}], counted=3))})
+    result = BaiduOcrEngine(token="t", transport=transport)(PNG)
     assert any("3" in warning and "1" in warning for warning in result.warnings)
 
 
-def test_超时给得宽_第一趟要加载模型():
-    transport = reply(GOOD)
-    BaiduOcrEngine(transport=transport)(b"x")
-    assert transport.timeout >= 60
+def test_png_size_只读头部_不是_PNG_就_None():
+    assert png_size(PNG) == (640, 480)
+    assert png_size(b"GIF89a" + b"\x00" * 40) is None
+    assert png_size(b"") is None
 
 
-def test_没配就是不可用_不去试连接():
+def test_没配就是不可用_不去试连接_配了就按配置():
     assert engine_from_config(None, env={}) is None
-    assert engine_from_config(None, env={"AI_NOTE_OCR_URL": "http://x:1"}).base_url == "http://x:1"
-    assert engine_from_config(None, env={"AI_NOTE_OCR_URL": "http://x:1",
-                                         "AI_NOTE_OCR_PATH": "general"}).path == "general"
+    engine = engine_from_config(None, env={"AI_NOTE_OCR_URL": DEFAULT_BASE_URL,
+                                           "AI_NOTE_OCR_CLIENT_ID": "local_api_key",
+                                           "AI_NOTE_OCR_CLIENT_SECRET": "local_secret_key"})
+    assert engine.base_url == DEFAULT_BASE_URL and engine.path == "general"
+    assert engine.client_id == "local_api_key" and engine.token is None
 
 
 def test_设置文件里也能配(tmp_path):
@@ -103,9 +162,8 @@ def test_设置文件里也能配(tmp_path):
 
     root = make_data_dir(tmp_path, [])
     (root / "settings.json").write_text(json.dumps(
-        {"roles": {}, "providers": {}, "ocr": {"base_url": "http://192.168.0.105:8866",
-                                               "path": "general"}}, ensure_ascii=False),
-        encoding="utf-8")
+        {"roles": {}, "providers": {},
+         "ocr": {"base_url": "http://192.168.0.105:8866", "path": "accurate_basic",
+                 "client_id": "k", "client_secret": "s"}}, ensure_ascii=False), encoding="utf-8")
     engine = engine_from_config(Catalog(root), env={})
-    assert engine is not None
-    assert engine.base_url == "http://192.168.0.105:8866" and engine.path == "general"
+    assert engine is not None and engine.path == "accurate_basic" and engine.client_id == "k"

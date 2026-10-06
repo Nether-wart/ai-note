@@ -6,10 +6,99 @@
 
 - **原型**（`proto/`）：核心闭环「拍照 → 抽取 → 审核 → 打印 → 纸上重做 → 标记 → 掌握」已实现并跑通过。
   它冻结为只读参考（ADR 0007）：提示词、阈值、统计口径与实测结论被继承，**代码不被继承**。
-- **重建**（`server/` + `site/`）：契约优先的后端 + 界面壳，交付了**屏幕重做**、**自动判定**、页与切分修正、
-  收入决策与审计、手机上传页。它**还没做**的事写在下面「新实现」那一节里，不藏着。
+- **重建**（`server/` + `site/`）：契约优先的后端 + 界面，交付了**屏幕重做**、**自动判定**、页与切分修正、
+  录入工作台与审计、手机上传页。它**还没做**的事写在下面「新实现」那一节里，不藏着。
+
+**目录**：`proto/`（冻结的原型）· `server/`（后端，零依赖）· `site/`（界面，Docusaurus）·
+`docs/`（契约、ADR、规格、验收清单）· `data/`（仓库里的测试语料）· `CONTEXT.md`（术语表）。
 
 本文档区分**设计意图**（记录在 `CONTEXT.md` 与 `docs/adr/`）与**当前实现**（两个目录各是一半）。
+
+## 快速上手：先跑起来
+
+**下面这一节是唯一的前置条件**——它讲的是把代码跑起来；命令之后的行为、模型、数据都在后面的章节里。
+只在 `proto/` 那一层工作的话（不装依赖也能读题卡），跳到 [「新实现」](#新实现server--site契约-v0) 之前
+的 [「这是什么」](#这是什么--不是什么) 一节，再看 [「用法」](#用法)。
+
+### 1. 装依赖
+
+| 干什么 | 需要什么 | 命令 |
+|---|---|---|
+| 跑**后端** `server/` | Python 3.9+ | **零第三方依赖**，只用标准库——不用装任何东西 |
+| 跑**界面** `site/` | Node ≥ 20 | `cd site && npm_config_cache="$PWD/../.npm-cache" npm ci` |
+| 跑**冻结原型** `proto/` | Python 3.9+ | `python3 -m venv .venv && source .venv/bin/activate && pip install requests pillow numpy` |
+
+后端与界面**不互相依赖**，也都不 import `proto/`（ADR 0007）。下面第 2、3 步只需要前两行。
+
+```bash
+git clone https://github.com/Nether-wart/ai-note.git
+cd ai-note
+cd site && npm_config_cache="$PWD/../.npm-cache" npm ci && cd ..    # 界面
+```
+
+### 2. 配密钥（只读数据与跑测试不需要）
+
+```bash
+cp .env.local.example .env.local
+```
+
+填**至少一个** provider 的 key（`DEEPSEEK_API_KEY` 或 `DASHSCOPE_API_KEY`），其余全留默认即可。
+**没配密钥时服务照样起**——只是 `POST /api/page`（建页切分）与模型验收会**明确失败**，
+不会退回假数据。详见 [「配置」](#配置)。
+
+### 3. 起服务（两个进程）
+
+```bash
+# 终端 1：后端。数据默认在**用户数据目录**（ADR 0008）
+python3 -m server.app --host 127.0.0.1 --port 8765
+
+# 终端 2：界面（另开一个终端）
+cd site
+AI_NOTE_API=http://127.0.0.1:8765 npm run start -- --port 3000 --host 127.0.0.1
+```
+
+打开 <http://127.0.0.1:3000>。把仓库里那份测试语料当数据用（**先备份或换目录**，
+写端点会改它）：`python3 -m server.app --data data --host 127.0.0.1 --port 8765`。
+
+一条命令验「起没起对」：`curl -s http://127.0.0.1:8765/api/index | python3 -m json.tool | head -40`。
+
+### 4. 跑测试（确认没坏）
+
+```bash
+python3 -m pytest -q                       # 后端：零依赖，~850 条
+node --test site/tests/ && node site/tests/selftest.mjs   # 界面：165 条 + 38 项不变量自检
+ruff check server/                         # 静态检查（All checks passed!）
+```
+
+`selftest.mjs` 退 `1` = 界面不变量失败，退 `2` = 环境缺依赖、这次没跑完——
+**环境故障从不冒充界面故障**。
+
+### 5. 出成品（纯静态 bundle，可交给 Tauri 打包）
+
+```bash
+cd site && AI_NOTE_API=http://127.0.0.1:8765 npm run build   # 退出码 0，产物在 site/build/
+```
+
+**数据不进构建产物**（ADR 0001）：构建产物里没有任何一道题的内容，索引在**运行时**从服务取。
+三件事缺一不可——**退出码 0**、产物在、`grep` 为空（在 `site/` 里跑）：
+
+```bash
+ls site/build/index.html
+grep -rl "p-2026" site/build/        # 必须为空
+```
+
+只看 `grep` 会被骗：构建失败时产物不存在，`grep` 同样是空的（这个坑真踩过，见 [walkthrough §0](docs/walkthrough.md)）。
+
+### 6. 走一遍人眼验收
+
+自动化证明不了「打开浏览器一切正常」。[`docs/walkthrough.md`](docs/walkthrough.md) 是那份清单：
+每一步都写了「应该看到什么」与「看到什么就是坏了」。
+
+### 编译 vs 运行：这个项目里没有编译
+
+仓库里没有构建后端的步骤——`server/` 是纯 Python，**跑起来就是编译后的形态**（`.pyc` 由解释器按需缓存）。
+界面是 Docusaurus，`npm run build` 把 JSX 打包成静态站点，也**不进任何后端逻辑**。
+两条链路都只在本机跑，没有服务器端渲染、没有对外部署。
 
 ## 实现状态
 
@@ -29,7 +118,7 @@
 | 落盘数据体检与定点修复 | ADR 0007「不许静默」 | 已实现：`--audit` / `--repair` |
 | **屏幕重做** | [`docs/specs/screen-redo.md`](docs/specs/screen-redo.md)（正文在 issue #1） | 已实现：`site/` 重做页 + `POST /api/attempt/<pid>` |
 | **自动判定** | `CONTEXT.md`「自动判定」 | 已实现：`server/judge.py` + 判定角色；低置信度一律落「看不清」 |
-| **整页切分（一页多题）** | [`docs/specs/page-segmentation.md`](docs/specs/page-segmentation.md)（正文在 issue #2） | **部分**：候选块解析、三条对账判据与重切三态已落地（`server/segmentation.py`），**真去问模型的那一层没接**（`segmenter` 注入点是空的） |
+| **整页切分（一页多题）** | [`docs/specs/page-segmentation.md`](docs/specs/page-segmentation.md)（正文在 issue #2） | 已实现：候选块解析、三条对账判据与重切三态在 `server/segmentation.py`，**模型那一层已接上并默认启用**（`main()` 注入 `HttpSegmenter`）；没配密钥时建页是 **502**，不退回手动画框 |
 | **复习纸** | `CONTEXT.md`「复习纸」 | **未实现** |
 | **手机上传页** | ADR 0007 决定 4 | 已实现：`GET /upload` + `POST /api/inbox`（**未在真手机上验过**） |
 | **收件目录监视** | ADR 0007 决定 4 | **未实现监视**（`inotify` 在同步盘上不可靠）；手动等价入口已实现：`POST /api/inbox/scan` |
@@ -50,21 +139,9 @@
 （[`docs/contracts/http-api-v0.md`](docs/contracts/http-api-v0.md)，[ADR 0007](docs/adr/0007-redesign-the-backend-contract-first.md)）。
 `server/` 是**零第三方依赖**的（只用标准库），与 `proto/` 互不 import。
 
-```bash
-# 后端：默认只监听本机。数据默认在**用户数据目录**（ADR 0008），不是这个仓库
-python3 -m server.app --host 127.0.0.1 --port 8765
-
-# 界面（另开一个终端）
-cd site
-npm_config_cache="$PWD/../.npm-cache" npm ci
-AI_NOTE_API=http://127.0.0.1:8765 npm run start -- --port 3000 --host 127.0.0.1
-
-# 测试：后端零依赖直接跑；界面是纯逻辑 + 真渲染出来的 HTML 的不变量自检
-python3 -m pytest -q
-node --test site/tests/ && node site/tests/selftest.mjs
-```
-
-**人工验收清单**（起服务、从侧栏点到阅读页、哪些行为算红线）在 [`docs/walkthrough.md`](docs/walkthrough.md)。
+**跑法见前面的「快速上手」**（依赖 → 密钥 → 起两个进程 → 测试 → 出 bundle），
+各模块的细节见 [`server/README.md`](server/README.md) 与 [`site/README.md`](site/README.md)。
+人工验收清单在 [`docs/walkthrough.md`](docs/walkthrough.md)。
 
 录入之后还能改**属性**（科目／考点／错因／审核状态）——阅读页的「编辑属性」（契约 §10.7；
 题面、答案、掌握与重做历史**不在那里改**，它们各有各的路）。整页照片另有一个**确定性预处理**
@@ -119,10 +196,18 @@ node --test site/tests/ && node site/tests/selftest.mjs
 
 ## 环境与依赖
 
-- Python 3.9+（代码用到 `from __future__ import annotations`、`datetime.fromisoformat`、`http.server.ThreadingHTTPServer`；3.7/3.8 已 EOL，未在其上验证）
-- 运行时依赖：`requests`、`pillow`、`numpy`。**未固定版本、无依赖锁定文件**（`requirements.txt` 不存在，`pyproject.toml` 也不存在）——这是已知缺口。
-- 新后端（`server/`）**零第三方依赖**（只用标准库）；上面三个依赖是 `proto/` 的。`site/` 的依赖由 `site/package.json` 与提交的 lock 文件管住。
-- 至少一个境内模型服务的 API Key：DeepSeek 或 DashScope。
+依赖分三份，互不重叠——**先看你跑哪一层**：
+
+| 层 | 依赖 | 说明 |
+|---|---|---|
+| `server/`（后端） | **零** | 只用标准库。装依赖这步可以整条跳过 |
+| `site/`（界面） | `package.json` + 提交的 lock 文件 | `npm ci` 可复现；需要 Node ≥ 20 |
+| `proto/`（冻结原型） | `requests`、`pillow`、`numpy` | **未固定版本、无依赖锁定文件**（`requirements.txt` 与 `pyproject.toml` 都不存在）——这是已知缺口 |
+
+Python 3.9+（代码用到 `from __future__ import annotations`、`datetime.fromisoformat`、
+`http.server.ThreadingHTTPServer`；3.7/3.8 已 EOL，未在其上验证）。
+
+跑原型那一层才需要：
 
 ```bash
 git clone https://github.com/Nether-wart/ai-note.git
@@ -130,6 +215,10 @@ cd ai-note
 python3 -m venv .venv && source .venv/bin/activate
 pip install requests pillow numpy
 ```
+
+模型服务：**至少一个 API Key 才有模型可用**（两家预设 DashScope／DeepSeek，或任意 OpenAI 兼容端点，
+见 [ADR 0010](docs/adr/0010-model-endpoints-are-the-users-choice.md)）。
+没配密钥时服务照样起，只是需要模型的那几处明确失败。
 
 ## 配置
 
@@ -144,25 +233,38 @@ DEEPSEEK_API_KEY=sk-xxxx
 # DASHSCOPE_API_KEY=sk-xxxx
 ```
 
-可选覆盖模型角色（不填则用 `slice.py` 里的 `ROLE_DEFAULTS`）：
+可选覆盖模型角色（不填则用代码里的默认值）。**新后端有四个角色**，
+`.env.local.example` 里逐个列了出来：
 
 ```
-EXTRACT_PROVIDER=deepseek
+EXTRACT_PROVIDER=deepseek      # 读照片：解正解、打标
 EXTRACT_MODEL=deepseek-flash
-JUDGE_PROVIDER=deepseek
+JUDGE_PROVIDER=deepseek        # 等价比对，只看文本
 JUDGE_MODEL=deepseek-flash
+SEGMENTER_PROVIDER=deepseek    # 读整页照片、切出题目的位置
+SEGMENTER_MODEL=deepseek-flash
+BRIEF_PROVIDER=deepseek        # 写科目简报，只看索引
+BRIEF_MODEL=deepseek-flash
 ```
 
-`.env.local` 已在 `.gitignore` 里。密钥文件按此顺序查找：仓库根 `.env.local` → `~/.env.local`；已存在的环境变量不覆盖。密钥值不会被打印。
+`brief` 与 `segmenter` 默认沿用 `extract` 的值，但它们是**独立的一份**：切分切坏了要能单独换，
+换简报的模型不牵动抽取。冻结的 `proto/` 只有 `extract` 与 `judge` 两个角色
+（`proto/slice.py` 的 `ROLE_DEFAULTS`），默认同上表的前两行。
 
-**默认模型**（`slice.py` 的 `ROLE_DEFAULTS`）：
+`.env.local` 已在 `.gitignore` 里。密钥文件按此顺序查找：仓库根 `.env.local` → `~/.env.local`；
+已存在的环境变量不覆盖。密钥值不会被打印。
+服务本身还有 `AI_NOTE_DATA`／`AI_NOTE_PUBLIC_BASE`／`AI_NOTE_INBOX`／`AI_NOTE_RUNS`
+四个配置项，各自有命令行同名参数，优先级是命令行 > 环境变量 > 默认值。
 
-| 角色 | provider | model |
-|---|---|---|
-| `extract` | `deepseek` | `deepseek-flash`（DeepSeek-V4.1-Flash） |
-| `judge` | `deepseek` | `deepseek-flash` |
+**provider 的边界，两层不一样**：
 
-Provider 是**白名单常量**，只有 `dashscope` 与 `deepseek` 两项；指到白名单外会**直接拒绝启动**（`role_config` 里 `die`）。白名单防的不是别人，是自己手滑——一张手写照片一旦出境就收不回来。
+- **新后端**（ADR 0010）：`dashscope` 与 `deepseek` 是**预设**而**不再是白名单**——
+  任何 OpenAI 兼容端点都由你在环境里定义（`AI_NOTE_PROVIDER_<名字>_{BASE_URL,API_KEY,MODEL}`），
+  **定义不完整就拒绝启动**。代价是照片与答案会发到你选的那一家，详见
+  [`docs/model-endpoints.md`](docs/model-endpoints.md) 与「隐私与合规」一节。
+- **冻结的原型**（`proto/slice.py`）：仍是**白名单常量**，只有 `dashscope` 与 `deepseek` 两项，
+  指到白名单外**直接拒绝启动**（`role_config` 里 `die`）。白名单防的不是别人，是自己手滑——
+  一张手写照片一旦出境就收不回来。
 
 ## 模型验收：不过考不许上岗
 
@@ -195,7 +297,19 @@ python3 proto/slice.py equiv --cases proto/fixtures/cases-interval.json
 
 已有验收结果记在 [`docs/acceptance-log.md`](docs/acceptance-log.md)（十轮记录，含 judge 全对读数、擦除实测、探针可靠性对照实验）。**未经验收的模型不许上岗。**
 
+**新后端的四个角色有一份自己的验收**（`#17 §8`），一条命令，三关判据：
+
+```bash
+python3 -m pytest server/tests/test_acceptance_models.py -v
+```
+
+视觉探针（合成图）／真实照片上的人眼判定（本机 `data/pages/*.png`）／三条确定性对账判据。
+**没配密钥时它是 `skip` 而不是 `pass`**——「没跑」不许看起来像「通过了」。
+
 ## 用法
+
+> 这一整节讲的是**冻结的原型 `proto/`**（单文件命令那套）。走生产那条路（后端 + 界面）
+> 见前面的「快速上手」与 [`docs/walkthrough.md`](docs/walkthrough.md)。
 
 ### 录入一道题（当前入口是单文件命令）
 
@@ -314,6 +428,18 @@ python3 proto/test_mastery.py
 
 ## 命令行速查
 
+**新后端 `server/`**（零依赖，`python3 -m` 开头）：
+
+| 命令 | 作用 |
+|---|---|
+| `python3 -m server.app [--host H] [--port P] [--data D] [--public-base U] [--inbox I]` | 启动后端（默认 `127.0.0.1:8765`） |
+| `python3 -m server.preprocess <in.png> <out.png>` | 确定性预处理（灰度→高斯→中值→Otsu）。**只能喂转录，绝不能喂切分** |
+| `python3 -m server.subject_assign --data D --map 科目表.json [--apply]` | 存量题卡补科目（不加 `--apply` 只预演，一个字节都不写） |
+| `python3 -m pytest -q` | 后端测试 |
+| `python3 -m pytest server/tests/test_acceptance_models.py -v` | 模型上岗验收（没配密钥时 **skip** 不是 pass） |
+
+**冻结的原型 `proto/`**（需要 `requests`／`pillow`／`numpy`）：
+
 | 命令 | 作用 |
 |---|---|
 | `slice.py models` | 按角色列出 provider 与可用型号 |
@@ -330,6 +456,16 @@ python3 proto/test_mastery.py
 | `server.py --rebuild-index` | 只重建派生索引 |
 | `server.py --repair <pid> [--apply]` | 定点修复可疑字段 |
 | `test_mastery.py` | 掌握与冷却状态机验收 |
+
+**界面 `site/`**：
+
+| 命令 | 作用 |
+|---|---|
+| `npm run start -- --port 3000 --host 127.0.0.1` | 开发服务（另开终端；带 `AI_NOTE_API=<后端地址>`） |
+| `npm run build` | 出纯静态 bundle 到 `build/` |
+| `npm run serve` | 预览已构建的 bundle |
+| `node --test tests/` | 界面逻辑测试 |
+| `node tests/selftest.mjs` | 界面不变量自检（退 `1` = 失败，退 `2` = 没跑完） |
 
 ## 数据布局
 
@@ -383,7 +519,7 @@ samples/         真实照片样例（已在 .gitignore 中）
 **已知债务**（代码注释或 ADR 里明确记录的）：
 
 - **`ANCHOR_BASE` 在绑 `0.0.0.0` 时会生成手机访问不到的地址**（ADR 0007 决定 5 明确记录为「一处已查到的债务」）。手机访问需要显式可配的「对外地址」，新后端已纳入契约，原型里未修。
-- **目录监视在多平台上依赖轮询**（`inotify` 在某些挂载与同步盘上不可靠）。ADR 0007 要求「监视」必须有一个可手动触发的等价入口——原型里未实现监视，也未实现手动入口。
+- **目录监视在多平台上依赖轮询**（`inotify` 在某些挂载与同步盘上不可靠）。ADR 0007 要求「监视」必须有一个可手动触发的等价入口——**新后端已实现**（`POST /api/inbox/scan`），原型里两样都没有。
 - **无依赖锁定文件**。`requests` / `pillow` / `numpy` 均未固定版本。
 - **源码头部没有许可证声明**（根目录有 [`LICENSE`](LICENSE)，MIT）。
 - **界面没有鉴权**，也不该暴露到公网（ADR 0003 单用户本机）。
@@ -416,6 +552,7 @@ samples/         真实照片样例（已在 .gitignore 中）
 | [`docs/adr/0006`](docs/adr/0006-docusaurus-base-with-tauri-compatibility.md) | 生产形态：Docusaurus 为基 + Tauri 兼容 |
 | [`docs/adr/0007`](docs/adr/0007-redesign-the-backend-contract-first.md) | 后端契约优先重设计 |
 | [`docs/adr/0008`](docs/adr/0008-runtime-files-live-in-the-user-data-dir.md) | 运行时的文件放用户数据目录，`data/` 只做测试语料 |
+| [`docs/adr/0010`](docs/adr/0010-model-endpoints-are-the-users-choice.md) | 模型端点由用户自己选（预设不再是白名单，可指向任意 OpenAI 兼容端点） |
 | [`docs/contracts/http-api-v0.md`](docs/contracts/http-api-v0.md) | 界面与后端之间的契约 v0：端点、错误信封、字段形状 |
 | [`docs/README.md`](docs/README.md) | 文档索引：这些文档该按什么顺序读 |
 | [`docs/walkthrough.md`](docs/walkthrough.md) | 人工验收清单：起服务、点完三个页面、哪些行为算红线 |
