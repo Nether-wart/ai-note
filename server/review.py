@@ -171,6 +171,163 @@ def transcribe_card(catalog, pid: str, *, config=None, role: str = "extract", oc
     }
 
 
+#: 审核这条路**能写**的字段（闭集）。与 §10.7 的属性编辑**刻意分开**：
+#: 那边管科目／考点／错因／审核状态，这边管**内容**（题面、选项、原解、正解、标准答案）。
+REVIEWABLE = ("transcript", "options", "standard_answer", "topics", "error_causes",
+              "original_solution", "correct_solution")
+
+
+def write_reviewed(catalog, pid: str, payload: dict, *, mark_reviewed: bool = False,
+                   clock=None) -> tuple[dict, list, list]:
+    """把**人确认或改过的**内容写进卡 → `(card, changed, warnings)`。
+
+    与模型那条路（`transcribe.apply_to_card`）的区别**只有一处，但是要紧的一处**：
+    模型那条是"没读到就不动"，这条是"**没给就不动、给了空串就是清空**"——
+    人能明确说"这里没有"（例如这道题就没有标准答案），而模型不能。
+
+    校验与 §10.7 同源：认不出的字段 → 拒并点名闭集；错因不在词表 → 拒并给出可选值
+    （词表本身不在 → 先收下再喊，与"建"那条同一口径）。
+    """
+    from datetime import datetime, timezone
+
+    from .problem_edit import ProblemEditError, _vocab_error_causes
+
+    if not isinstance(payload, dict) or not payload:
+        raise ProblemEditError("bad_request", "这一次请求没有要写的内容",
+                               hint=f"至少要给一项：{', '.join(REVIEWABLE)}",
+                               details={"param": "body", "allowed": list(REVIEWABLE)})
+    for field in payload:
+        if field not in REVIEWABLE:
+            raise ProblemEditError(
+                "problem_field_not_editable",
+                f"{field} 不是审核这条路能写的字段",
+                hint=("这条路人写的是**内容**（题面／选项／原解／正解／标准答案）；"
+                      "科目、审核状态那些走属性编辑（§10.7）"),
+                details={"param": field, "allowed": list(REVIEWABLE)},
+            )
+
+    card = cardstore.read_card(catalog, pid)
+    if card is None:
+        return None, [], []
+
+    warnings: list = []
+    changed: list = []
+
+    def put(path, value):
+        node = card
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        if node.get(path[-1]) != value:
+            node[path[-1]] = value
+            changed.append(".".join(path))
+
+    if "transcript" in payload:
+        value = payload["transcript"]
+        if value is not None and not isinstance(value, str):
+            raise ProblemEditError("bad_request", "transcript 得是字符串或 null",
+                                   details={"param": "transcript"})
+        # `""` ＝ **显式清空**（人可以说"这里没有"），`null`/不给 ＝ 不动
+        if value is not None:
+            put(("problem", "transcript"), value)
+
+    if "options" in payload:
+        options = payload["options"]
+        if options is not None:
+            if not isinstance(options, list):
+                raise ProblemEditError("bad_request", "options 得是列表或 null",
+                                       details={"param": "options"})
+            clean = []
+            for item in options:
+                if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                    raise ProblemEditError("bad_request",
+                                           "options 里每一项要是 {label, text}",
+                                           details={"param": "options"})
+                clean.append({"label": str(item.get("label") or ""), "text": item["text"]})
+            put(("problem", "options"), clean)
+
+    if "standard_answer" in payload:
+        answer = payload["standard_answer"]
+        if answer is None:
+            pass
+        elif not isinstance(answer, dict) or not isinstance(answer.get("value"), str):
+            raise ProblemEditError("bad_request",
+                                   "standard_answer 得是 {value, confidence} 或 null",
+                                   details={"param": "standard_answer"})
+        else:
+            confidence = answer.get("confidence")
+            if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+                confidence = None                       # 记一个假数字比记 None 更坏
+            put(("standard_answer", "value"), answer["value"])
+            put(("standard_answer", "confidence"), confidence)
+
+    if "topics" in payload:
+        topics = payload["topics"]
+        if not isinstance(topics, list) or any(
+                not isinstance(item, str) or not item.strip() for item in topics):
+            raise ProblemEditError("bad_request", "topics 得是非空字符串的列表",
+                                   details={"param": "topics"})
+        put(("topics",), list(dict.fromkeys(item.strip() for item in topics)))
+
+    if "error_causes" in payload:
+        causes = payload["error_causes"]
+        if not isinstance(causes, list) or any(
+                not isinstance(item, str) or not item.strip() for item in causes):
+            raise ProblemEditError("bad_request", "error_causes 得是非空字符串的列表",
+                                   details={"param": "error_causes"})
+        causes = list(dict.fromkeys(item.strip() for item in causes))
+        allowed, vocab_warnings = _vocab_error_causes(catalog)
+        warnings.extend(vocab_warnings)
+        if allowed is not None:
+            unknown = [cause for cause in causes if cause not in allowed]
+            if unknown:
+                raise ProblemEditError("error_cause_unknown",
+                                       f"错因不在受控词表里：{', '.join(unknown)}",
+                                       hint=f"可选：{'、'.join(allowed)}",
+                                       details={"param": "error_causes", "unknown": unknown,
+                                                "allowed": allowed})
+        put(("error_causes",), causes)
+
+    for field, keys in (("original_solution",
+                         ("present", "original_answer", "transcript", "correction_transcript")),
+                        ("correct_solution", ("text", "source"))):
+        if field not in payload:
+            continue
+        spec = payload[field]
+        if spec is None:
+            continue
+        if not isinstance(spec, dict):
+            raise ProblemEditError("bad_request", f"{field} 得是对象或 null",
+                                   details={"param": field})
+        unknown = [key for key in spec if key not in keys]
+        if unknown:
+            raise ProblemEditError("bad_request",
+                                   f"{field} 上有认不出的键：{', '.join(sorted(unknown))}",
+                                   hint=f"只认 {', '.join(keys)}", details={"param": field})
+        for key, value in spec.items():
+            if value is not None and not isinstance(value, (str, bool)):
+                raise ProblemEditError("bad_request", f"{field}.{key} 得是字符串／布尔／null",
+                                       details={"param": f"{field}.{key}"})
+            put((field, key), value)
+
+    if mark_reviewed:
+        status = "reviewed"
+        node = card.get("review") or {}
+        if node.get("status") != status:
+            # **只动这两个键**：`review` 上还可能有 `review_reopened_because` 之类，
+            # 整份替换会把它们静默抹掉（这一课在属性编辑那边已经吃过一次）。
+            card["review"] = {
+                **{key: value for key, value in node.items()
+                   if key not in ("status", "reviewed_at")},
+                "status": status,
+                "reviewed_at": (clock() if clock else datetime.now(timezone.utc)).isoformat(),
+            }
+            changed.append("review.status")
+
+    if changed:
+        cardstore.write_card(catalog, pid, card)
+    return card, changed, warnings
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python3 -m server.review list [--limit N]` ／ `python3 -m server.review <题卡 id> [--apply]`"""
     parser = argparse.ArgumentParser(prog="python3 -m server.review", description=__doc__)

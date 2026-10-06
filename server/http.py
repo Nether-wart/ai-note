@@ -16,6 +16,7 @@ from pathlib import Path
 from . import assets, brief, inbox as inbox_mod, subjects
 from . import cardstore
 from . import problem_edit as problem_edit_module
+from . import review as review_module
 from . import settings as settings_module
 from .attempt import MAX_BODY_BYTES, AttemptEndpoint
 from .brief_client import HttpBrief
@@ -120,7 +121,7 @@ class Api:
     def __init__(self, data_dir: Path | str, clock=None, public_base: str | None = None,
                  *, inbox: Path | str | None = None, bind_host: str | None = None,
                  max_upload_bytes: int | None = None, max_attempt_bytes: int | None = None,
-                 segmenter=None,
+                 segmenter=None, ocr=None, transcriber=None,
                  judge=None, runs_dir: Path | str | None = None, config=None,
                  brief_client=None) -> None:
         self.catalog = Catalog(data_dir, clock=clock, public_base=public_base,
@@ -135,6 +136,13 @@ class Api:
         # 切分（#10）还没实现。这是一个**接缝**：注入一个 `(path) -> blocks` 就能接上，
         # 不注入就必须显式报「切分不可用」——绝不返回假的块列表。
         self.segmenter = segmenter
+        # OCR 与 `segmenter` 同一种缝：**不注入 ＝ 这个能力不可用**，绝不假装。
+        # 引擎的协议是 `(image_bytes, name) -> OcrResult`（`server/ocr.py`）。
+        self.ocr = ocr
+        # 转录也是一条接缝：默认真的调模型；测试注入一个桩，**不联网、不花额度**
+        # （与 `judge`／`segmenter` 同一个口径：模型调用一律能被注入替掉）。
+        self.transcriber = transcriber or (
+            lambda **kwargs: review_module.transcribe_card(self.catalog, **kwargs))
         # 坏配置**在这里就起不来**（阈值 NaN／无穷／越界，或 provider 没定义），
         # 而不是每个请求里再验一遍（#5 派发简报第 7 条）。
         # 设置文件坏掉时**不用它兜底**（§10.6 规矩 4）：这里保持启动时的那份，
@@ -195,6 +203,59 @@ class Api:
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         return Response(status=response.status, body=body, content_type=response.content_type,
                         headers={"Content-Length": str(len(body))})
+
+    def _problem_transcribe(self, pid: str, body, declared_length) -> Response:
+        """`POST /api/problem/<id>/transcribe`（§10.8）：**人工触发**一次转录，**不写卡**。
+
+        为什么先跑预演再写：转录是模型给的一段草稿，人要看一眼、可能还要改。
+        所以这条只回读数（`review.transcribe_card(..., apply=False)`），写进卡是下一条的事。
+
+        失败的映射按"**这件事为什么没成**"分：卡不在 → 404；这条链断了（没页绑定／没绑块／
+        照片丢了）→ 400 带它自己的码；模型没问成 → **502**（可重试，且**什么都没写**）。
+        """
+        self._reject_oversized_write(body, declared_length)
+        try:
+            cardstore.check_pid(pid)
+        except cardstore.IllegalCardId as exc:
+            raise bad_request(f"这不像一个题卡 id：{pid!r}",
+                              hint="题卡 id 的字符集见契约 §1", param="pid", value=pid) from exc
+
+        readout = self.transcriber(pid=pid, ocr=self.ocr, runs_dir=self._runs_dir)
+        if readout["ok"]:
+            return json_response(200, data=readout)
+        error = readout["error"]
+        if error["code"] == "problem_missing":
+            raise not_found(error["message"], hint=error.get("hint"))
+        if error["code"] == "model_unavailable":
+            raise errors.model_unavailable(error["message"], pid=pid)
+        raise bad_request(error["message"], reason=error["code"], hint=error.get("hint"),
+                          param="pid")
+
+    def _problem_transcript(self, pid: str, body, declared_length) -> Response:
+        """`PUT /api/problem/<id>/transcript`（§10.8）：写下**人确认或改过的**内容。
+
+        与属性编辑（§10.7）刻意分开：那边管科目／考点／错因／审核状态，这边管**内容**
+        （题面、选项、原解、正解、标准答案）。`mark_reviewed` 是这条路附带的动作：
+        人确认完就该是"已审核"，但它**要显式给**（不给就不动审核状态）。
+        """
+        self._reject_oversized_write(body, declared_length)
+        try:
+            cardstore.check_pid(pid)
+        except cardstore.IllegalCardId as exc:
+            raise bad_request(f"这不像一个题卡 id：{pid!r}",
+                              hint="题卡 id 的字符集见契约 §1", param="pid", value=pid) from exc
+        payload = _optional_json_object(body)
+        mark_reviewed = bool(payload.pop("mark_reviewed", False))
+        try:
+            card, changed, warnings = review_module.write_reviewed(
+                self.catalog, pid, payload, mark_reviewed=mark_reviewed,
+                clock=self.catalog.clock)
+        except problem_edit_module.ProblemEditError as exc:
+            raise bad_request(exc.message, reason=exc.code, hint=exc.hint,
+                              **(exc.details or {})) from exc
+        if card is None:
+            raise not_found(f"没有这张题卡：{pid}", hint="id 取自索引")
+        return json_response(200, data={"card": card, "changed": changed}, warnings=warnings)
 
     def _problem_edit(self, pid: str, body, declared_length) -> Response:
         """`PATCH /api/problem/<id>`（契约 §10.7）：改一张**已有**卡的属性。
@@ -375,6 +436,18 @@ class Api:
         # 405（带 `allowed`）而不是一个含糊的 404——路由**在**，只是不收这个方法。
         if path.startswith("/api/brief/"):
             return self._brief_route(method, path, query, body, declared_length)
+
+        # 审核那条路（§10.8）：人工触发一次转录（**不写卡**）／写下人确认过的内容。
+        # 这两条必须排在通用 pid 路由**之前**——那一条的 `(?P<pid>.*)` 会把
+        # `<id>/transcribe` 整个吃成 pid；也必须排在 `_post` 之前，否则 POST 会被 405 掉。
+        match = re.fullmatch(r"/api/problem/(?P<pid>.*?)/transcribe", path)
+        if match:
+            self._require(method, "POST")
+            return self._problem_transcribe(match.group("pid"), body, declared_length)
+        match = re.fullmatch(r"/api/problem/(?P<pid>.*?)/transcript", path)
+        if match:
+            self._require(method, "PUT")
+            return self._problem_transcript(match.group("pid"), body, declared_length)
 
         # 设置（§10.6）：读生效值、整体替换。它是**唯一**会改到"服务怎么调模型"的端点，
         # 所以保存成功后要**重载**那几份模型配置——口径是"改完立刻生效"。

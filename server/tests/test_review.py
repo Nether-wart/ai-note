@@ -224,3 +224,131 @@ def test_清单为空时_CLI_说清没有待转录的(tmp_path, capsys):
     root = make_data_dir(tmp_path, [])
     assert review.main(["list", "--data", str(root)]) == 0
     assert "没有待转录的卡" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ 那两个端点（§10.8）
+
+
+def api_for_root(root, **kwargs):
+    """一个指向这份数据目录的 `Api`，**转录走注入的桩**（不联网、不花额度）。"""
+    from server.http import Api
+    return Api(root, **kwargs)
+
+
+def fake_transcriber(readout):
+    def run(**kwargs):
+        return {**readout, "card_id": kwargs.get("pid")}
+    return run
+
+
+def test_触发转录_回草稿但一个字节都不写(tmp_path):
+    card = card_with_page()
+    root = make_data_dir(tmp_path, [card])
+    write_page(root, page_with(card["id"]))
+    api = api_for_root(root, transcriber=fake_transcriber({
+        "ok": True, "result": {"transcript": "6. 题面", "parsed": True},
+        "changed": [], "applied": False, "ocr_engine": "unavailable",
+    }))
+
+    response = api.handle("POST", f"/api/problem/{card['id']}/transcribe", body=b"")
+    assert response.status == 200, response.body[:200]
+    assert json.loads(response.body)["data"]["result"]["transcript"] == "6. 题面"
+    on_disk = json.loads((root / "problems" / f"{card['id']}.json").read_text(encoding="utf-8"))
+    assert on_disk["problem"]["transcript"] == "", "触发转录不写卡"
+
+
+def test_触发转录的失败按原因映射成状态码(tmp_path):
+    card = card_with_page()
+    root = make_data_dir(tmp_path, [card])
+    api = api_for_root(root, transcriber=fake_transcriber({
+        "ok": False, "error": {"code": "page_binding_missing", "message": "页里没有绑这块"}}))
+    response = api.handle("POST", f"/api/problem/{card['id']}/transcribe", body=b"")
+    assert response.status == 400
+    assert json.loads(response.body)["error"]["reason"] == "page_binding_missing"
+
+    missing = api_for_root(root, transcriber=fake_transcriber({
+        "ok": False, "error": {"code": "problem_missing", "message": "没有这张卡"}}))
+    assert missing.handle("POST", "/api/problem/p-20200109-eeeeee/transcribe",
+                          body=b"").status == 404
+
+    down = api_for_root(root, transcriber=fake_transcriber({
+        "ok": False, "error": {"code": "model_unavailable", "message": "上游 500"}}))
+    assert down.handle("POST", f"/api/problem/{card['id']}/transcribe", body=b"").status == 502
+
+
+def test_写下人确认过的内容_并可以顺带标记已审核(tmp_path):
+    card = card_with_page()
+    # 卡上本来有个别的键：标记已审核时**不许**把它抹掉（属性编辑那边吃过这一课）
+    card["review"] = {"status": "unreviewed", "reviewed_at": None,
+                      "review_reopened_because": "答案抄错了"}
+    root = make_data_dir(tmp_path, [card])
+    (root / "vocab" / "error-causes.json").write_text(
+        json.dumps({"错因": ["概念不清", "计算失误"]}, ensure_ascii=False), encoding="utf-8")
+    api = api_for_root(root)
+
+    body = json.dumps({
+        "transcript": "6. 改过的题面", "options": [{"label": "A", "text": "x=1"}],
+        "standard_answer": {"value": "B", "confidence": 0.9},
+        "topics": ["函数与导数/极值与最值"], "error_causes": ["概念不清"],
+        "mark_reviewed": True,
+    }, ensure_ascii=False).encode()
+
+    response = api.handle("PUT", f"/api/problem/{card['id']}/transcript", body=body,
+                          content_type="application/json")
+    assert response.status == 200, response.body[:300]
+    data = json.loads(response.body)["data"]
+    assert "problem.transcript" in data["changed"] and "review.status" in data["changed"]
+    assert data["card"]["problem"]["transcript"] == "6. 改过的题面"
+    assert data["card"]["review"]["status"] == "reviewed"
+    assert data["card"]["review"]["review_reopened_because"] == "答案抄错了", "别的键要留着"
+    on_disk = json.loads((root / "problems" / f"{card['id']}.json").read_text(encoding="utf-8"))
+    assert on_disk["problem"]["transcript"] == "6. 改过的题面"
+
+
+def test_空串是显式清空_不给就是不动(tmp_path):
+    card = card_with_page()
+    card["problem"]["transcript"] = "原来的题面"
+    root = make_data_dir(tmp_path, [card])
+    api = api_for_root(root)
+
+    # 不给 → 不动
+    api.handle("PUT", f"/api/problem/{card['id']}/transcript",
+               body=json.dumps({"topics": ["数列/求和"]}).encode(),
+               content_type="application/json")
+    on_disk = json.loads((root / "problems" / f"{card['id']}.json").read_text(encoding="utf-8"))
+    assert on_disk["problem"]["transcript"] == "原来的题面"
+
+    # 给空串 → 清空（人能明确说"这里没有"）
+    api.handle("PUT", f"/api/problem/{card['id']}/transcript",
+               body=json.dumps({"transcript": ""}).encode(), content_type="application/json")
+    on_disk = json.loads((root / "problems" / f"{card['id']}.json").read_text(encoding="utf-8"))
+    assert on_disk["problem"]["transcript"] == ""
+
+
+def test_属性编辑那边的字段不许从这条路口写进来(tmp_path):
+    card = card_with_page()
+    root = make_data_dir(tmp_path, [card])
+    api = api_for_root(root)
+    response = api.handle("PUT", f"/api/problem/{card['id']}/transcript",
+                          body=json.dumps({"subject": "物理"}).encode(),
+                          content_type="application/json")
+    assert response.status == 400
+    error = json.loads(response.body)["error"]
+    assert error["reason"] == "problem_field_not_editable"
+    assert "transcript" in error["details"]["allowed"]
+
+
+def test_错因不在词表里拒绝_而且一个字节都没写(tmp_path):
+    card = card_with_page()
+    root = make_data_dir(tmp_path, [card])
+    (root / "vocab" / "error-causes.json").write_text(
+        json.dumps({"错因": ["概念不清"]}, ensure_ascii=False), encoding="utf-8")
+    api = api_for_root(root)
+    before = (root / "problems" / f"{card['id']}.json").read_bytes()
+
+    response = api.handle("PUT", f"/api/problem/{card['id']}/transcript",
+                          body=json.dumps({"transcript": "题面", "error_causes": ["心情不好"]}).encode(),
+                          content_type="application/json")
+    assert response.status == 400
+    assert json.loads(response.body)["error"]["reason"] == "error_cause_unknown"
+    assert (root / "problems" / f"{card['id']}.json").read_bytes() == before
