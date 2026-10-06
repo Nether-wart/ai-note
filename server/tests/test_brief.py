@@ -503,13 +503,17 @@ def test_the_brief_role_has_its_own_provider_and_model_env_vars():
     assert cfg.key_env == "DASHSCOPE_API_KEY"
 
 
-def test_a_brief_provider_outside_the_whitelist_is_a_load_time_error():
+def test_an_undefined_brief_provider_is_a_load_time_error():
+    # ADR 0010 之后不再有白名单；但**没定义完整**的名字仍然是装载期错误，
+    # 而且报错要点出该定义哪两个变量、以及两家预设叫什么。
     with pytest.raises(ValueError) as excinfo:
         config.load_role_config(config.BRIEF_ROLE, {"BRIEF_PROVIDER": "openai"})
 
-    assert "BRIEF_PROVIDER" in str(excinfo.value)
-    assert "openai" in str(excinfo.value)
-    assert "dashscope" in str(excinfo.value) and "deepseek" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "BRIEF_PROVIDER" in message
+    assert "openai" in message
+    assert "AI_NOTE_PROVIDER_OPENAI_BASE_URL" in message
+    assert "dashscope" in message and "deepseek" in message
 
 
 # ------------------------------------------------------------------ 调用接缝

@@ -2,8 +2,9 @@
 
 三件事在这里定：
 
-  · **provider 白名单**（`dashscope` / `deepseek`，都在境内，见 `.env.local.example`）。
-    白名单外的 provider 是坏配置 → 装载时 `ValueError`，服务拒绝启动。
+  · **provider**：两家预设（`dashscope` / `deepseek`，见 `.env.local.example`），
+    以及**由你自己定义的任意一家**（OpenAI 兼容端点即可，见 ADR 0010）。
+    名字解析不出来、或定义得不完整，都是坏配置 → 装载时 `ValueError`，服务拒绝启动。
   · **角色表**：`extract`（切分与红笔语义）、`judge`（等价比对）与 `brief`（简报）
     各自解析成一份 `RoleConfig`；解析逻辑只有 `load_role_config` 一处，
     别的角色一律走它。
@@ -18,14 +19,16 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import judge
 
-# provider 白名单。防的不是别人，是自己手滑：一张手写照片的信息一旦出境就收不回来
-# （口径继承 proto/slice.py:52-63）。
+# 两家**预设** provider。这不再是「白名单」：任何 OpenAI 兼容端点都能由用户自己定义
+# （见下面的 `resolve_provider`）。照片与答案发去哪一家，**由你自己选**——
+# 以前这里是一条硬限制（口径继承 proto/slice.py:52-63），2026-10 起改回用户自决（ADR 0010）。
 PROVIDERS = {
     "dashscope": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -78,6 +81,40 @@ class JudgeConfig(RoleConfig):
     threshold: float = judge.CONFIDENCE_THRESHOLD
 
 
+def resolve_provider(name: str, env: Mapping, prefix: str | None = None) -> dict:
+    """provider 名 → `{base_url, key_env, default_model}`。
+
+    预设之外的名字**由你自己在环境里定义**（ADR 0010：不再限境内白名单）：
+
+        AI_NOTE_PROVIDER_OPENAI_BASE_URL=https://api.openai.com/v1
+        AI_NOTE_PROVIDER_OPENAI_API_KEY=sk-...
+        AI_NOTE_PROVIDER_OPENAI_MODEL=gpt-4o        # 可选
+
+    名字里的非字母数字统一换成下划线再大写（`my-proxy` → `AI_NOTE_PROVIDER_MY_PROXY_*`）。
+
+    缺 `BASE_URL` 或 `API_KEY` 都算坏配置，**装载时**就报——不在第一次调用时才 401。
+    （本机端点不需要密钥时，按惯例填一个占位值，别留空：留空与「忘了填」长得一样。）
+    """
+    if name in PROVIDERS:
+        return PROVIDERS[name]
+    # 报错要同时点出**用户设的那个变量**（`EXTRACT_PROVIDER`）与该定义的两个变量——
+    # 只说其中一半，人还得自己找另一半。
+    where = f"{prefix}_PROVIDER={name!r} 指向的 " if prefix else ""
+    var = "AI_NOTE_PROVIDER_" + re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
+    base_url = (env.get(f"{var}_BASE_URL") or "").strip()
+    key_env = f"{var}_API_KEY"
+    if not base_url or not (env.get(key_env) or "").strip():
+        raise ValueError(
+            f"{where}provider {name!r} 既不是预设，也没在环境里定义完整："
+            f"要设 {var}_BASE_URL 与 {key_env}；预设可选：{', '.join(PROVIDERS)}"
+        )
+    return {
+        "base_url": base_url,
+        "key_env": key_env,
+        "default_model": (env.get(f"{var}_MODEL") or "").strip(),
+    }
+
+
 def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
     """把**任意**角色名解析成一份配置，坏配置当场喊（`ValueError`）。
 
@@ -92,15 +129,16 @@ def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
     default = ROLE_DEFAULTS[role]
     prefix = role.upper()
     provider = (env.get(f"{prefix}_PROVIDER") or default["provider"]).strip()
-    if provider not in PROVIDERS:
-        raise ValueError(
-            f"{prefix}_PROVIDER 指向的 provider 不在白名单里：{provider!r}；"
-            f"可选：{', '.join(PROVIDERS)}"
-        )
-    preset = PROVIDERS[provider]
+    preset = resolve_provider(provider, env, prefix=prefix)
     # 只换了 provider 而没指定模型时，落到那家 provider 的预设默认，而不是角色原来的模型
     fallback = default["model"] if provider == default["provider"] else preset["default_model"]
     model = (env.get(f"{prefix}_MODEL") or "").strip() or fallback
+    if not model:
+        # 这句话故意长：它要点名两个可改的地方（角色的 MODEL 与 provider 的默认模型）。
+        raise ValueError(
+            f"{prefix}_MODEL 没给，而 provider {provider!r} 也没有预设默认模型："
+            f"请显式指定 {prefix}_MODEL（或给它设一个默认模型）"
+        )
     return RoleConfig(
         role=role,
         provider=provider,

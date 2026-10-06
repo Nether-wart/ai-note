@@ -50,19 +50,24 @@ def test_the_extract_role_has_its_own_provider_and_model_env_vars():
     assert cfg.key_env == "DASHSCOPE_API_KEY"
 
 
-def test_an_unknown_role_and_a_whitelisted_provider_error_both_shout():
+def test_an_unknown_role_and_an_undefined_provider_error_both_shout():
     with pytest.raises(ValueError) as excinfo:
         config.load_role_config("summarize", {})
     assert "summarize" in str(excinfo.value)
     assert "extract" in str(excinfo.value) and "judge" in str(excinfo.value)
 
+    # 预设之外的名字不再被「白名单」拒绝，但**没定义完整**仍然是装载期错误（ADR 0010）。
+    # 报错要同时点出用户设的那个变量与该定义的两个变量，否则人还得自己找另一半。
     with pytest.raises(ValueError) as excinfo:
         config.load_role_config("extract", {"EXTRACT_PROVIDER": "openai"})
-    assert "EXTRACT_PROVIDER" in str(excinfo.value)
-    assert "openai" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "EXTRACT_PROVIDER" in message
+    assert "openai" in message
+    assert "AI_NOTE_PROVIDER_OPENAI_BASE_URL" in message
+    assert "AI_NOTE_PROVIDER_OPENAI_API_KEY" in message
 
 
-def test_provider_outside_the_whitelist_is_a_load_time_error():
+def test_undefined_provider_is_a_load_time_error():
     with pytest.raises(ValueError) as excinfo:
         config.load_judge_config({"JUDGE_PROVIDER": "openai"})
 
@@ -132,3 +137,58 @@ def test_a_bad_provider_stops_the_cli_from_booting(tmp_path, monkeypatch):
     monkeypatch.setenv("JUDGE_PROVIDER", "openai")
 
     assert main(["--data", str(make_data_dir(tmp_path, []))]) == 2
+
+
+# ---------------------------------------------------------------- 自定义 provider（ADR 0010）
+
+
+def test_自定义provider的端点与密钥从环境里取():
+    env = {
+        "AI_NOTE_PROVIDER_OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "AI_NOTE_PROVIDER_OPENAI_API_KEY": "sk-x",
+        "AI_NOTE_PROVIDER_OPENAI_MODEL": "gpt-4o",
+        "EXTRACT_PROVIDER": "openai",
+    }
+    cfg = config.load_role_config("extract", env)
+    assert cfg.provider == "openai"
+    assert cfg.base_url == "https://api.openai.com/v1"
+    assert cfg.key_env == "AI_NOTE_PROVIDER_OPENAI_API_KEY"
+    assert cfg.model == "gpt-4o"
+
+
+def test_自定义provider的名字归一成环境变量名():
+    env = {
+        "AI_NOTE_PROVIDER_MY_PROXY_BASE_URL": "https://proxy.example/v1",
+        "AI_NOTE_PROVIDER_MY_PROXY_API_KEY": "k",
+        "JUDGE_PROVIDER": "my-proxy",
+        "JUDGE_MODEL": "some-model",
+    }
+    # `my-proxy` → `AI_NOTE_PROVIDER_MY_PROXY_*`
+    assert config.load_role_config("judge", env).base_url == "https://proxy.example/v1"
+
+
+def test_自定义provider定义不全时装载就失败():
+    # 只给键不给端点
+    no_url = {"AI_NOTE_PROVIDER_OPENAI_API_KEY": "sk-x", "EXTRACT_PROVIDER": "openai"}
+    with pytest.raises(ValueError, match="AI_NOTE_PROVIDER_OPENAI_BASE_URL"):
+        config.load_role_config("extract", no_url)
+    # 只给端点不给键（本机端点也要填占位值：留空与忘了填长得一样）
+    no_key = {"AI_NOTE_PROVIDER_OPENAI_BASE_URL": "https://x/v1", "EXTRACT_PROVIDER": "openai"}
+    with pytest.raises(ValueError, match="AI_NOTE_PROVIDER_OPENAI_API_KEY"):
+        config.load_role_config("extract", no_key)
+
+
+def test_自定义provider没给模型且没有默认模型时装载就失败():
+    env = {
+        "AI_NOTE_PROVIDER_OPENAI_BASE_URL": "https://x/v1",
+        "AI_NOTE_PROVIDER_OPENAI_API_KEY": "k",
+        "EXTRACT_PROVIDER": "openai",
+    }
+    with pytest.raises(ValueError, match="EXTRACT_MODEL"):
+        config.load_role_config("extract", env)
+
+
+def test_预设provider不受影响():
+    cfg = config.load_role_config("judge", {})
+    assert cfg.provider == config.ROLE_DEFAULTS["judge"]["provider"]
+    assert cfg.base_url == config.PROVIDERS[cfg.provider]["base_url"]

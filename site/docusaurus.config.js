@@ -48,6 +48,8 @@ const config = {
         // 「怎么用」是这里唯一的 **MDX 页面**：它没有数据，所以能长在 Docusaurus 的框架上
         // （markdown 排版、admonition、mermaid 都是主题给的），而数据页必须留在运行时。
         {to: '/help', label: '怎么用', position: 'right'},
+        // 录入单独一页（它自己带一个真的「上传」按钮；工作台仍是运行时组件）
+        {to: '/intake', label: '录入', position: 'right'},
       ],
     },
   },
