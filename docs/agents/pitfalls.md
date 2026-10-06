@@ -25,6 +25,12 @@ expected code to consist of uppercase letters followed by digits only (e.g. `F40
 **规矩**：说明写在**上一行的独立注释**里，指令行只留指令（`# noqa: E501`）。
 写 `noqa` 之前先看 `ruff check` 到底报不报——不报就别加。
 
+**同族的还有一条，同一个会话里撞了 5 次**：把中文散文写进**只接受标识符**的地方——
+测试函数名里的空格、名字里带的引号、以及最阴的**全角括号**（`def test_…（最坏的一种）():` →
+`SyntaxError: invalid character '（' (U+FF08)`）。它偶尔能跑，所以看起来像手滑；**它其实是习惯**：
+先在脑子里写好句子，再往里塞代码。**写标识符时只想标识符**——中文名一律用下划线连，
+标点/引号/括号一个都不许有。
+
 ## 2. 解释某条禁用写法的注释，把这条检查自己判红了
 
 **症状**：`site/tests/bundle-safe.test.mjs` 报 `src/lib/time.js: [...byMonth.values()]`——
