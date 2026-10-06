@@ -20,6 +20,15 @@ const config = {
   i18n: {defaultLocale: 'zh-Hans', locales: ['zh-Hans']},
   // 界面从哪取数据。**运行时**读它（见 src/lib/api.js），不参与构建。
   customFields: {apiBase},
+  // 图：错因与推理偶尔画一张图，`mermaid: true` 让 ```mermaid 围栏可用
+  //（渲染由 `@theme/Mermaid` 做，见 `components/RichText.js`）。
+  // **数学不在这里**：这个站点的页面是 `.js` 而不是 MDX，`remark-math`／`rehype-katex`
+  // 那种「构建期把 markdown 里的公式转成 HTML」的路子对本项目**不生效**——
+  // 公式是在运行时由 `RichText` 用 `katex.renderToString` 渲染的，
+  // 所以这里只装主题、不装那对插件（KaTeX 的样式也在那个组件里 import 本地那份，
+  // 不引远端 stylesheet：这个站点要在没网的本机上跑）。
+  themes: ['@docusaurus/theme-mermaid'],
+  markdown: {mermaid: true},
   presets: [
     [
       'classic',

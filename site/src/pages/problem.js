@@ -9,6 +9,7 @@ import {parseProblemQuery} from '../lib/routes';
 import {formatMoment} from '../lib/time';
 import {useMounted} from '../lib/use-mounted';
 import FailurePanel from '../components/FailurePanel';
+import RichText from '../components/RichText';
 
 /**
  * 阅读页：`/problem?pid=<题卡 id>`。**答案只在这一页出现**（spec #17 §5）。
@@ -162,7 +163,12 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
           题面转录（检索与打标用，不用于印刷）：
         </figcaption>
       </figure>
-      <p data-transcript="true">{problem.transcript || '（还没有题面转录）'}</p>
+      {/* 题面转录、正解、原解、订正都走 `RichText`：`$…$` 交给 KaTeX，```mermaid 交给
+          主题的 Mermaid，别的原样。没有值时的兜底句也照旧印出来（不静默）。 */}
+      <p data-transcript="true">
+        <RichText text={problem.transcript} />
+        {problem.transcript ? null : '（还没有题面转录）'}
+      </p>
 
       <section data-answer-section="true">
         <h2>正解与标准答案</h2>
@@ -176,7 +182,10 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
             <strong>正解</strong>
             <span className="ai-note-meta">（给人看的完整解答）</span>：
           </p>
-          <p data-field="correct_solution">{problem.correct_solution || '（还没有正解）'}</p>
+          <p data-field="correct_solution">
+            <RichText text={problem.correct_solution} />
+            {problem.correct_solution ? null : '（还没有正解）'}
+          </p>
         </div>
       </section>
 
@@ -195,13 +204,17 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
             <span className="ai-note-meta">（你做错那次写下的解法，永不参与判定）</span>：
           </p>
           <p data-field="original_transcript">
-            {problem.original_transcript || '（没有原解转录）'}
+            <RichText text={problem.original_transcript} />
+            {problem.original_transcript ? null : '（没有原解转录）'}
           </p>
           <p>
             <strong>订正</strong>
             <span className="ai-note-meta">（原答之后补上的，独立于正解的一条信息）</span>：
           </p>
-          <p data-field="correction">{problem.correction || '（没有订正）'}</p>
+          <p data-field="correction">
+            <RichText text={problem.correction} />
+            {problem.correction ? null : '（没有订正）'}
+          </p>
         </div>
       </section>
 

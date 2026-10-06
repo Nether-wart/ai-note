@@ -343,88 +343,104 @@ function DetailView({data, name, month, week, onUpload}) {
         </span>
       </div>
 
-      {buckets.months.length > 0 && <TimeIndex name={name} months={buckets.months} />}
-
-      {broken ? (
-        <FailurePanel title="地址里指的那一段，时间索引里没有" error={filtered.error} />
-      ) : (
-        <>
-          {filtering && (
-            <p data-detail-filter={filtered.key}>
-              筛选：{filtered.label}（{rows.length} 道）{' '}
-              <Link to={subjectUrl(name, 'detail')} data-filter-clear="true">
-                显示全部
-              </Link>
-            </p>
-          )}
-
-          {/* 「没有录入时间」那一行说的是**整份细则**；筛着的时候它会把不在筛选里的题
-              也说成「列在最后」，读起来像筛选漏了人。所以只在没筛时出现。 */}
-          {undated.length > 0 && !filtering && (
-            <p className="ai-note-warn" data-undated={undated.length}>
-              另有 {undated.length} 道没有录入时间，列在最后：
-              {undated.map((problem) => (
-                <span key={problem.id}>
-                  {' '}
-                  <Link to={problemUrl(problem.id)}>{problem.id}</Link>
-                </span>
-              ))}
-            </p>
-          )}
-
-          {rows.length === 0 ? (
-            filtering ? (
-              // 桶就是从这份名单里数出来的，正常筛不出 0 道——但空清单会把「这一段里一道
-              // 都没有」印成一片空白，而空白最容易被读成「一切正常」。
-              <p data-detail-filter-empty="true">筛选：{filtered.label} 里一道题都没有。</p>
-            ) : (
-              <p data-detail-empty="true">
-                {name ? `「${name}」下还没有错题。` : '未归类下还没有错题。'}录入入口是上面那个「上传整页照片」。
+      {/* 原生文档页的排法是「正文在左、辅助栏在右」——`DocItem/Layout` 里那个
+          `<div className="col col--3">` 就是右侧栏的位置。时间索引站的就是那个位置，
+          只是它要 `col--6` 才摆得下月份与周。DOM 顺序仍是**正文在前**：窄屏堆叠时
+          先看到题表，右栏落到下面。 */}
+      <div className="row">
+        <div className="col col--6">
+        {broken ? (
+          <FailurePanel title="地址里指的那一段，时间索引里没有" error={filtered.error} />
+        ) : (
+          <>
+            {filtering && (
+              <p data-detail-filter={filtered.key}>
+                筛选：{filtered.label}（{rows.length} 道）{' '}
+                <Link to={subjectUrl(name, 'detail')} data-filter-clear="true">
+                  显示全部
+                </Link>
               </p>
-            )
+            )}
+
+            {/* 「没有录入时间」那一行说的是**整份细则**；筛着的时候它会把不在筛选里的题
+                也说成「列在最后」，读起来像筛选漏了人。所以只在没筛时出现。 */}
+            {undated.length > 0 && !filtering && (
+              <p className="ai-note-warn" data-undated={undated.length}>
+                另有 {undated.length} 道没有录入时间，列在最后：
+                {undated.map((problem) => (
+                  <span key={problem.id}>
+                    {' '}
+                    <Link to={problemUrl(problem.id)}>{problem.id}</Link>
+                  </span>
+                ))}
+              </p>
+            )}
+
+            {rows.length === 0 ? (
+              filtering ? (
+                // 桶就是从这份名单里数出来的，正常筛不出 0 道——但空清单会把「这一段里一道
+                // 都没有」印成一片空白，而空白最容易被读成「一切正常」。
+                <p data-detail-filter-empty="true">筛选：{filtered.label} 里一道题都没有。</p>
+              ) : (
+                <p data-detail-empty="true">
+                  {name ? `「${name}」下还没有错题。` : '未归类下还没有错题。'}录入入口是上面那个「上传整页照片」。
+                </p>
+              )
+            ) : (
+              <ul className="ai-note-detail-list">
+                {rows.map((problem) => {
+                  // 行上只印给人读的时刻，原始串留在 `title` 里（`lib/time.js` 的口径）：
+                  // `created_at` 是数据，不是用来读的。
+                  const moment = formatMoment(problem.created_at);
+                  return (
+                    <li key={problem.id} data-problem-id={problem.id}>
+                      <Link className="ai-note-detail-row" to={problemUrl(problem.id)}
+                        data-detail-link="true">
+                        <span data-transcript-prefix="true">
+                          {transcriptPrefix(problem.transcript)}
+                        </span>
+                        <span className="ai-note-badges">
+                          <span className="ai-note-badge">{problem.type_cn || problem.type}</span>
+                          <span className="ai-note-badge" data-mastery={problem.mastery_cn}>
+                            {problem.mastery_cn}
+                          </span>
+                          <span className="ai-note-badge">
+                            连续对 {problem.streak ?? 0}/2
+                          </span>
+                          <span className="ai-note-badge" data-review={problem.review}>
+                            {problem.review === 'reviewed' ? '已审核' : '未审核'}
+                          </span>
+                          <span className="ai-note-badge" data-created-at={problem.created_at}
+                            title={moment.exact || undefined}>
+                            录入 {moment.text}
+                          </span>
+                        </span>
+                        <span className="ai-note-meta" data-topics={problem.topics?.length || 0}>
+                          考点：{problem.topics?.length ? problem.topics.join('、') : '（还没有考点）'}
+                        </span>
+                        <span className="ai-note-meta" data-error-causes={problem.error_causes?.length || 0}>
+                          错因：{problem.error_causes?.length ? problem.error_causes.join('、') : '（还没有错因）'}
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </>
+        )}
+        </div>
+
+        <div className="col col--6">
+          {buckets.months.length > 0 ? (
+            <TimeIndex name={name} months={buckets.months} />
           ) : (
-            <ul className="ai-note-detail-list">
-              {rows.map((problem) => {
-                // 行上只印给人读的时刻，原始串留在 `title` 里（`lib/time.js` 的口径）：
-                // `created_at` 是数据，不是用来读的。
-                const moment = formatMoment(problem.created_at);
-                return (
-                  <li key={problem.id} data-problem-id={problem.id}>
-                    <Link className="ai-note-detail-row" to={problemUrl(problem.id)}
-                      data-detail-link="true">
-                      <span data-transcript-prefix="true">
-                        {transcriptPrefix(problem.transcript)}
-                      </span>
-                      <span className="ai-note-badges">
-                        <span className="ai-note-badge">{problem.type_cn || problem.type}</span>
-                        <span className="ai-note-badge" data-mastery={problem.mastery_cn}>
-                          {problem.mastery_cn}
-                        </span>
-                        <span className="ai-note-badge">
-                          连续对 {problem.streak ?? 0}/2
-                        </span>
-                        <span className="ai-note-badge" data-review={problem.review}>
-                          {problem.review === 'reviewed' ? '已审核' : '未审核'}
-                        </span>
-                        <span className="ai-note-badge" data-created-at={problem.created_at}
-                          title={moment.exact || undefined}>
-                          录入 {moment.text}
-                        </span>
-                      </span>
-                      <span className="ai-note-meta" data-topics={problem.topics?.length || 0}>
-                        考点：{problem.topics?.length ? problem.topics.join('、') : '（还没有考点）'}
-                      </span>
-                      <span className="ai-note-meta" data-error-causes={problem.error_causes?.length || 0}>
-                        错因：{problem.error_causes?.length ? problem.error_causes.join('、') : '（还没有错因）'}
-                      </span>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
+            <p className="ai-note-meta" data-time-index-empty="true">
+              还没有带录入时间的错题，所以时间索引空着。
+            </p>
           )}
-        </>
-      )}
+        </div>
+      </div>
     </section>
   );
 }
