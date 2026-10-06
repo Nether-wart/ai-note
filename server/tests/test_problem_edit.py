@@ -141,3 +141,37 @@ def make_data_dir_without_error_causes(tmp_path):
     root = make_data_dir(tmp_path, [])
     (root / "vocab" / "error-causes.json").unlink(missing_ok=True)
     return root
+
+
+def test_review_只动两个键_别的一律留在卡上(api_for):
+    """`review` 上还可能有别的键（§3.1 的 `review_reopened_because`：「打回过就必须看得见」）。
+    整份替换会把它**静默抹掉**——属性编辑不该替审核那条路清理痕迹。"""
+    card = make_card(subject="数学")
+    card["review"] = {"status": "unreviewed", "reviewed_at": None,
+                      "review_reopened_because": "答案抄错了"}
+    api = api_for([card])
+
+    _s, env = patch_json(api, f"/api/problem/{card['id']}", {"review": "reviewed"})
+    review = env["data"]["card"]["review"]
+    assert review["status"] == "reviewed" and review["reviewed_at"]
+    assert review["review_reopened_because"] == "答案抄错了", "这一个键被抹掉了"
+
+
+def test_写端点的_body_上限分档收全了(api_for):
+    """§9：写端点的 body 要在**读进来之前**就按 64 KiB 挡住。
+    分档错 = 先读进内存再拒绝（那正是这一条要防的）。多部分照片仍归上传那一档。"""
+    api = api_for([make_card(subject="数学")])
+    for path in ("/api/attempt/p-1", "/api/brief/数学", "/api/settings",
+                 "/api/problem/p-1", "/api/page/abc123", "/api/page/abc123/commit"):
+        assert api.body_limit(path) == api.max_attempt_bytes, path
+    for path in ("/api/inbox", "/api/page", "/api/inbox/scan"):
+        assert api.body_limit(path) == api.max_upload_bytes, path
+
+
+def test_用错方法时的_allowed_与路由一致(api_for):
+    """同一条路径报出两个 `allowed`，界面只能猜（实测过 POST 与 PUT 不一致）。"""
+    api = api_for([make_card(subject="数学")])
+    response = api.handle("POST", "/api/problem/p-20200101-aaaaaa")
+    assert response.status == 405
+    allowed = json.loads(response.body)["error"]["details"]["allowed"]
+    assert allowed == ["GET", "PATCH", "OPTIONS"], allowed

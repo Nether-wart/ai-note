@@ -183,7 +183,12 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
         for field in changed:
             if field == "review":
                 status = wanted[field]
+                # **只动这两个键**：`review` 上还可能有别的键（例如
+                # `review_reopened_because`——"打回过就必须看得见"），整份替换会把它们
+                # **静默抹掉**。属性编辑的职责是改属性，不是替审核那条路清理痕迹。
                 card["review"] = {
+                    **{key: value for key, value in (card.get("review") or {}).items()
+                       if key not in ("status", "reviewed_at")},
                     "status": status,
                     # 置回未审核时**不留**上一个时刻：留着会让人以为它这一刻被审过
                     "reviewed_at": clock().isoformat() if status == "reviewed" else None,

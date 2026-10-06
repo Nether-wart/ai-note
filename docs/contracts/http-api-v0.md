@@ -492,7 +492,7 @@
 | 没有这张卡 | 404 | `{code:"not_found", message:"没有这道题：p-xxx", hint:"GET /api/index 看有哪些", details:{what:"problem", id:"p-xxx"}}` |
 | id 非法（含 `/`、`..`、**空**） | 400 | `{code:"bad_request", message:"题卡 id 非法：'../../etc/passwd'", hint:"id 只允许字母、数字、点、下划线与连字符", details:{param:"pid", value:"../../etc/passwd"}}` |
 | id 是空的（`GET /api/problem/`） | 400 | 同上，`message` 是 `题卡 id 非法：''`。**不是 404**：客户端少给一段路径是客户端 bug，404（「没这条路由」）会让人去翻路由表 |
-| 用错方法（POST 到这个只读端点） | 405 | `{code:"method_not_allowed", message:"...", details:{allowed:["GET","OPTIONS"]}}` |
+| 用错方法（`POST` 到这个路径） | 405 | `{code:"method_not_allowed", message:"...", details:{allowed:["GET","PATCH","OPTIONS"]}}`。**这条路径本版（题卡属性编辑）起不再是只读的**（多了 `PATCH`，§10.7）：`allowed` 必须报**全**允许的方法，不许因为「用错的那个方法是 POST」就少报一个——同一路径、不同错法给出两个 `allowed`，界面只能靠猜（`OPTIONS` 永远在列表里，§9） |
 
 ## 6. 能不能走自动判定：一处实现，三个拒绝理由
 
@@ -995,6 +995,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | §10.4 受控词表与大纲（**数据文件，不是端点**） | **本版（前端重构 / #17）新增**：`<数据目录>/vocab/subjects.json` 与改形后的 `<数据目录>/vocab/topic-outline.seed.json` 的形状、存量回填命令 `python3 -m server.subject_assign`，以及它们怎么进 `/api/index`（§3） |
 | §10.5 `/api/brief/<科目>` | **本版（前端重构 / #17）新增**（形状先钉住）：读最近一份简报、按需生成一份（走 `brief` 角色，过数字闸门） |
 | §10.6 `/api/settings` | **本版（模型设置）新增**：读／整体替换**模型设置**（`<数据目录>/settings.json`），两个端点都不发起模型调用；**「测试连接」不在本版** |
+| §10.7 `PATCH /api/problem/<id>` | **本版（题卡属性编辑）新增**：改一张**已有**卡的**属性**，可改的是闭集 `subject`／`topics`／`error_causes`／`review`；回执给**改完之后的整张卡** ＋ `changed`（按闭集顺序，没变就是 `[]`）；**本版只做属性**——改题面／答案归审核那条路、改掌握与重做历史归重做／判定那条路、删卡不做 |
 
 ### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
 
@@ -1879,6 +1880,103 @@ provider 那一行的四个键：`preset`（这个名字是不是预设那两家
 **本版不做**：不做「测试连接」；不写 `.env.local`、不改任何环境变量——写入**只**发生在
 `<数据目录>/settings.json` 一处。
 
+### 10.7 `PATCH /api/problem/<id>` —— 题卡属性编辑（**本版（题卡属性编辑）新增**）
+
+一张卡分三层：**内容**（题面／图片／原答／订正／正解／标准答案）、**重做历史与掌握**
+（`attempts`／`mastery`）、**属性**（科目／考点／错因／审核状态）。前两层各有自己的写路径
+（审核那条路与 `POST /api/attempt/<pid>`，§10.1），而属性这一层此前**一个入口都没有**：
+改一个科目只能去手改 JSON。这一节把属性收成**一个**端点，并且**只收一个闭集**——
+题面与答案是审核那条路的活，掌握与重做历史只能由重做／判定那条路改
+（它们带冷却门与重放的不变量），属性编辑不许成为绕过它们的后门。
+
+| 动作 | 路由 | 请求 | 响应 `data` | 状态 |
+|---|---|---|---|---|
+| 改属性 | `PATCH /api/problem/<id>` | `{"<字段>": <值>, …}`——**至少一项**，键只许是下面那四项 | `{"card": {…改完之后的整张卡…}, "changed": ["subject", …]}`（见下） | **本版新增** |
+
+**可改的字段是一个闭集**（`changed` 的顺序就是它：`subject` → `topics` → `error_causes` → `review`；
+`details.allowed` 给的也是它）：
+
+| 字段 | 形状 | 规矩 |
+|---|---|---|
+| `subject` | `string` 或 `null` | 科目；`null` ＝ **未归类**——那是一等状态，不是「缺字段」（§3.1／§10.4）；空串／纯空白也落成未归类（同一条口径），不报错。取值**必须**逐字在受控词表 `<数据目录>/vocab/subjects.json` 里 → 否则 **400**（`reason: "subject_unknown"`，`details` 给 `{param, value, allowed}`，§9 **已有一个同名的细因，指认它、不造第二个**）。**词表本身不在** → **先收下**并带回词表级警告（`subjects_vocab_*`，§8）——与 §10.2.1b「建」那条规矩**完全同源、同一句话**：录入摩擦是这类工具的头号死因（ADR 0006 决定第 5 条）。先收下、再喊；不是先拦下 |
+| `topics` | `string[]` | 考点，形如 `"函数与导数/极值与最值"`（用 `/` 指进考点大纲的一串路径）。**只在形状上验**：每一项都是非空字符串，**保序去重**（顺序是人给的语义，先想到的排前面）。**不复核大纲里有没有那一节**——大纲会变（§10.4），卡不该因为大纲改了就被判脏。`[]` 合法（＝清掉考点） |
+| `error_causes` | `string[]` | 错因。取值**必须**逐字在 `<数据目录>/vocab/error-causes.json`（`{"错因": […]}`）里 → 否则 **400**（`reason: "error_cause_unknown"`，`details` 给 `{param, unknown, allowed}`——一次可以有好几个不在表里）；**词表不在** → 收下 ＋ 词表级警告（`error_causes_vocab_*`，§8）。`[]` 合法（＝清掉错因，是一次**真的**修改，不是「什么都没改」） |
+| `review` | `"reviewed"` \| `"unreviewed"` | 审核状态。卡上的 `review` 是一个**对象**（`{"status": …, "reviewed_at": …}`，§3.1）：**界面给一个字符串，服务把它落成对象**——置 `reviewed` 时写 `reviewed_at`（取自服务时钟，UTC），置 `unreviewed` 时 `reviewed_at` 置 `null`（留着上一个时刻会让人以为它这一刻被审过）。**界面不许直接写那个对象**：`{"review": {"status": …}}` 是形状错，按下面那档 400，不是「服务替你拆开」。这一步**只动这两个键**：`review` 里别的键（`review_reopened_because`）一个字都不动——§3.1 承诺过「打回过就必须看得见」，整份替换会把它静默抹掉 |
+
+**不许改的字段**（出现就是 **400**，`reason: "problem_field_not_editable"`，
+`details` 给 `{param, value, allowed}`，`allowed` ＝上面那四项的闭集）：
+`id`、`created_at`、`source`、`problem`（题面／图片）、`original_solution`、`correct_solution`、
+`standard_answer`、`attempts`、`mastery`、`provenance`、`print`、`new_tag_proposals`。
+理由两条，都不许绕：
+
+- **掌握与重做历史只能由重做／判定那条路改**：`mastery` 与 `attempts` 带**冷却门与重放的**
+  不变量（§10.1、§12 的 `server/mastery.py`），从属性这一层顺手写一下，等于**不重放就伪造状态**。
+- **题面与答案是审核那条路的活**：`standard_answer` 是自动判定唯一的基准（§6），
+  `problem`／`original_solution`／`correct_solution` 是审核时填的内容；属性编辑不许成为
+  **绕过它们的后门**。
+
+这条纪律管的是**整张卡**，不只是上面点名的那十二个：可改闭集之外的**任何**名字一律 400
+（`reviewed_at`、`review.reopened_because` 也一样——它们是 `review` 那一项**落地**的产物，
+不是可以单独写的字段；`dry_run` 同理，见下）。
+
+**其余规矩**：
+
+- **幂等，而且明说「什么都没改」**：值没变也 **200**，回执里 `changed: []`——空数组就是
+  「这次一个字段都没改」，不是含糊的成功。**值没变就不写盘**（没有该改的东西，也就没有改坏
+  那个文件的机会）。判据：同一份 body 发两次，第二次 `changed: []` 且卡文件**逐字节不变**。
+- **一次只想改一项时只给那一项**：出现在请求体里的键才参与比对，**没出现的键一个字都不动**
+  （不是「没给就清零」）。
+- **给了 `null`**：只有 `subject` 的 `null` 有含义（未归类）；其余字段给 `null` 是**形状错**
+  → **400** `bad_request`（`reason` 就是 `"bad_request"`，没有更细的原因——与 §10.1 的
+  `channel`／`verdict` 取值非法同一档，§9 末段有这条分界的理由），`details` 点名参数、值、
+  允许什么。请求体不是 JSON 对象、或**一个可改字段都没给**，走同一档
+  （`details.param = "body"`，`allowed` ＝那四项）：「至少要给一项」与 §10.1 定点修正那条
+  「什么都不给＝什么都没得改」是同一条规矩。
+- **原子写，写的必须是同一张卡**：先写临时文件再 `os.replace`（与页文件、设置文件同一条纪律，
+  失败不留半个文件）；**路径只由 URL 里那个 id 算**，卡里的字段（哪怕是 `id`）不参与决定写到
+  哪个文件——§8「写盘路径的纵深防御」的同一件事（内容不许决定写到哪、读到哪）。
+  **题卡读写只有一份实现：`server/cardstore.py`**（`write_card` 是「临时文件 ＋ `os.replace`」
+  的唯一一处；`server/attempt.py` 与 `server/page_commit.py` 各自那一份**已改为委托它**）。
+  **不许再写第三份**：两份「先临时文件再替换」迟早有一份忘了 `.tmp` 或忘了 `ensure_ascii`，
+  而「拿卡里的 `id` 而不是传进来的 pid 去拼路径」正是穿越与覆盖那一类事故的来源。
+- **id 先过 §1 的字符集规则**：id 类路径参数只接受 `^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$`，
+  非法（含 `/`、`..`、空）→ **400**（`details.param = "pid"`，与 `GET /api/problem/<id>` 同一道闸，
+  §5.1）——**判在拼路径之前**（`server/cardstore.py: check_pid` 是那道闸的唯一实现，
+  `card_path` 自己也调它；HTTP 层在碰任何文件之前先判一次）。不判的话 `..%2F..%2F<别的文件>`
+  这种东西会让一次属性编辑**写到数据目录外面去**（实测过，返回的还是 200）。
+  **id 合法而卡不在 → 404**（沿用既有那颗 `not_found`，不新造）。
+- **回执给整张卡**：`data.card` 是**改完之后**那张卡的原样（界面拿去直接重画，不用再发一次
+  `GET /api/problem/<id>`）；`data.changed` 列出这次**真的变了**的字段，按可改闭集的顺序。
+  只报字段名、不报新旧值——新的值就在 `card` 里。
+- **不用重建索引**：`/api/index` 是按需从盘上重算的（ADR 0001、§11），所以属性改完
+  **下一次读就是新的**——这就是「改完立刻看得见」的依据，不是一句安慰。这条**不改索引的
+  任何形状**，也不写任何索引文件。
+- **没有 `dry_run`**：它不是可改字段，出现就是 400 `problem_field_not_editable`。这条路没有
+  预演，也**不需要**预演——它的全部代价是**原子地写一张卡**，没有 `POST …/resegment` 那种
+  会毁掉人的劳动的破坏面（§10.2.1b），所以不借它那套形状。
+- body 上限走**写端点那一档**（64 KiB，§9）：超限 → 400 `bad_request`，
+  `reason: "body_too_large"`，**判在读 body 之前**，**一个字节都不写**。
+- 跨源预检的 `Access-Control-Allow-Methods` 里**已经有 `PATCH`**（§11 记过「路由只活在纯函数
+  接缝里」那笔账，`do_PATCH` 那次），这条路由不许再退回去；用错方法（`POST`／`PUT` 到这个
+  路径）→ **405**，`allowed` 是 `["GET", "PATCH", "OPTIONS"]`（§5.1）。
+
+**错误与警告各去哪一半**（码表在 §8／§9，这里只说落点）：
+
+| 这一半 | 码 |
+|---|---|
+| **400** | `subject_unknown`（**指认 §9 已有的名字**）、`error_cause_unknown`、`problem_field_not_editable`（后两个本版在 §9 登记）；值的形状错、body 不是对象、一项都没给 → 那颗**没有细因**的 `bad_request`；body 超限 → `body_too_large`；id 非法 → `bad_request`（`details.param = "pid"`） |
+| **警告**（§2 的 `Warning`，`level: "warning"`，`id` 为 `null`） | `error_causes_vocab_missing`／`error_causes_vocab_unreadable`（本版新增，§8）；`subject` 那条**不新造**——`subjects_vocab_missing`／`unreadable`／`empty` 照旧（§8） |
+| **404** | 没有这张卡（`not_found`） |
+
+词表级警告说的是「**这次没校验得了**」，不是「你这次输入错了」：卡照收、值照写；
+下一次带着词表再来一次，就是一次**合法**的修改。这也是为什么它**不是** 400——
+把环境缺失报成输入错，等于把人挡在录入门外（ADR 0006 决定第 5 条）。
+
+**本版不做**：不做**改题面／改答案**（`problem`／`original_solution`／`correct_solution`／
+`standard_answer` 一个字都不许从这里过——那是审核那条路），不做**删卡**（`drop` 一条块都不删卡，
+§10.2.1b），不做「顺手改 `mastery`／`attempts`」（它们只有重做／判定那条路，见上），
+也不做属性编辑的预演。**属性编辑只做属性。**
+
 ## 11. 契约决定与偏离记录
 
 | 决定 | 为什么 |
@@ -1937,6 +2035,7 @@ provider 那一行的四个键：`preset`（这个名字是不是预设那两家
 | 本版（前端重构 / #17） | **A 科目成一等字段**：§3.1 题卡记录加 `subject`（`null` = **未归类**）；§8 逐卡加 `subject_missing`（`hint`，与 `page_binding_missing` 同级）与 `subject_unknown`（`warning`，值不在词表**不许静默改写成 `null`**），并按实现订正「逐卡码 `level` 全是 `warning`」那句（#17 §3.9）；§3 的 `stats` 加 `by_subject` 与 `unclassified`，并把不变式 `sum(by_subject[*].problems) + unclassified == stats.problems` 写进正文。**B 词表随索引一起给**：`/api/index` 加 `subjects`／`outline`／`briefs`（`stale` = 「这份简报生成之后又有题录进来了」、`new_problems` 是那几道的道数）；`outline` 里只许出现 `subjects` 里的科目，否则 `outline_subject_unknown`（`warning`）；写明「一次请求画出整棵树、不许露『有科目但没有大纲』的中间态」。**C 数据文件**：新 §10.4 钉住 `<数据目录>/vocab/subjects.json`（`{"科目": […]}`，与 `error-causes.json` 同形）与 `topic-outline.seed.json` 的**破坏性改形**（`{"大纲": {科目: {章: {节: [点]}}}}`，旧 `name` 里那句「不是真实大纲」的自我否定一并删掉）以及理由（**科目是导航的根，大纲必须挂在科目下**），并写明存量回填命令 `python3 -m server.subject_assign --map <表.json> [--apply]`、映射表形状（`{"题卡 id": "科目"}`）、**坏值一票否决**（表里有一条不在词表里 → `--apply` 一个字节都不写、退出码 1）与**不许按考点推科目**（猜错的科目比没有科目更坏），并写明预演**必须逐条列出被跳过的和为什么**（形状是细节，说的是内容）；§8 补 6 条词表级警告（读不出来**不是 500**）；§1 把路径字符集规则的**适用面**写准（只管 **id 类**参数；科目是另一类：URL 编码 + 词表逐字校验）。**D 页文件**：§10.2.1 加**页级 `subject`**（与题卡同名同义，`null` = 未归类）、`segmentation`（`model`／`manual`／`unavailable`）与 `removed_blocks[]`（**只增不减、同 id 允许多条**）；`mode == "unavailable"` 时 `blocks` **必须**是 `null`；留痕里**永远不许**出现带 `card_id` 的块；写明**切分不可用时也建页**（照片落盘、页文件照建——推翻「切分不可用就不建页」那条旧裁决，ADR 0005 / #15）。§10.2.1b「建」的请求形状加**可选** multipart 文本字段 `subject` 与三条规矩（没给 → 未归类；词表在而取值不在 → **400** `subject_unknown`；**词表本身不在 → 收下并带回词表级警告**——录入摩擦是这类工具的头号死因，ADR 0006 决定第 5 条），响应 `pages[]` **回显 `subject`**（没给就是 `null`，不是缺字段——回执不回声，界面就没法确认科目真被收下了）。**E PATCH 的动作闭集加两条**：`add`（新块 id 与模型块**共用一套分配**；`bbox_norm` 非法 → 与 `move` 同一个拒绝形状）与 `delete`（**已绑 `card_id` 的块永远不许删** → 400 `block_delete_bound_to_card` 带 `card_id`；未入库的块删了必须留痕）；回执加 `blocks_removed` 与 `blocks_added`（**每一次增删都报数**，0 也报，增删对称），并写明**新增走 PATCH 而不新开端点**的理由（加动作 = 一行；新端点要把 `dry_run`／拒绝形状／`EDITABLE_ACTIONS`／回执再实现一遍，最怕两处漂移）。**F `resegment` 语义改成「重置为预设」**：要 `{"confirm_discard_manual": true}`，否则 **409** `resegment_needs_confirmation` + `details.discarded`（`{manual_blocks, removed_blocks, mode_before}`——**计数只有前两个**，因为只有它们能数准；不逐块记来源，所以不报一个算不准的计数；`mode_before` 是「重置前那份块列表是谁给的」这份**事实**，不是计数）；成功时 `segmentation.mode` 回 `"model"`、回执报**真的**丢了几块、删掉的块进 `removed_blocks[]`；`checks`／`reconciliation` 照旧跑。**G 简报端点**：新 §10.5 的两个端点、落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json` 的形状（`window_facts`／`history_facts` 的 `path` 是指向本次索引的 JSON 指针）与**上岗闸门**（任何一条 `path` 解不出来或对不上 → **不落盘** + 502 `brief_unverifiable` + `details.facts`，其中 `reason` 六档把「解不出来」与「索引里正好是 null」分开；它与「模型问不成」的 `model_unavailable` 是两个码，**处置不同：一个重试无用、一个可以重试**）；§10.5 还写死 `facts[].path` 的语法（`brief.resolve_path` 是唯一实现；类型不对/越界都算解不出来；含 `.`/`[`/`]` 的键寻址不了）、窗口起止（`window_until` = `covers_until` 归一化到 UTC 的那一天，`window_from` = `window_until - (window_days - 1)` **含两端**，**文件名取 `window_until`**），以及两条边界（**窗口/历史只是叙事框**，闸门只核数字真不真、不核它在哪个数组；**没有过滤与聚合**，所以「错因分布」这类话核不出来，正文只能引现成读数或可解路径）；回执另加三个现算的键 `is_latest`／`stale`／`new_problems`（**历史那一份也要给**，`stale` 的判据写死成 `created_at > covers_until`）；未归类**不计入**任何科目简报，但正文必须写「另有 N 道未归类未计入」且 N 进 `history_facts` 受同一道闸门管。**H 切分与简报的接线**：§1 补 `SEGMENTER_PROVIDER`／`SEGMENTER_MODEL` 与 `BRIEF_PROVIDER`／`BRIEF_MODEL`（默认沿用抽取角色的默认值）与四个角色的上岗闸门；§12 加 `server/subjects.py`、`server/brief.py`、`server/brief_client.py`／`server/segmenter_client.py` 与 `server/subject_assign.py`；§12.1 加模型上岗验收 `python3 -m pytest server/tests/test_acceptance_models.py -v`（**换模型就要重跑，不过考不许上岗**；需要密钥，**没密钥 skip 而不是 pass**）与 `segmenter` 的三条闸门（视觉探针 + 固定照片集上的人工判定 + `segmentation.py` 的三条对账判据，**三条都要过**，固定照片集落进仓库当夹具）。**I** §0 范围、§9 错误码、§10 状态表、§11 偏离表同步；§10.2.1b 那句「「建」与「入库」是带归属的兜底 404」按实现改准（#15 之后它们早已落地，留着会让 #17 的读者以为还没实现）；§8 的 `subject_unknown` 警告与 §9 的 `subject_unknown` 400 **同名同事实**（R2/R9：同一个事实不许两个码；码表分开、两处互相指认）。**本版只改契约，实现另跟** | 工单 #17（前端重构）的 §3 与 §10 落成契约（契约先行）。要点：①**未归类是一等状态**，不是缺字段——它要有自己的兜底栏与道数，要一条 `hint` 而不是被当成脏数据；②**科目只有一个真源**（受控词表），卡上的值不在表里**不许被静默改写成 `null`**（读数是记录的原值，谁改的谁喊）；③侧栏要**一次请求画出整棵树**，所以词表随索引走、不新开端点；④**「我不知道」与「这一页没有题」必须分得开**（`blocks: null` vs `[]`，再加一层 `segmentation.mode`），而切分不可用时**页文件还是要建**——不建，人就无从手画；⑤**删块要留痕、已绑卡的不许删**——删掉它才是静默丢题；⑥**重置为预设是破坏性动作**，必须先报清将丢弃几处人工改动，不许不声不响覆盖人的劳动；⑦**简报最怕的是一段读起来很顺、数字却是编的总结**——能自动判的「数字对不对」必须是闸门；⑧**换模型就要重跑验收，不过考不许上岗**，固定照片集落进仓库让这句话成为一条可执行的命令；⑨**词表缺席不许挡住录入**——录入摩擦是这类工具的头号死因（ADR 0006 决定第 5 条），所以「词表在而取值不在」是 400、「词表本身不在」是先收下再喊；⑩**同一个事实不许两个码**（R2/R9）：卡级自检与输入拒绝共用 `subject_unknown` 这个名字，层次不同、码表分开 |
 | 本版（补 `GET /api/page/<id>`；接上 `DELETE`／`PUT`） | §10.2.1b 的动作表加一条**读**：`GET /api/page/<id>` → `{page_id, page_path, image, page}`（`page` 是页文件原样）。§10 状态表从「四个动作」改准成「**六个**」。`server/app.py` 补 `do_DELETE`／`do_PUT`：这两个方法自己不做路由，只是把请求送进 `Api._route`，好让「用错方法」真能得到 **405 带 `allowed`**（§5.1）**并且是 JSON 信封**（§2）。**响应形状只多不减** | 界面要打开一页来改，第一步就是**读**；而 `page_api` 一直只有 `PATCH`——于是「读一页」只能拿一次**空修正的预演**（`PATCH {dry_run: true, edits: []}`）去凑，让**读**依赖一条**写形状**的路由。这与 `do_PATCH` 那次是**同一个病根**：**路由只活在纯函数接缝里**（`SplitEditor` 的 `fetchPage` 从 #14 起就踩在这条死缝上，真实 socket 上是 405——它的测试全靠注入 `pageData`，所以从没红过）。**判据的层级与坏掉的那一层错开一格，是这一类缺口能活下来的唯一原因**；现在两条路由各有一条**真 socket** 的测试盯着，用错方法的 `allowed` 也在断言里 |
 | 本版（模型设置） | **新增 §10.6 `/api/settings`（模型设置）**：`<数据目录>/settings.json`（**用户数据目录，不是仓库**；权限 0600、先写临时文件再原子替换）**只写用户真正设过的字段**，缺字段＝回落下一层；三层**逐字段**优先级＝**设置文件 ＞ 环境变量（`<角色>_PROVIDER`／`<角色>_MODEL`／`AI_NOTE_PROVIDER_<名字>_*`）＞ 预设默认**；服务**每次模型调用前重读**那个文件，`PUT` 之后不用重启。两个端点（**本版只做这两个**）：`GET /api/settings` → 200，给 `{file, file_ok, roles, providers, applies}`——每一项带 `source`（`settings`／`env`／`default`），密钥**只给 `set` 与末四位 `hint`**（任何响应、任何日志里都不许出现完整密钥）；`PUT /api/settings` **整体替换、幂等**，回执与 `GET` 同一份 `data`，请求体形状与文件形状相同。**写盘前先校验**：拿候选设置跑一遍**四个角色**（`extract`／`segmenter`／`judge`／`brief`）的 `load_role_config`，任何一条坏（缺 `base_url`／缺密钥／没给模型且该 provider 无默认模型／名字既不是预设也没定义）→ **400**（`reason: "settings_invalid"`，服务原话进 `message`，**一个字节都不写**）；认不出的角色名／provider 名／多余字段 → **400**（`reason: "settings_unknown_field"`）＋ `details`；请求体不是对象／类型不对 → 同一个 `settings_unknown_field`（**不是** `settings_malformed`——那个名字留给盘上那份坏文件）；`api_key` **省略或空串＝不改动这一项**（要清掉得显式给 `null`，`""` 与 `null` 两个意思不许合并）——这条写成能被测试钉住的判据，防的是「页面加载一次再保存一次就把密钥抹掉」这处最常见的静默数据丢失；文件在却读不出来／形状不对 → `GET` 仍 200 但 `file_ok: false` ＋ `warnings[]`（`settings_unreadable`／`settings_malformed`，`level: "warning"`，走 §2 的 `Warning` 形状、`id` 为 `null`），**回落但绝不静默**（文件坏着时**每一个响应**的 `warnings[]` 里都带上原因，见下）。**本版不做「测试连接」**。同步：§0 加这两个端点并写明「测试连接」不在本版；§1 写明设置文件是**第三层来源**与逐字段优先级，并写明**写入口不额外要求密钥**（缺密钥仍然只是调用那一刻的 502——「先填端点、密钥等会儿填」是常见顺序）；§8 加两条设置级警告；§9 把四个码登记进一张四行小表（两个 400 是 `bad_request` 下的 `reason`，两条警告**只**出现在 `warnings[]`，不在错误码表那一半）；§10 状态表加 §10.6；§12 加 `server/settings.py`（唯一实现）；§12.1 加一条可执行命令 | 工单（模型设置）。要点：①设置页要能回答「现在**实际**会用谁、为什么是它、密钥有没有」，所以读数是**生效值 ＋ 来源**，不是文件原文（否则界面得自己再叠一遍三层）；②三层优先级**逐字段**算——既不能静默忽略环境变量（无头部署里配好的东西被一个空表单抹掉），也不能出现「界面里改了却不生效」；③「立刻生效」必须是真的：每次调用前重读，桌面／Tauri 里没有 shell 去改环境变量，「重启 sidecar」是额外的一整套生命周期；④「坏配置起不来」这条纪律在**写入口**也要成立——写入口是唯一能产生持久坏配置的地方；⑤密钥**永不回显**、省略＝不改动，是本版两条最容易写错、也最该用测试钉住的判据 |
+| 本版（题卡属性编辑） | **新增 §10.7 `PATCH /api/problem/<id>`（题卡属性编辑）**：只改**属性**，可改的是**闭集** `subject`／`topics`／`error_causes`／`review`（回执里 `changed` 的顺序就是它），其余一律 **400** `problem_field_not_editable` ＋ `details.allowed` —— 点名的有 `id`／`created_at`／`source`／`problem`／`original_solution`／`correct_solution`／`standard_answer`／`attempts`／`mastery`／`provenance`／`print`／`new_tag_proposals`，但这条纪律管的是**整张卡**（`reviewed_at`、`dry_run` 也一样进不去）：**掌握与重做历史只能由重做／判定那条路改**（`mastery`／`attempts` 带冷却与重放的不变量），**题面与答案是审核那条路的活**（`standard_answer` 是自动判定唯一的基准），属性编辑不许成为绕过它们的后门；**幂等且明说**（值没变也 200、`changed: []`、**不写盘**），一次只想改一项就只给那一项，非 `subject` 的字段给 `null` 是形状错；**回执给改完之后的整张卡** ＋ `changed`（界面直接重画，不再发一次读）；id 非法（含 `..`）→ **400**、id 合法而卡不在 → **404**（沿用既有那颗 `not_found`，不新造）；**改完不用重建索引**（`/api/index` 按需从盘上重算，ADR 0001）——这就是「改完立刻看得见」的依据。**词表两条口径与 §10.2.1b「建」完全同源**：`subject` 必须在 `<数据目录>/vocab/subjects.json` 里、`error_causes` 必须在 `<数据目录>/vocab/error-causes.json`（`{"错因": […]}`）里，**词表在而取值不在 → 400**（`subject_unknown`——**指认 §9 已有的那个名字**，不造第二个／`error_cause_unknown` 带 `unknown`），**词表本身不在 → 先收下 ＋ 词表级警告**（`subjects_vocab_*` **不新造**／本版新增 `error_causes_vocab_missing`／`unreadable` 两条）——录入摩擦是这类工具的头号死因（ADR 0006 决定第 5 条）；`topics` **只在形状上验**（非空字符串、保序去重），**不复核大纲**（大纲会变，卡不该因为大纲改了就被判脏）；`review` 界面只给字符串、服务把它落成 `{status, reviewed_at}`（UTC），且**只动这两个键**（`review.reopened_because` 一个字不动——§3.1 承诺过「打回过就必须看得见」，整份替换会把它静默抹掉）。**值的形状错／body 不是对象／一项都没给 → 那颗没有细因的 `bad_request`**（`reason == "bad_request"`，与 §10.1 的 `channel`／`verdict` 取值非法同档）：`problem_field_not_editable` 说的是「这个字段不归这条路管」，不是「你给的值形状不对」——**不同的事实不许借同一个码**（R2/R9 那条的反面）。**本版不做**改题面／答案、不做删卡、不做预演。同步：§0 加这一行与「不做」那部分，并订正「改已有题卡的写端点只有 `POST /api/attempt/<pid>` 一个入口」那句；§3.1 逐条标出那四个可改字段，并写明「读得到的字段远多于改得到的」；§8 加错因词表两条；§9 登记 `error_cause_unknown`／`problem_field_not_editable` 并指认 `subject_unknown`；§10 状态表加 §10.7；§12 加 `server/cardstore.py`（题卡读写的唯一实现：路径只由 pid 算 ＋ `check_pid` 把门）与 `server/problem_edit.py`（属性编辑的唯一实现），并注明 `attempt.py`／`page_commit.py` 的写盘已改为委托；§12.1 加两条可执行命令（属性编辑那一条 ＋ 真 socket 那一条）。**顺带修掉一处真漏洞**：pid 没校验时 `PATCH /api/problem/..%2F..%2F<文件>` 能**穿越写盘**（实测 200、数据目录外的文件被改）——现在 id 在碰任何文件之前过 `check_pid` | 工单（题卡属性编辑）。要点：①属性此前**一个入口都没有**（改个科目得手改 JSON），但它必须与内容、与重做历史**分家**——那两层各有各的不变量，混在一起就是「不重放就伪造状态」；②**幂等要说出来**：值没变也 200 但 `changed: []`，含糊的成功比失败更难查；③词表那两条口径与录入那条路**共用同一句话**（先收下、再喊），受控词表缺席不该把人挡在门外；④`review` 对象是**服务落地的产物**，界面只给字符串，免得两个地方各写一份对象形状；⑤「改完立刻看得见」靠的是索引按需重算，不是重建索引；⑥真 socket 那条判据不是补覆盖率——这个漏洞正是**纯函数接缝上看不见**的那一种（§11 已记过两次同病根的账） |
 
 
 ## 12. 模块角色（下游一眼要看到的两件事）
@@ -1959,13 +2058,15 @@ provider 那一行的四个键：`preset`（这个名字是不是预设那两家
 | `server/page_edit.py` | **页资源「改」动作的唯一实现**（B6 / #14）：七条动作 + `apply_edit` 写回。取舍**调 `intake.set_keep_by_human`**（收入决策只有一处实现）；歧义（拆出来的题号、丢弃块上的卡）**报出来而不是猜** |
 | `server/page_api.py` | **页资源的 HTTP 翻译层**（B6 / #14，B7 / #15 补两个动作）：`PATCH`／`resegment`／`image`／`POST /api/page`（建）／`POST …/commit`（入库）都落地。它不实现规则，只翻译形状——建在 `page_create`、改在 `page_edit`、入库在 `page_commit`、三态在 `segmentation` |
 | `server/page_create.py` | **页资源「建」动作的唯一实现**（B7 / #15）：照片（内容哈希前 12 位定页 id）→ 存图 + 建页文件 + 跑切分 + #11 统计 + #12 建议去留。幂等（同图重传不重跑切分、不覆盖块列表）；模型失败先用系统临时目录跑切分，成功才写进 `data/`（拒绝不留痕迹）；`as_candidates` 是切分接缝的归一化（建与重切共用） |
-| `server/page_commit.py` | **页资源「入库」动作的唯一实现**（B7 / #15）：只给「收」的块发卡号、id 首次分配（`pages.assign_card_ids`）、已经生成过的块不重复生成、**先写页再建卡**（幂等：中断后重跑不会换 id）、把绑定写回页文件、报告索引重建。它不另判收不收（那是 #12）也不另分配 id（那是 #9） |
+| `server/page_commit.py` | **页资源「入库」动作的唯一实现**（B7 / #15）：只给「收」的块发卡号、id 首次分配（`pages.assign_card_ids`）、已经生成过的块不重复生成、**先写页再建卡**（幂等：中断后重跑不会换 id）、把绑定写回页文件、报告索引重建。它不另判收不收（那是 #12）也不另分配 id（那是 #9）。**写卡走 `server/cardstore.py: write_card`**（本版起；以前是它自己那份 `_write_card`，已删——题卡读写只有那一份实现） |
 | `server/audit.py` | **落盘数据体检的唯一实现**（B7 / #15）：页↔卡**双向**对账（§8 的 B7 码表）、`CHECKS`（「我查了哪几项」）、`python3 -m server.audit`。**只读盘、不修改、可随时重跑**；页绑定与字段自检分别消费 `pages.page_binding` 与 `warnings.card_warnings`，串题判据消费 `warnings.duplicate_transcript_groups`——一条规则一份实现。退出码只认 `warning` 级发现 |
 | `server/subjects.py` （**本版（前端重构 / #17）新增**） | **受控词表与大纲的唯一读取实现**（§10.4）：读 `<数据目录>/vocab/subjects.json` 与 `<数据目录>/vocab/topic-outline.seed.json`、产出 `/api/index` 的 `subjects`／`outline`（§3）、出 `stats.by_subject` 与 `stats.unclassified`（含那条不变式）、以及逐卡的 `subject_missing`（hint）／`subject_unknown`（warning）。**读不出来不是 500**，是词表级警告 + 空词表；词表没读出来时**一条 `subject_unknown` 都不发**。别的模块要科目判定只有这一个地方可消费 |
 | `server/brief.py` （**本版（前端重构 / #17）新增**） | **简报的生成与数字闸门的唯一实现**（§10.5）：按窗口汇总读数 → 问 `brief` 角色 → 把 `text` 里用到的每个数字落成 `window_facts`／`history_facts`（`path` 指向本次索引）→ **逐条解出来核对**，一条对不上就**不落盘、502 `brief_unverifiable`**。落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json`，先写临时文件再原子替换 |
 | `server/brief_client.py` 与 `server/segmenter_client.py` （**本版（前端重构 / #17）新增**） | 两个角色各自的**调用接缝**，照 `server/intake_client.py` / `server/judge_client.py` 的形状（提示词与消息形状按角色分家、共用 `model_client` 那条与角色无关的管道、`runs/` 留档 tag 分别是 `brief` 与 `segment`）。`brief_client` 是**纯文本**角色，`segmenter_client` **要看图**（整页照片 + 候选块）——前置一份**视觉探针**：纯文本模型收到图片不会报错，它会忽略图片、照着提示词**凭空编块**（`CONTEXT.md`「视觉探针」） |
 | `server/subject_assign.py` （**本版（前端重构 / #17）新增**） | 受控词表的**显式迁移**入口（§10.4）：`python3 -m server.subject_assign --map <表.json> [--apply]`，把存量卡按人给的映射写进 `subject`。**只认人给的映射表、不按考点推**（猜错的科目看起来是对的，而没有人会去核对一个看起来对的答案）；**坏值一票否决**（表里有一条不在词表里 → `--apply` 一个字节都不写、退出码 1）；预演与 `--apply` 分开（同 `server/backfill.py` 的先例），消费 `subjects.load` 判词表，不另写一份科目判据 |
 | `server/settings.py` （**本版（模型设置）新增**） | **模型设置的读写与逐字段解析的唯一实现**（§10.6）：读 `<数据目录>/settings.json`（0600、先写临时文件再原子替换；**只在用户设过的字段落盘**），三层优先级**逐字段**叠加之后再走 `server/config.py: load_role_config` 那一份解析（**不另写一份**），产出 `GET` 的 `roles`／`providers`／`file_ok` 读数，并在 `PUT` 时先校验候选设置。密钥的末四位 `hint` 只在这里算，**完整密钥不进任何响应、不进日志**。别的模块要「这个角色现在用谁」只有这一个地方可消费——三层叠加不许在第二个地方再来一遍 |
+| `server/cardstore.py` （**本版（题卡属性编辑）新增**） | **题卡读写的唯一实现**：`card_path`／`read_card`／`write_card`（先写临时文件再 `os.replace`，失败不留残骸），以及 `check_pid`。两条规矩写死在它这一层：**路径只由 pid 算、内容永远不参与**（卡里的 `id` 不决定写到哪），以及 **`check_pid` 是 id 那道闸的唯一实现**（`card_path` 拼路径之前先过它，§1）。以前 `server/attempt.py` 与 `server/page_commit.py` **各有一份**写盘，本版收成这一份、那两处改为委托；`server/problem_edit.py` 也走它——第二个「先临时文件再替换」就是漂移的开始，而漂移的后果实测过（穿越写盘） |
+| `server/problem_edit.py` （**本版（题卡属性编辑）新增**） | **题卡属性编辑的唯一实现**（§10.7）：`EDITABLE = ("subject", "topics", "error_causes", "review")`（**这个顺序就是回执里 `changed` 的顺序**）、逐字段比对得出 `changed`、**值没变就不写盘**。两条词表口径各只有一个来源：科目消费 `server/subjects.py: load`（不另判一遍），错因读 `<数据目录>/vocab/error-causes.json`；**词表在而取值不在 → 400；词表不在 → 先收下再喊**。`review` 只动 `status` 与 `reviewed_at` 两个键。写盘走 `cardstore.write_card`，**自己不拼路径** |
 
 ## 12.1 测试接缝
 
@@ -2016,3 +2117,23 @@ provider 那一行的四个键：`preset`（这个名字是不是预设那两家
   **逐字不变**——这条断了就是「页面加载一次再保存一次就把密钥抹掉」；②候选设置里有一条坏的
   （缺 `base_url`／缺密钥／名字没定义）→ 400（`reason: "settings_invalid"`），且设置文件**逐字节没变**
   （「一个字节都不写」要拿字节比对钉，不是拿「没报错」钉）。
+- **题卡属性编辑也在这个 HTTP 接缝上测**（**本版（题卡属性编辑）新增**）：
+  `python3 -m pytest server/tests/test_problem_edit.py -v`。写盘用**临时数据目录**。
+  五条判据必须会红：①值没变 → 200 ＋ `changed: []` ＋ 卡文件**逐字节不变**
+  （「什么都没改」要说得出来，不是含糊成功）；②科目不在词表里 → 400 `subject_unknown`
+  且卡文件**逐字节不变**；错因不在词表里 → 400 `error_cause_unknown`（`details.unknown`
+  点名那几条）；③字段名不在可改闭集里 → 400 `problem_field_not_editable`
+  ＋ `details.allowed` ＝可改闭集；**值的形状错**（`topics: null`、`review` 取值非法…）
+  是**没有细因**的 400（`reason == "bad_request"`）——两者不许混成一个码；
+  ④词表**不在**时是**收下 ＋ `warnings[]`**（`error_causes_vocab_missing`，
+  科目那条是 `subjects_vocab_*`），**不是 400**——测试夹具默认就**没有** `error-causes.json`，
+  这条路是真的走得到的；⑤改完 `GET /api/index` 立刻看到新科目（`stats.by_subject` 是**字典**，
+  科目 → 读数），**不用重建索引**。
+- **`PATCH /api/problem/<id>` 还要有一条走真 socket 的判据**（**本版（题卡属性编辑）新增**）：
+  `python3 -m pytest server/tests/test_server_smoke.py -v`
+  （`test_real_server_accepts_patch_and_refuses_a_traversal_pid`）。理由不是补覆盖率：
+  §11 记过两次「**路由只活在纯函数接缝里**」（`do_PATCH` 那次、`GET /api/page` 那次），
+  **判据的层级与坏掉的那一层错开一格，是这一类缺口能活下来的唯一原因**。
+  这条判据要同时钉住两件事：正常的 `PATCH` 在真 socket 上**真的改得了**，
+  穿越的 id（`%2F`／`..`）→ **400 且那个文件一个字节都不动**——
+  这个漏洞在纯函数接缝上**看不见**，它在 `server/cardstore.py: card_path` 那一层。

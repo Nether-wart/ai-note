@@ -581,13 +581,18 @@ class Api:
         上传收的是多部分照片（`max_upload_bytes`）。上限只有这一处判据，`app.py` 与
         `_reject_oversized_write` 都从这里取——两处各写一份迟早分叉。
 
-        写端点那一档**不分资源**：作答与简报的 body 都只有几个键，没有理由放宽
-        （放宽了就是又一条「读一个巨大的 body 再拒绝」的路）。
+        哪些是**写端点**（收几个键的 JSON）：`/api/attempt/*`、`/api/brief/*`、
+        `/api/settings`、`/api/problem/*`、`/api/page/<id>/*`（改页那几个动作）。
+        `/api/page`（**只有这一个**，POST）与 `/api/inbox` 收的是多部分照片，
+        留在上传那一档——按前缀分档时最容易搞错的就是这一对。
         """
         raw_path = path.partition("?")[0]
-        if raw_path.startswith("/api/attempt/") or raw_path.startswith("/api/brief/"):
+        json_writes = ("/api/attempt/", "/api/brief/", "/api/problem/", "/api/page/")
+        if (raw_path.startswith(json_writes) or raw_path == "/api/settings"
+                or raw_path == "/api/page/commit"):
             return self.max_attempt_bytes
         return self.max_upload_bytes
+
 
     def _reject_oversized_write(self, body: bytes | str | None,
                                 declared_length: int | None) -> None:
@@ -614,9 +619,13 @@ class Api:
             data, warnings = self.attempts.handle(match.group("pid"), body)
             return json_response(200, data=data, warnings=warnings)
 
-        # 只读端点上用错方法 → 405（契约 §5.1），不是含糊的 404
-        if path == "/api/index" or path.startswith("/api/problem/"):
+        # 只读端点上用错方法 → 405（契约 §5.1），不是含糊的 404。
+        # `/api/problem/*` 从 §10.7 起**不是只读的**了，所以这里的 `allowed` 必须与
+        # `_route` 里那一条一致——同一条路径报出两个 `allowed`，界面只能猜（实测过）。
+        if path == "/api/index":
             raise method_not_allowed("POST", ["GET", "OPTIONS"])
+        if path.startswith("/api/problem/"):
+            raise method_not_allowed("POST", ["GET", "PATCH", "OPTIONS"])
 
         for prefix, note in RESERVED.items():
             if path.startswith(prefix):

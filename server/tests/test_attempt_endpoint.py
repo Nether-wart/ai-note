@@ -484,10 +484,19 @@ def test_a_normal_request_is_unaffected_by_the_limit(api_for):
     assert stub.calls == [("A", "A")]
 
 
-def test_only_the_write_endpoint_gets_the_tight_limit(api_for):
-    """上限是**按路由**的：上传（多部分、照片本来就有几 MB）仍用 32MB 那一档。"""
+def test_write_endpoints_get_the_tight_limit_and_uploads_do_not(api_for):
+    """上限是**按路由**的：写端点（几个键的 JSON）64 KiB，上传（多部分、照片本来就有几 MB）32 MiB。
+
+    这条判据**曾经编码了错的行为**：以前 `/api/page/<id>`（改页那几个动作，收的是 JSON）
+    也落在上传档，于是那些请求会被**先读进内存、再按 64 KiB 拒绝**——而 §9 恰恰要求
+    "在读 body 之前挡住"。独立验证者对着契约挑出这一条时它才红。**它红得正是时候**：
+    分档写错的时候，只有这种判据能发现。
+    """
     _, api = attempt(api_for, plain_card())
 
-    assert api.body_limit(f"/api/attempt/{PID}") == 64 * 1024
-    assert api.body_limit("/api/inbox") == api.max_upload_bytes
-    assert api.body_limit(f"/api/page/{PID}") == api.max_upload_bytes
+    for path in (f"/api/attempt/{PID}", "/api/settings", f"/api/problem/{PID}",
+                 f"/api/page/{PID}", f"/api/page/{PID}/commit"):
+        assert api.body_limit(path) == 64 * 1024, path
+    # 收照片的两条留在上传档（**只有** `/api/page` 这个精确路径是"POST 上传新页"）
+    for path in ("/api/inbox", "/api/page"):
+        assert api.body_limit(path) == api.max_upload_bytes, path
