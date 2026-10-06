@@ -85,12 +85,26 @@ def draft_for_block(result: OcrResult | None, bbox_norm, *, limit: int = MAX_DRA
     return text[:limit]
 
 
-def transcript_messages(*, block: dict, image_url: str, ocr_text: str = "") -> list[dict]:
+#: 这张图是**哪一种**。提示词必须说实话——说错了模型会照着一个不存在的承诺去读。
+IMAGE_KINDS = {
+    "page": "图片是**整页**试卷照片（**手写可能还在**：只读印刷体的题面，忽略手写与红笔）。",
+    "clean": "图片是整页试卷照片的**擦除手写版**（应该只剩印刷体；若仍有手写残留，不要当题面）。",
+}
+
+
+def transcript_messages(*, block: dict, image_url: str, ocr_text: str = "",
+                        image_kind: str = "page") -> list[dict]:
     """`[system, user]` 两条消息。`ocr_text` 为空时**与没有 OCR 时逐字相同**。
 
-    位置与统计的说辞与 `intake_client.semantics_messages` 同源（同一个块、同一套坐标），
+    位置的说辞与 `intake_client.semantics_messages` 同源（同一个块、同一套坐标），
     但**问的不是同一件事**：这里问"题面是什么"，那里问"红笔是什么意思"。
+
+    `image_kind` 决定提示词怎么描述那张图：**说实话**是关键——骨架卡转录时拿到的
+    通常是整页**原图**（擦除手写是按块在入库时才生成的），而"已擦除"这句假话会让模型
+    以为手写已经被清掉。
     """
+    if image_kind not in IMAGE_KINDS:
+        raise ValueError(f"认不出的图片种类：{image_kind!r}；可选：{', '.join(IMAGE_KINDS)}")
     box = block.get("bbox_norm")
     if isinstance(box, (list, tuple)) and len(box) == 4:
         where = "、".join(f"{float(value):.3f}" for value in box)
@@ -100,7 +114,8 @@ def transcript_messages(*, block: dict, image_url: str, ocr_text: str = "") -> l
 
     text = (
         f"这一块（一道题）的位置：{where_text}。\n"
-        f"图片是**整页**、已擦除手写的那一版；请只读这一块里的题面。\n"
+        f"{IMAGE_KINDS[image_kind]}\n"
+        "请只读**这一块**里的题面。\n"
     )
     if ocr_text.strip():
         text += (
@@ -194,7 +209,8 @@ def parse_transcript(text: str) -> dict:
 
 
 def transcribe(*, block: dict, image_url: str, config, runs_dir, ocr_text: str = "",
-               transport=None, sleep=None, env=None, clock=None) -> dict:
+               image_kind: str = "page", transport=None, sleep=None, env=None,
+               clock=None) -> dict:
     """问一次模型并把身份贴进答案（与 `HttpSemantics.__call__` 同一形状）。
 
     **调用失败抛 `ModelUnavailable`**（调用方据此报 502、什么都不写）；解析不出来**不抛**，
@@ -204,7 +220,8 @@ def transcribe(*, block: dict, image_url: str, config, runs_dir, ocr_text: str =
 
     from .intake_client import _with_identity
 
-    messages = transcript_messages(block=block, image_url=image_url, ocr_text=ocr_text)
+    messages = transcript_messages(block=block, image_url=image_url, ocr_text=ocr_text,
+                                   image_kind=image_kind)
     call = chat(config, messages, tag=TRANSCRIBE_TAG, runs_dir=runs_dir,
                 transport=transport, sleep=sleep or time.sleep, env=env, clock=clock)
     return _with_identity(parse_transcript(call.text), call)

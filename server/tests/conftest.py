@@ -7,7 +7,6 @@ user story 明写「端到端测试用临时题卡、测完即删，真实的题
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import os
@@ -16,15 +15,18 @@ from pathlib import Path
 
 import pytest
 
+from server.ink import InkImage, encode_png
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # 让 `import server.*` 在 repo 根下可用
     sys.path.insert(0, str(ROOT))
 
 # 一张真的 1×1 PNG：服务按后缀定 Content-Type，但夹具用真字节，
 # 免得将来加了魔数校验才发现夹具是假的。
-PNG_1X1 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-)
+# ⚠ 这必须是**真的** PNG：`ink.read_png` 要能解开它。以前这里是一串手写字节，
+# `ink` 读它时会 `zlib.error`（IDAT 解不开）——这个坑已经咬了两次（切分接缝、审核转录），
+# 根因是"夹具只要长得像 PNG 就行"这个假设在**任何真去解码它的地方**都不成立。
+PNG_1X1 = encode_png(InkImage(1, 1, [(255, 255, 255)]))
 
 # 一个远在过去、远离冷却窗口的时刻，让「是否在冷却」不随运行时刻漂移。
 LONG_AGO = "2020-01-01T00:00:00+08:00"
