@@ -52,6 +52,8 @@ const config = {
         {to: '/intake', label: '录入', position: 'right'},
         // 模型设置：MDX 外壳 ＋ 运行时表单（它要读写 /api/settings）
         {to: '/settings', label: '设置', position: 'right'},
+        // 审核：骨架卡转录成人看的记录（人触发，§10.8）
+        {to: '/review', label: '审核', position: 'right'},
       ],
     },
   },
