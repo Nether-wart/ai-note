@@ -1,0 +1,290 @@
+"""契约里的错误形状（docs/contracts/http-api-v0.md §9）。
+
+错误必须是**数据**，不是一段 HTML 或一句裸文本：界面照 `message` 原话显示，
+按 `code` 决定怎么处理，`details` 里点名是哪个参数、值是什么、允许什么
+（ADR 0007 第 6 条：不许静默）。
+"""
+
+from __future__ import annotations
+
+
+class ApiError(Exception):
+    """一个已知的、能说清楚的失败。`status` 是它该出的 HTTP 状态码。"""
+
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        reason: str | None = None,
+        hint: str | None = None,
+        details: dict | None = None,
+        warnings: list | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        # `code` 是信封级类别，`reason` 是机器可读的细因（编排裁决 D1）。
+        # 没有更细的原因时两者相同——但**字段永远在**，界面不必写两种分支。
+        self.reason = reason or code
+        self.message = message
+        self.hint = hint
+        self.details = details or {}
+        # 失败也可以带警告：拒绝一次作答时，那张卡自己的自检结果要一并带上
+        # （契约 §10.1：`warnings[]` = 该卡的自检警告）。绝不静默。
+        self.warnings = warnings or []
+
+    def payload(self) -> dict:
+        out: dict = {"code": self.code, "reason": self.reason, "message": self.message}
+        if self.hint:
+            out["hint"] = self.hint
+        if self.details:
+            out["details"] = self.details
+        return out
+
+
+def bad_request(message: str, *, hint: str | None = None, reason: str | None = None,
+                **details) -> ApiError:
+    """**400 的唯一构造入口**。
+
+    `reason` 是机器可读的**细因**：契约 §9 里这一类错误的 `code` 恒为 `bad_request`，
+    而 `reason` 指出到底是哪一条规矩被破了（`subject_unknown`、
+    `block_delete_bound_to_card`……）。不给就与 `code` 相同（没细分的那些）。
+
+    这个参数存在的理由是**一处实现**：没有它，各模块只能直接 `ApiError(400, ...)`
+    自己拼——同一个形状很快就有了两种写法（R2/R9 记过的那类事）。
+    """
+    return ApiError(400, "bad_request", message, reason=reason, hint=hint, details=details)
+
+
+def body_too_large(size: int, *, limit: int) -> ApiError:
+    """请求体超过这条路由的**显式上限** → **400 `body_too_large`**（作业单 2）。
+
+    写端点的 body 只有 `{channel, answer}`（或定点修正那三个键），64 KiB 已经比任何
+    合法请求大三个数量级；没有上限时一个 2MB 的**合法 JSON** 会被整段读进内存，
+    作答还会发给模型。拒绝发生在**进模型之前**，所以这一次重做不留任何记录（D1/D9）。
+
+    `details` 给 `{param, value, max}`：和上传那条 413 同一个形状，人一眼看得出
+    超了多少、上限是多少。**上限是按路由的**（`Api.body_limit`）——上传是多部分、
+    照片本来就有几 MB，用的是 32MB 那一档；这条紧上限只属于写端点。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"这次请求的 body 有 {size} 字节，超过上限 {limit} 字节",
+        reason="body_too_large",
+        hint=f"写端点的 body 只有 {{channel, answer}} 这几个键，上限 {limit} 字节；"
+             f"照片请走 POST /api/inbox（上限 32MB）",
+        details={"param": "body", "value": size, "max": limit},
+    )
+
+
+def not_found(message: str, hint: str | None = None, **details) -> ApiError:
+    return ApiError(404, "not_found", message, hint=hint, details=details)
+
+
+def method_not_allowed(method: str, allowed: list[str]) -> ApiError:
+    return ApiError(
+        405,
+        "method_not_allowed",
+        f"这个端点不接受 {method}",
+        hint="只支持 " + " / ".join(allowed),
+        details={"method": method, "allowed": allowed},
+    )
+
+
+def not_auto_judgeable(reason: str, message: str, *, pid: str, warnings: list | None = None) -> ApiError:
+    """契约 §9：请求本身合法，只是这道题**不能**自动判定 → **422，不是 400/500**。
+
+    `reason` 与 `message` 必须来自 `server/autojudge.py` 的唯一那份实现
+    （编排裁决 D1、D3）：界面照 `message` 原话显示，测试按 `reason` 断言。
+    """
+    return ApiError(
+        422,
+        "not_auto_judgeable",
+        message,
+        reason=reason,
+        hint="这道题只能在纸上重做（人工确认）；屏幕重做只收字符串作答",
+        details={"id": pid},
+        warnings=warnings,
+    )
+
+
+def model_unavailable(message: str, *, pid: str, provider: str | None = None,
+                      model: str | None = None, hint: str | None = None) -> ApiError:
+    """契约 §9：模型调用失败 → **502**（上游失败），且这一次重做**不留任何记录**。
+
+    把它记成「看不清」会在重做历史里造出一条没发生过的重做，并静默推进
+    「上次重做」时刻、凭空重置冷却（编排裁决 D1、spec #1 US 14）。
+
+    `hint` 可覆盖：切分（`POST /api/inbox*`）那条路上，照片**已经收进收件目录**
+    ——那是「收」这一步的产物，不是这次请求的残留——所以默认那句「没有留下任何记录」
+    在那边不成立，调用方给一句准确的（不许静默、也不许说反话）。
+    """
+    details = {"id": pid}
+    if provider:
+        details["provider"] = provider
+    if model:
+        details["model"] = model
+    return ApiError(
+        502,
+        "model_unavailable",
+        message,
+        reason="model_unavailable",
+        hint=hint or "可以直接重试；这一次没有留下任何记录",
+        details=details,
+    )
+
+
+def attempt_not_found(raw: str, *, pid: str, available: list, warnings: list | None = None) -> ApiError:
+    """定点修正（#6）：`attempt_at` 在重做历史里**没有**那一次 → **404**。
+
+    不是 400：请求本身合法，只是它指的那一次不存在。也不是「落到最近一次」——
+    那是原型最讨厌的静默降级。`available` 把**实际有哪些**时刻说出来（ADR 0007 第 6 条）。
+    """
+    return ApiError(
+        404,
+        "not_found",
+        f"这道题的重做历史里没有 attempt_at = {raw!r} 那一次重做",
+        reason="attempt_not_found",
+        hint=("这几次重做的时刻：" + " / ".join(map(str, available))) if available
+             else "这道题还没有任何重做记录",
+        details={"id": pid, "attempt_at": raw, "available": available},
+        warnings=warnings,
+    )
+
+
+def ambiguous_attempt_at(raw: str, *, pid: str, candidates: list,
+                         warnings: list | None = None) -> ApiError:
+    """定点修正（#6）：`attempt_at` 定位到**不止一次**重做（同一秒里做了两次）→ **409**。
+
+    那几次确实存在，只是这个参数区分不了它们；挑一个就是「猜」。
+    """
+    return ApiError(
+        409,
+        "ambiguous_attempt_at",
+        f"attempt_at = {raw!r} 对应 {len(candidates)} 次重做（同一秒里做了两次），"
+        "定位不到唯一一次",
+        reason="ambiguous_attempt_at",
+        hint="这几次重做的时刻逐字相同，定点修正无法区分它们；先修数据或多给一位精度",
+        details={"id": pid, "attempt_at": raw, "candidates": candidates},
+        warnings=warnings,
+    )
+
+
+def page_id_mismatch(*, page_id: str, found, path) -> ApiError:
+    """页里的 `id` 与**目标页 id** 不一致 → **400**，且一个字节都不写。
+
+    页 id 是**文件名**（写盘只看调用方给的那个 id）；页里那个 `id` 字段是**内容**，
+    只用于对账。按内容里的 id 拼路径就是「静默写到别的文件上」：`../problems/p-xxx`
+    会整份覆盖一张真题卡，`someotherpage` 会写错文件却报另一个 `page_path`。
+
+    `details.param == "page_id"`，HTTP 层可以把这个 400 原样透出去——**两层各守一次**
+    是刻意的纵深防御（#12 的 `run_intake` 与 #14 的改页写入路径）。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"页里的 id 与目标页 id 不一致：页里是 {found!r}，目标是 {page_id!r}"
+        f"（页 id 就是文件名；内容里的 id 只用于对账）",
+        reason="page_id_mismatch",
+        hint="页 id 只允许字母、数字、点、下划线与连字符，且必须与目标页 id 逐字相同；"
+             "拒绝写入是为了不把这份页 JSON 覆盖到别的文件上",
+        details={"param": "page_id", "value": page_id, "found": found, "path": str(path)},
+    )
+
+
+def page_image_unsafe(*, page_id: str, image) -> ApiError:
+    """页里的 `image` 不是纯文件名 → **400**，拒绝拿它拼路径。
+
+    照片必须与页文件**同目录并列**（D5）。`../` 或绝对路径拼出来的 `image_path`
+    会指到 `pages/` 外面去——坏页文件因此能变成一个读任意路径的入口。
+    `details.param == "image"`。
+    """
+    return ApiError(
+        400,
+        "bad_request",
+        f"页 {page_id} 的 image 不是纯文件名：{image!r}"
+        f"（它只能是与页文件并列的照片名，不许含 '/'、'\\' 或 '..'）",
+        reason="page_image_unsafe",
+        hint="照片与页文件同目录并列（D5）；image 只填文件名，不带任何目录成分",
+        details={"param": "image", "value": image, "id": page_id},
+    )
+
+
+def filesystem_error(exc: Exception, *, hint: str | None = None) -> ApiError:
+    """盘上的失败（文件不在／无权限／盘满／内容读不出来）→ **500**，`message` 带异常类名。
+
+    D1：CLI 也不许裸回溯。写盘是「先写临时文件再原子替换」，所以失败不会留下半个文件。
+    `hint` 可覆盖（先例 `model_unavailable`）：简报那条路上读不了的是一份**简报**，
+    默认那句「页文件没有写到一半」在那边是错的——不许说反话。
+    """
+    return ApiError(
+        500,
+        "internal_error",
+        f"盘上操作失败：{exc.__class__.__name__}: {exc}",
+        reason="filesystem_error",
+        hint=hint or ("这是盘上的问题（路径不存在、无权限、盘满），不是收入决策本身；"
+                      "页文件没有写到一半（先写临时文件再原子替换）"),
+    )
+
+
+# ---------------------------------------------------------------- 简报（#17 §10.5）
+
+
+def brief_missing(subject: str, *, at: str | None = None,
+                  available: list | None = None) -> ApiError:
+    """「这个科目还没有简报」→ **404 `brief_missing`**：那是「还没有」，不是「读不到」。
+
+    两者处置不同：**文件在盘上但读不出来**是 500（`brief._read_brief`），缺席才是这一条。
+    `details.subject` 让界面说得出是哪个科目；`details.available` 把这天之外**实际有哪几天**
+    列出来（ADR 0007 第 6 条：不许静默）。`?at=` 只按文件名里的日期**逐字**匹配——
+    绝不落到「最接近的一天」。
+    """
+    where = f"（{at}）" if at else ""
+    return ApiError(
+        404,
+        "not_found",
+        f"这个科目还没有简报{where}：{subject}",
+        reason="brief_missing",
+        hint="POST /api/brief/<科目> 生成一份；生成要花一次模型调用",
+        details={"subject": subject, "at": at, "available": available or []},
+    )
+
+
+def brief_unverifiable(subject: str, facts: list, *, note: str | None = None) -> ApiError:
+    """简报的数字闸门没过 → **502 `brief_unverifiable`**，且这一次**一个字节都不落盘**。
+
+    `facts` 逐条列出对不上的：`{label, path, claimed, actual, reason}`。比契约 §10.5 那四个键
+    多一个 `reason`，因为 `actual: null` 同时覆盖「`path` 解不出来」与「解出来正好是 `null`」
+    两种情形，不加 `reason` 这两档分不开。
+
+    **它与「模型没问成」（`model_unavailable`）处置完全不同**——这一条最要紧：
+
+      · `model_unavailable`：调用没成（网络／超时／缺密钥／上游 5xx），**可以直接重试**，
+        下一次可能就通了；
+      · `brief_unverifiable`：模型**答了话**，只是正文里的数字在索引里找不回来。
+        同一份提示词、同一个模型，**再问一次不会让编出来的数字变真**——重试无用，
+        要么改提示词，要么换模型（换模型就要重跑简报角色的验收）。
+
+    把两者混成一句「可以重试」会把人引去重试一个不会变好的东西。所以 `hint` 会把这句
+    明说出来，而 `details.facts` 指出到底哪一条对不上（解不出来，还是值不相等）。
+    """
+    if facts:
+        message = f"{subject}的这份简报有 {len(facts)} 条数字对不上本次索引，没有落盘"
+    else:
+        message = f"{subject}的这份简报没有可核对的数字，没有落盘"
+    details: dict = {"subject": subject, "facts": facts}
+    if note:
+        details["note"] = note
+    return ApiError(
+        502,
+        "brief_unverifiable",
+        message,
+        reason="brief_unverifiable",
+        hint="重试无用：模型答了话，只是数字编了，同一份提示词再问一次不会变真。"
+             "先看 details.facts 里哪一条对不上（path 解不出来，还是值不相等 / 种类不对），"
+             "再改提示词或换模型（换模型要重跑简报角色的验收）",
+        details=details,
+    )

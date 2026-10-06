@@ -1,0 +1,44 @@
+# 密钥绝不进仓库
+.env
+.env.local
+
+# 样例照片含手写笔迹与可能的身份信息，不进仓库
+samples/*
+!samples/README.md
+
+# Python 字节码
+__pycache__/
+*.pyc
+
+# 前端依赖与构建产物（site/）。npm 缓存目录很大，绝不能进这个公开仓库的 git 历史。
+.npm-cache/
+node_modules/
+.docusaurus/
+site/build/
+
+# 里程碑二真实渲染验收留下的证据（HTML/PNG 转储）。留着方便复核，但不进仓库。
+.verify/
+
+# 调用留档（含提示词与用量，可能夹带题目内容）。**默认已经落在用户数据目录**
+# （server/paths.py，ADR 0008）；这里留着是安全网：显式 --data data 时也不许写进仓库。
+runs/
+
+# 私人数据：手写照片、题卡、打印批次与派生索引。
+# 默认数据目录已改到用户数据目录（ADR 0008），仓库里的 data/ 只做本机测试语料；
+# 下面几条留着当安全网：显式 --data data 时也绝不许把私人数据写进这个公开仓库。
+# 这个仓库是公开的（github.com/nether-wart/ai-note）——
+# 照片是真实学生的手写作业，含订正批注与可能的身份信息，而 git 历史很难真正擦干净。
+data/pages/
+data/assets/
+data/problems/
+data/batches/
+data/index.json
+# 收件目录（#13）：照片从手机／同步盘落进来的地方。**它必须是私人的**——
+# 用户在那里放的就是刚拍的手写作业，`git status` 里出现它们比漏收一张更糟。
+data/inbox/
+
+# 仓库外记录：公开文档里被摘除的具体题目内容、学生的错答与订正过程。
+# docs/acceptance-log.md 是公开版，全本在这里。
+data/private/
+
+.worktree

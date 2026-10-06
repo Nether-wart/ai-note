@@ -1,0 +1,5 @@
+{
+  "id": "fixture-fillin-interval",
+  "note": "硬骨头二：区间开闭。这是等价性判定最常翻车的地方——(1,2) 与 [1,2] 差别只在端点，而数学上完全不同。",
+  "standard_answer": { "value": "(1,2)" }
+}

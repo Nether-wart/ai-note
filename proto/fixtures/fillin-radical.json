@@ -1,0 +1,5 @@
+{
+  "id": "fixture-fillin-radical",
+  "note": "硬骨头一：根式有理化。同一个数有好几种写法，模型必须判等价，而不是比字符串。",
+  "standard_answer": { "value": "x=2√3/3" }
+}

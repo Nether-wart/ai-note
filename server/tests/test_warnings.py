@@ -1,0 +1,385 @@
+"""警告是契约里最有牙齿的一部分（ADR 0007 第 6 条：每个由人填写的字段都要有一个会喊的检查）。
+
+测的是**行为**：一张卡进去，一句带 `code` 的原话出来。不测文案措辞，
+只断言「该响的响了、不该响的没响」。
+"""
+
+from __future__ import annotations
+
+import json
+
+from conftest import PNG_1X1, get_json, make_card, post_json
+from server import pages
+
+
+def index_of(api):
+    r = api.handle("GET", "/api/index")
+    assert r.status == 200, r.body
+    return json.loads(r.body)
+
+
+def codes_of(problem: dict) -> set[str]:
+    return {w["code"] for w in problem["warnings"]}
+
+
+def card_codes(api_for, card, *, images=None):
+    body = index_of(api_for([card], images=images))
+    return codes_of(body["data"]["problems"][0])
+
+
+def warnings_of(api, code: str) -> list[dict]:
+    return [w for w in index_of(api)["warnings"] if w["code"] == code]
+
+
+def test_a_clean_card_warns_about_nothing(api_for):
+    """字段自检干净、页绑定也在 → 一条都没有（连提示也不该有）。"""
+    pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
+    images = {f"{pid}-problem.png": PNG_1X1, f"{pid}-clean.png": PNG_1X1}
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})],
+                  images=images)
+    # 让这张卡变成「有页绑定」：走真的回填，而不是在夹具里手搓一个页文件
+    pages.backfill_pages(api.catalog, apply=True)
+
+    assert codes_of(index_of(api)["data"]["problems"][0]) == set()
+
+
+def test_missing_standard_answer_warns(api_for):
+    codes = card_codes(api_for, make_card(**{"standard_answer.value": None}))
+    assert "standard_answer_missing" in codes
+
+
+def test_choice_card_with_a_non_letter_answer_warns(api_for):
+    codes = card_codes(api_for, make_card(**{"standard_answer.value": "A、C"}))
+    assert "standard_answer_not_choice_letter" in codes
+
+
+def test_choice_letter_on_a_solution_card_warns(api_for):
+    """串题那条老事故的形状：解答题身上带着选项字母。"""
+    codes = card_codes(
+        api_for,
+        make_card(**{"problem.type": "solution", "standard_answer.value": "A",
+                     "original_solution.original_answer": "B"}),
+    )
+    assert {"standard_answer_choice_letter_on_non_choice", "original_answer_choice_letter_on_non_choice"} <= codes
+
+
+def test_original_answer_equal_to_standard_answer_warns(api_for):
+    """错题本里「原答 == 标准答案」通常意味着订正被当成了原答。"""
+    codes = card_codes(api_for, make_card(**{"original_solution.original_answer": "A"}))
+    assert "original_answer_equals_standard_answer" in codes
+
+
+def test_empty_topics_warn(api_for):
+    codes = card_codes(api_for, make_card(**{"topics": []}))
+    assert "topics_empty" in codes
+
+
+def test_missing_clean_image_warns_and_kills_the_url(api_for):
+    """没有擦除手写后的题面图 → 不进屏幕重做、也不进重做纸。"""
+    pid = "p-20200101-aaaaaa"
+    body = index_of(api_for([make_card(pid, **{"problem.clean_image": None})],
+                            images={f"{pid}-problem.png": PNG_1X1}))
+    problem = body["data"]["problems"][0]
+
+    assert "no_clean_image" in codes_of(problem)
+    assert problem["has_clean"] is False
+    assert problem["images"]["clean"] is None
+
+
+def test_recorded_but_absent_image_file_warns(api_for):
+    """卡里记了擦除图、文件却不在——最阴的一种：线上会拿到一个 404。"""
+    pid = "p-20200101-aaaaaa"
+    body = index_of(api_for([make_card(pid)], images={f"{pid}-problem.png": PNG_1X1}))
+    problem = body["data"]["problems"][0]
+
+    assert {"clean_image_file_missing", "no_clean_image", "original_image_file_missing"} & codes_of(problem)
+    assert "clean_image_file_missing" in codes_of(problem)
+    assert problem["images"]["clean"] is None
+
+
+def test_reviewed_but_incomplete_warns(api_for):
+    codes = card_codes(api_for, make_card(**{"topics": [], "standard_answer.value": None}))
+    assert "reviewed_but_incomplete" in codes
+
+
+def test_two_cards_with_identical_transcript_warn(api_for):
+    """CONTEXT「串题」：两道不同的题不可能有同一段题干，这条没有例外。"""
+    a = make_card("p-20200101-aaaaaa")
+    b = make_card("p-20200101-bbbbbb", **{"problem.transcript": "1. 一道题"})
+    body = index_of(api_for([a, b]))
+
+    warnings = [w for w in body["warnings"] if w["code"] == "duplicate_transcript"]
+    assert len(warnings) == 1, body["warnings"]
+    assert all(pid in warnings[0]["message"] for pid in ("p-20200101-aaaaaa", "p-20200101-bbbbbb"))
+
+
+def test_filename_not_matching_card_id_warns(api_for):
+    """改名或复制粘贴事故：文件名与卡内 id 不一致。索引照建，但必须响一声。"""
+    card = make_card("p-20200101-aaaaaa")
+    body = index_of(api_for(files={"p-20200101-zzzzzz": card}))
+    assert body["data"]["problems"][0]["id"] == "p-20200101-aaaaaa"
+    assert "problem_id_mismatch" in {w["code"] for w in body["warnings"]}
+
+
+def test_per_card_warnings_show_up_in_both_places(api_for):
+    """列表页按卡渲染不必筛，审计按列表取不必翻卡——同一份内容，两处放。"""
+    body = index_of(api_for([make_card(**{"topics": []})]))
+    per_card = body["data"]["problems"][0]["warnings"]
+    flat = body["warnings"]
+    assert per_card and flat == per_card
+    assert body["data"]["warnings"] == flat
+
+
+# ------------------------------------------- 页绑定：提示不是错误（#9 验收 2）
+
+
+def test_a_legacy_card_without_a_page_file_is_a_hint_not_an_error(api_for):
+    """#9 验收 2：旧卡缺页绑定报**提示**——旧数据不该因为新结构变成脏数据。
+
+    原型里同族的先例是解答题的「标准答案为空」（`proto/server.py:1044-1051`）：
+    把按设计如此的事报成问题，会训练人忽略体检——那比漏报更糟。
+    """
+    pid = "p-20200101-aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": "data/pages/aaaaaa.png"})])
+
+    body = index_of(api)
+
+    assert body["ok"] is True, "提示不是错误：索引照建、卡照出现"
+    assert "error" not in body
+    assert body["data"]["count"] == 1
+
+    (hint,) = warnings_of(api, "page_binding_missing")
+    assert hint["level"] == "hint"
+    assert hint["id"] == pid
+    assert "aaaaaa.json" in hint["message"], "提示里要能定位到缺的是哪个页文件"
+    assert "回填" in hint["message"], "提示要说清下一步怎么办"
+
+
+def test_backfilling_a_legacy_card_clears_the_hint(api_for):
+    """回填之后这条提示就消失——提示是「还没回填」，不是永久的脏标记。"""
+    pid = "p-20200101-aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": "data/pages/aaaaaa.png"})])
+    assert warnings_of(api, "page_binding_missing"), "先确认它本来会响"
+
+    pages.backfill_pages(api.catalog, apply=True)
+
+    assert not warnings_of(api, "page_binding_missing")
+
+
+def test_a_page_file_that_does_not_bind_the_card_is_a_warning(api_for):
+    """本该有却缺失 = 矛盾，必须喊（提示与错误的级别要分开）。"""
+    pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})])
+    pages.save_page(api.catalog, {
+        "version": 1, "id": page_id, "image": f"{page_id}.png",
+        "created_at": None, "origin": {"original_file": None, "sheet": None, "page_number": None},
+        "blocks": [],   # 页文件在，却一个块都没绑定这张卡
+    }, page_id=page_id)
+
+    (warn,) = warnings_of(api, "page_binding_lost")
+    assert warn["level"] == "warning"
+    assert warn["id"] == pid
+    assert not warnings_of(api, "page_binding_missing"), "两种缺绑定不许混成一个"
+
+
+def test_an_unreadable_page_file_is_a_warning_not_a_silent_hint(api_for):
+    """页文件读不了 = 对不上账，不能装作「旧卡没有页」。"""
+    pid = "p-20200101-aaaaaa"
+    page_id = "aaaaaa"
+    api = api_for([make_card(pid, **{"source.page_image": f"data/pages/{page_id}.png"})])
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{page_id}.json").write_text("{ 这不是 JSON", encoding="utf-8")
+
+    (warn,) = warnings_of(api, "page_binding_lost")
+    assert warn["level"] == "warning"
+    assert "读不了" in warn["message"]
+
+
+def _walk_warnings(node, path=""):
+    """把一个响应/报告里**所有** `warnings` 列表逐项收集出来（递归，含嵌套的 data）。
+
+    用于「所有对外警告都带 level」这条防回归断言：只认键名 `warnings`，
+    `skipped` 不在内（契约 §2 的 Skipped 形状没有 `level` 这一档）。
+    """
+    found: list[tuple[str, object]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "warnings" and isinstance(value, list):
+                found.extend((f"{path}.{key}", item) for item in value)
+            else:
+                found.extend(_walk_warnings(value, f"{path}.{key}"))
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(_walk_warnings(item, f"{path}[{index}]"))
+    return found
+
+
+def test_every_outward_warning_carries_an_explicit_level(api_for):
+    """**递归**断言：任何对外响应里的每一条警告都带 `level`（契约 §2）。
+
+    #15 的复查发现「构造警告一律走 `warnings._warn`」这条硬规则有三处漏网：
+    `catalog.problem_id_mismatch`、`pages.backfill_pages` 的 5 条、`pages.rebind`
+    的 3 条——它们手搓 dict，级别只能靠消费方猜。逐条补测试太容易漏下一处，
+    所以这里改成对**所有出口**做一次递归检查（这是最省事的防回归）。
+    """
+    page_id = "aaaaaa"
+    # 一道解答题（std 空 → hint）、一道选择题（std 空 → warning）、两张题干逐字相同
+    # （索引级 duplicate_transcript）、以及一份坏页文件（rebind 会报 block_* 码）。
+    api = api_for(
+        [
+            make_card("p-20200101-aaaaaa", **{"problem.type": "solution",
+                                              "standard_answer.value": ""}),
+            make_card("p-20200101-bbbbbb", **{"standard_answer.value": ""}),
+        ],
+        files={"p-20200101-cccccc": make_card("p-20200101-dddddd")},
+    )
+    api.catalog.pages_dir.mkdir(parents=True, exist_ok=True)
+    (api.catalog.pages_dir / f"{page_id}.json").write_text(json.dumps({
+        "version": 1, "id": page_id, "image": f"{page_id}.png", "blocks": [
+            "这不是一个对象",                       # block_not_an_object
+            {"id": "b2", "card_id": "p-20200101-aaaaaa"},   # block_without_box
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    status, index = get_json(api, "/api/index")
+    assert status == 200, index
+    status, seg = post_json(api, f"/api/page/{page_id}/resegment", {})
+    assert status == 200, seg
+
+    found = _walk_warnings(index) + _walk_warnings(seg)
+    assert len(found) >= 5, f"夹具本来就该有警告，否则这条断言空转：{found}"
+    bad = [(where, item) for where, item in found
+           if not isinstance(item, dict) or item.get("level") not in ("warning", "hint")]
+    assert not bad, f"没有显式 level 的对外警告：{bad}"
+
+
+def test_backfill_warnings_carry_an_explicit_level(api_for):
+    """回填报告是**对外出口**（`python3 -m server.backfill`）——5 条警告也必须有 `level`。
+
+    它们和 #15 审计面对同样的码（`page_file_unreadable`/`page_id_mismatch`/
+    `page_image_unsafe`/`page_photo_missing`/`block_without_box`），两面给出的级别
+    必须一致；手搓 dict 漏掉 `level` 就是「同一个码，两面说法不同」。
+    """
+    from conftest import PNG_1X1
+
+    ids = ["p-20200101-aaaaaa", "p-20200101-bbbbbb", "p-20200101-cccccc",
+           "p-20200101-dddddd", "p-20200101-eeeeee"]
+    cards = []
+    for pid in ids:
+        card = make_card(pid)
+        card["source"]["page_image"] = f"data/pages/{pid[-6:]}.png"  # 6 位 → 页 id
+        cards.append(card)
+    # 回填要拿掉 E 的边界，才会报 block_without_box
+    cards[4]["source"]["bbox_norm"] = None
+    api = api_for(cards)
+    pages_dir = api.catalog.pages_dir
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / "aaaaaa.json").write_text("{ 这不是 JSON", encoding="utf-8")
+    (pages_dir / "bbbbbb.json").write_text(json.dumps({
+        "version": 1, "id": "别的页", "image": "bbbbbb.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "cccccc.json").write_text(json.dumps({
+        "version": 1, "id": "cccccc", "image": "../cccccc.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "dddddd.json").write_text(json.dumps({
+        "version": 1, "id": "dddddd", "image": "dddddd.png", "blocks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (pages_dir / "eeeeee.png").write_bytes(PNG_1X1)   # 照片在 → 只报 block_without_box
+
+    report = pages.backfill_pages(api.catalog, apply=False)
+
+    found = _walk_warnings(report)
+    codes = {item.get("code") for _, item in found}
+    assert codes == {"page_file_unreadable", "page_id_mismatch", "page_image_unsafe",
+                     "page_photo_missing", "block_without_box"}, found
+    # R2：同一事实（bbox_norm 缺/退化）在**重切**那条路上也是这个码——同一个码、同一件事。
+    # 曾经给同一事实造过第二个码（码表里没有它），同一件事于是有了两个说法。
+    rebound = pages.rebind([{"id": "b1", "bbox_norm": None}], [])
+    assert [w["code"] for w in rebound["warnings"]] == ["block_without_box"], rebound["warnings"]
+    bad = [(where, item) for where, item in found
+           if not isinstance(item, dict) or item.get("level") not in ("warning", "hint")]
+    assert not bad, f"回填报告里没有显式 level 的警告：{bad}"
+
+
+def test_rebind_warnings_carry_an_explicit_level(api_for):
+    """`pages.rebind` 交回的事实也必须带 `level`（裁决：走 `warnings._warn`，不是内部结构）。
+
+    三条码都要走到：非对象项、没有可用 `bbox_norm`、消失的块绑着卡片。
+    """
+    report = pages.rebind(
+        [{"id": "old1", "bbox_norm": [0.0, 0.0, 0.4, 0.4], "card_id": "p-20200101-aaaaaa"},
+         "不是对象",
+         {"id": "old3", "bbox_norm": None}],
+        [{"id": "new1", "bbox_norm": [0.6, 0.6, 0.3, 0.3]},
+         {"id": "new2", "bbox_norm": [0.5, 0.05, 0.1, 0.1]},
+         {"id": "new3"}],
+    )
+
+    found = _walk_warnings(report)
+    codes = {item.get("code") for _, item in found}
+    assert {"block_not_an_object", "block_without_box",
+            "block_removed_with_card"} <= codes, found
+    assert all(item.get("level") in ("warning", "hint") for _, item in found), found
+
+
+def test_a_solution_card_missing_its_answer_is_only_a_hint(api_for):
+    """解答题**按设计**没有标准答案（过程题只能人工确认）→ 提示，不是警告（D3/D4 口径）。
+
+    `warning` 必须意味着「有东西不对」；把预期状态报成警告会把它淹在噪声里，
+    而提示与警告的分级正是「别让预期状态淹掉真问题」那条纪律的落点。
+    """
+    body = index_of(api_for([make_card(**{"problem.type": "solution",
+                                          "standard_answer.value": ""})]))
+    (warn,) = [w for w in body["data"]["problems"][0]["warnings"]
+               if w["code"] == "standard_answer_missing"]
+
+    assert warn["level"] == "hint"
+
+
+def test_a_non_solution_card_missing_its_answer_is_a_warning(api_for):
+    """非解答题缺标准答案 = 可机判却缺基准，那是**真问题**，仍然是警告。"""
+    body = index_of(api_for([make_card(**{"standard_answer.value": ""})]))
+    (warn,) = [w for w in body["data"]["problems"][0]["warnings"]
+               if w["code"] == "standard_answer_missing"]
+
+    assert warn["level"] == "warning"
+
+
+def test_problem_id_mismatch_warning_carries_an_explicit_level(api_for):
+    """索引级的 `problem_id_mismatch` 也走 `_warn`：`{code,message,id,level}` 四件齐全。"""
+    card = make_card("p-20200101-aaaaaa")
+    body = index_of(api_for(files={"p-20200101-zzzzzz": card}))
+
+    (warn,) = [w for w in body["warnings"] if w["code"] == "problem_id_mismatch"]
+    assert warn["level"] == "warning"
+    assert warn["id"] == "p-20200101-aaaaaa"
+
+
+def test_every_warning_carries_an_explicit_level(api_for):
+    """`level` 必须显式发出来（契约 §2）。
+
+    有默认值却不出现在响应里，#9 加 hint 码时就得改判定逻辑，界面也只能靠猜
+    ——ADR 0007 第 6 条要的是「显式喊出来」。三种都要带：逐卡警告、索引级警告
+    （`id` 为 null 那一种）、以及逐卡的 **hint**（旧卡缺页绑定）。
+
+    `skipped` 不带 `level`：契约 §2 的 Skipped 形状只有 `code`/`message`/`id`——
+    它比警告重（记录根本没建出来），没有「提示级」这一档。
+    """
+    a = make_card("p-20261004-ef7c47", **{
+        "problem.type": "solution",
+        "standard_answer.value": "",
+        "topics": [],
+    })
+    b = make_card("p-20261004-999999")   # 默认题干与 a 相同 → 索引级 duplicate_transcript
+    status, body = get_json(api_for([a, b]), "/api/index")
+
+    assert status == 200 and body["warnings"], "这组夹具本来就该有警告，否则这条测试是空转"
+    assert all(w.get("level") in ("warning", "hint") for w in body["warnings"])
+    assert {w["level"] for w in body["warnings"]} == {"warning", "hint"}, \
+        "warning 与 hint 都要出现过，这条断言才不空转"
+
+    per_card = [w for problem in body["data"]["problems"] for w in problem["warnings"]]
+    assert per_card and all(w["level"] in ("warning", "hint") for w in per_card)
+    assert "duplicate_transcript" in {w["code"] for w in body["warnings"] if w["id"] is None}
