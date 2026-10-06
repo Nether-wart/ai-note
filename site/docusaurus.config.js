@@ -45,6 +45,9 @@ const config = {
       items: [
         // 首页是**跨科目总览**（#17 §0）：错题住在侧栏的「科目 → 细则」里，不在导航栏
         {to: '/', label: '总览', position: 'left'},
+        // 「怎么用」是这里唯一的 **MDX 页面**：它没有数据，所以能长在 Docusaurus 的框架上
+        // （markdown 排版、admonition、mermaid 都是主题给的），而数据页必须留在运行时。
+        {to: '/help', label: '怎么用', position: 'right'},
       ],
     },
   },
