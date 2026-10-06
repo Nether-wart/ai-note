@@ -120,6 +120,11 @@ def transcribe_card(catalog, pid: str, *, config=None, role: str = "extract", oc
         except (ValueError, settings_module.SettingsError) as exc:
             return _fail("model_unavailable", str(exc), "端点／密钥／模型缺一样就装不起来")
 
+    # 注入的引擎优先（测试走这条）；没注入就**按配置找一个**——没配就是"不可用"，
+    # 不去猜那台机器开没开（`engine_from_config` 只读配置，不试连接）。
+    if ocr is None:
+        from .ocr_baidu import engine_from_config
+        ocr = engine_from_config(catalog, env=env)
     ocr_result = ocr_read(ocr, image_path.read_bytes(), name=str(image_name))
     draft = transcribe.draft_for_block(ocr_result, block.get("bbox_norm"))
 
