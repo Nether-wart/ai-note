@@ -347,9 +347,12 @@ function DetailView({data, name, month, week, onUpload}) {
           `<div className="col col--3">` 就是右侧栏的位置。时间索引站的就是那个位置，
           只是它要 `col--6` 才摆得下月份与周。DOM 顺序仍是**正文在前**：窄屏堆叠时
           先看到题表，右栏落到下面。 */}
-      {/* 时间索引**排在题表前面**：它是一条按月／周的走廊，先看它再看题。 */}
-      {buckets.months.length > 0 && <TimeIndex name={name} months={buckets.months} />}
-
+      {/* 两列**照抄原生文档页的排法**（`@theme/DocItem/Layout`）：
+          正文是 `col`（可长）＋ 一个封顶（原生用 `styles.docItemCol { max-width: 75% }`，
+          这里按本项目的阅读宽封在 52rem），右栏是 `col col--3`。
+          上一版把两列都写成固定宽度（`col--6` / `col--6`），等于没照抄，右栏被挤成一条缝。 */}
+      <div className="row">
+        <div className="col ai-note-detail__main">
       <div className="ai-note-detail__list">
         {broken ? (
           <FailurePanel title="地址里指的那一段，时间索引里没有" error={filtered.error} />
@@ -431,6 +434,18 @@ function DetailView({data, name, month, week, onUpload}) {
             )}
           </>
         )}
+      </div>
+        </div>
+
+        <div className="col col--3">
+          {buckets.months.length > 0 ? (
+            <TimeIndex name={name} months={buckets.months} />
+          ) : (
+            <p className="ai-note-meta" data-time-index-empty="true">
+              还没有带录入时间的错题，所以时间索引空着。
+            </p>
+          )}
+        </div>
       </div>
     </section>
   );

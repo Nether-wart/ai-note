@@ -417,3 +417,34 @@
 .ai-note-outline [data-point] {
   color: var(--ifm-color-emphasis-800);
 }
+
+/* ------------------------------------------------------------------
+   细则那一页：右栏（时间索引）站在**内容栏右边那块原本空着的地方**
+   ------------------------------------------------------------------ */
+
+/* 主栏默认 `flex: 0 1 52rem`（别的页都收在这个宽度里，右边空着是有意的）。
+   只有细则这一页让它长开——`:has()` 让「这页要用满」由**页面内容**自己说。 */
+.ai-note-shell__main:has([data-detail="true"]) {
+  flex: 1 1 auto;
+}
+
+/* Docusaurus 的 `.container` 默认把宽度卡在 `--ifm-container-width`（1140px）：
+   卡着就填不满右边那块空位。只在细则这一页放开它。 */
+.ai-note-shell__main:has([data-detail="true"]) .container {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* 正文列的封顶（照原生 `styles.docItemCol { max-width: 75% }` 的写法，
+   只是封在阅读宽上而不是百分比）：一行读数的长度由排版决定，不由屏幕宽度决定。 */
+.ai-note-detail__main {
+  max-width: 52rem;
+}
+
+@media (max-width: 996px) {
+  /* 堆叠之后没有「右边那块空位」可言：正文列不封顶，右栏落到下面占满一行。 */
+  .ai-note-detail__main {
+    max-width: none;
+  }
+}
