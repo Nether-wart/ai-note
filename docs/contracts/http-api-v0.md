@@ -21,12 +21,14 @@
 | 有 | 三个只读端点：读索引、读一题、读图片。全部 JSON（图片字节是唯一例外，见 §7.1） |
 | 有 | `GET /upload`（后端托管的**单文件**手机上传页）、`POST /api/inbox`（往收件目录放文件）、`POST /api/inbox/scan`（目录监视失效时的手动等价入口）——#13，见 §10.3 |
 | 有 | `GET /api/brief/<科目>` 与 `POST /api/brief/<科目>`（**本版（前端重构 / #17）新增**）：读该科目最近一份简报、按需生成一份。生成走 `brief` 角色，且必须先过**数字闸门**（每个数字都要能在索引里逐字找回），见 §10.5 |
+| 有 | `GET /api/settings` 与 `PUT /api/settings`（**本版（模型设置）新增**）：读／整体替换**模型设置**（`<数据目录>/settings.json`）。读的是**生效值 ＋ 来源**（`settings`／`env`／`default`）；写盘前先拿候选设置跑一遍**四个角色**（`extract`／`segmenter`／`judge`／`brief`）的配置解析（坏了 → 400、一个字节都不写）；密钥**永不回显**（只给 `set` 与末四位）；`api_key` 省略或空串＝不改动这一项。见 §10.6 |
 | 有 | 每个响应带 `warnings[]`，以及「我跳过了什么」的 `skipped[]`（ADR 0007 第 6 条：不许静默） |
 | 有 | 屏幕重做的硬闸门读数（有擦除图 **且** 可自动判定）与「另有 N/M 道进不来」的两个显式数字（§6.1） |
 | 有 | 「这道题能不能走自动判定」的**唯一一份**实现（三拒绝理由，见 §6）——#5 直接复用，不许另写 |
 | 无 | 改已有题卡的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态：**屏幕重做**（#5）与**定点修正**（#6），形状见 §10.1；纸上重做（`channel:"paper"`）仍未实现。`POST /api/inbox*` 只往收件目录放**新**文件（#13），它不改任何题卡／资产／索引 |
 | 无 | **渲染页面**。ADR 0007 第 2 条把两件事分开说：后端**不负责渲染**（不做模板、不管界面状态），但它**托管静态资源**（手机上传页、图片、前端产物）——**托管文件不是渲染**。所以 v0 出 JSON 与静态图片字节，并托管那个单文件的手机上传页（§10.3）：页面里没有任何服务端注入的值，请求一律走同源相对路径 |
 | 无 | 索引落盘。v0 每次请求**现算**（索引是派生数据，ADR 0001）；写盘归写端点 |
+| 无 | 设置页的**「测试连接」**（拿候选设置真去打一次模型）：**不在本版**。本版只有 `GET`／`PUT /api/settings` 两个端点，两个都**不发起任何模型调用**（§10.6）——「这把钥匙能不能用」在本版得不到回答，那是调用那一刻的事 |
 
 术语一律照 `CONTEXT.md`（**题卡**、**掌握**、**冷却**、**判定**、**看不清**、**默认打印清单**、
 **自动判定**、**未审核**、**原答**、**订正**）。本文件不发明新词。
@@ -56,6 +58,18 @@
 - **模型角色的配置**：每个角色一对 `<角色>_PROVIDER` / `<角色>_MODEL` 环境变量
   （`.env.local` 可覆盖；读法只有 `server/config.py: load_role_config` 一处）。
   provider 不在白名单里是**坏配置**：服务拒绝启动，不是每个请求里再验一遍。
+  （**这句话与 ADR 0010 已经对不上**：`server/config.py: resolve_provider` 现在允许
+  `AI_NOTE_PROVIDER_<名字>_*` 自定义 provider，§10.6 的设置文件也会定义 provider——
+  「白名单」只剩预设那两家的意思。**本版按冲突记账，不在这里改写它**。）
+- **设置文件是第三层来源**（**本版（模型设置）新增**，§10.6）：`<数据目录>/settings.json`。
+  三层的优先级**逐字段**算，不是整份覆盖：**设置文件里设过的那一项 ＞ 环境变量 ＞ 预设默认**。
+  理由两条，缺一不可：整份覆盖会让「界面上没设过的那一项」凭空盖掉环境变量（人明明设了
+  `EXTRACT_PROVIDER` 却被静默忽略，比报错更坏）；而「环境变量永远赢」又会造成
+  「界面里改了却不生效」。provider 的地址／默认模型／密钥同样三层：
+  `providers.<名字>.*` ＞ `AI_NOTE_PROVIDER_<名字>_BASE_URL`／`_MODEL`／`_API_KEY`
+  （预设那两家用它们自己的 `<NAME>_API_KEY`）＞ 预设自带。
+  设置文件在**数据目录**里（[ADR 0008](../adr/0008-runtime-files-live-in-the-user-data-dir.md)），
+  天然不进仓库；密钥的回显纪律见 §10.6（**永不回显**，任何响应、任何日志里只有末四位）。
 
   | 角色 | 环境变量 | 默认 | 上岗闸门 |
   |---|---|---|---|
@@ -65,7 +79,10 @@
   | 简报 `brief`（**本版（前端重构 / #17）新增**） | `BRIEF_PROVIDER` / `BRIEF_MODEL` | **沿用抽取角色的默认值** | 数字闸门（每个数字都要能在索引里逐字找回），见 §10.5 |
 
   密钥**不在这里**要求：缺密钥是调用那一刻的 502 `model_unavailable`（可以重试），
-  不是启动失败。**换模型就要重跑那个角色的验收，不过考不许上岗**（`CONTEXT.md`「验收」；
+  不是启动失败。（**写入口不额外要求密钥**：`PUT /api/settings` 只校验形状与「这份配置解析得出来吗」，
+  所以缺密钥仍然只是调用那一刻的 502——「先填端点、密钥等会儿填」是常见顺序，
+  写入口不该把它挡在门外。「坏配置起不来」在写入口管的是**解析不出来**那种坏，见 §10.6。）
+  **换模型就要重跑那个角色的验收，不过考不许上岗**（`CONTEXT.md`「验收」；
   验收脚本与跑法见 §12.1）。简报**不复用抽取角色**：复用会让换模型时两个用途互相绑死（#17 §7）。
 
 ### 时间与 id
@@ -698,6 +715,19 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 | `unexpected_file_type` | `warning` | 后缀不在已知照片后缀里 | `<原名>` 的后缀不是已知的照片后缀（…）→ 收下了，但请确认这是照片 |
 | `inbox_created` | `hint` | 扫描时收件目录原来不存在、刚建了一个 | 收件目录原来不存在，刚建了一个：`<路径>` |
 
+**模型设置（本版（模型设置）新增）**——出现在 `GET /api/settings` 的 `warnings[]` 里
+（形状走 §2 的 `Warning`：`{code, message, id, level}`，`id` 为 `null`——它不属于任何一张卡、
+也不属于任何一页，设置文件的路径写在 `message` 里）。设置文件在却读不出来**不是 500**，
+也不许装作「还没设过」：
+
+| `code` | `level` | 触发 | 为什么值得单独响 |
+|---|---|---|---|
+| `settings_unreadable` | `warning` | `<数据目录>/settings.json` 在却读不了（权限、编码、IO），`message` 带异常原话 | 人配好的东西现在**一层都不生效**；「文件坏了」与「还没设过」必须分得开（后者是 `file_ok: true`、一条警告都没有） |
+| `settings_malformed` | `warning` | 文件读得出来，但不是一个 JSON 对象或形状不对（`roles` 不是对象、`provider` 不是字符串…），`message` 说清是哪一种 | 同上，而这一档更容易被当成「本来就是这样」：形状错但读得出来的配置**看起来**像配好了 |
+
+两条的处置写死在 §10.6：`GET` 仍 200 并给 `file_ok: false`，**不拿环境变量悄悄兜底**，
+模型配置**回落**到环境变量／预设（不熔断：读题卡不该被一份坏设置拖死），但**绝不静默**——`file_ok: false` 时**每一个响应**的 `warnings[]` 里都带上原因（`server/http.py: _with_settings_notice`），且任何一项的 `source` 都不许是 `"settings"`。
+
 **页级对账码表（B2 / #10 落地）**——出现在页资源的对账结论里（`server/segmentation.py`
 的 `reconcile`、`classify_resegment` 与 `parse_candidate_blocks` 返回的就是 §2 那个 `Warning`：
 `{code, message, id, level}`）。页级警告（这一条不对应某一题）的 `id` 为 `null`；
@@ -859,6 +889,22 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | `resegment_needs_confirmation` | **409** | **本版（前端重构 / #17）新增**：`POST /api/page/<id>/resegment` 是**重置为预设**（破坏性），这一页存在人工改动而请求没带 `{"confirm_discard_manual": true}`。`details.discarded` = `{manual_blocks, removed_blocks, mode_before}`（将丢掉什么：**两个数得准的计数** ＋ 重置前那份块列表的来源，理由见 §10.2.1b）。**不是 400**：参数没写错，是这次操作会毁掉人的劳动；与 `ambiguous_attempt_at` 同一档——**不许替人做不可逆的决定**（§10.2.1b） |
 | `brief_unverifiable` | **502** | **本版（前端重构 / #17）新增**：简报的**数字闸门**没过——生成出来的每一个数字都必须在**本次索引**里逐字找回，任何一条对不上**这份简报就不落盘**。`details.facts` 列出对不上的那些（`{label, path, claimed, actual, reason}`；`reason` ∈ `path_unresolved` / `value_mismatch` / `kind_mismatch` / `missing_value` / `bad_fact` / `missing_fact`，取值与理由见 §10.5——**`actual = null` 同时覆盖「解不出来」与「索引里正好是 null」，所以必须靠 `reason` 分开**）。**它与 `model_unavailable` 是两个码，不许合**：处置完全不同——模型没问成**可以直接重试**，数字对不上**重试无用**（提示词或索引没变，重试只会再编一次），合成一句「可以重试」会把人引去重试一个不会变好的东西。理由：这个项目最怕的失败是一段读起来很顺、**数字却是编的**总结，而能自动判的只有「数字对不对」（§10.5） |
 
+**模型设置那四个码在哪一半**（**本版（模型设置）新增**）：`settings_invalid`／`settings_unknown_field`
+是 **400 的细因**——按 §2 的口径 `code` 是**信封级类别**，400 的细因走 `reason`
+（与 `page_id_mismatch`／`page_image_unsafe`／`body_too_large`／`subject_unknown` 同一档，
+所以它们**不是**上面那张表里的新 `code`）；`settings_unreadable`／`settings_malformed` 是
+**警告级**读数，**只**出现在 `GET /api/settings` 的 `warnings[]` 里、**不进上面那张表**
+（「错误进 §9、警告进 §8」是既有分工）。四行一并登记，免得下游按 `code` 去认：
+
+| `code` | 层 | 去向 | 触发 |
+|---|---|---|---|
+| `settings_invalid` | **400**（`code: "bad_request"`，`reason: "settings_invalid"`） | `PUT /api/settings` 的 `error` | 候选设置装不起来：缺 `base_url`／缺密钥／没给模型而该 provider 也无默认模型／名字既不是预设也没定义。`message` 是 `load_role_config` 的服务原话，`details` 点名哪个角色／哪个 provider，**一个字节都不写** |
+| `settings_unknown_field` | **400**（同上形状，`reason: "settings_unknown_field"`） | 同上 | 认不出的角色名／provider 名／多余字段，或请求体不是 JSON 对象、字段类型不对。`details` 点名参数、值、允许什么 |
+| `settings_unreadable` | **警告**（`level: "warning"`） | `GET /api/settings` 的 `warnings[]`（配 `file_ok: false`） | 文件在、读不了（权限、编码、IO） |
+| `settings_malformed` | **警告**（同上） | 同上 | 文件读得出来、但不是一个 JSON 对象或形状不对 |
+
+触发与「为什么值得单独响」的码表在 §8；处置（**不拿环境变量兜底**、模型调用明确失败）在 §10.6。
+
 `not_found` 下的 `reason` 取值（都是 404，`code` 不变）：没有这道题（`reason == "not_found"`）、
 没有**那一次重做**（`reason == "attempt_not_found"`，#6，`details.available` 列出实际有哪些时刻）、
 没有这张图（`reason == "not_found"`）、
@@ -913,6 +959,7 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 | §10.3 收件目录与手机上传页 | **已实现**（#13） |
 | §10.4 受控词表与大纲（**数据文件，不是端点**） | **本版（前端重构 / #17）新增**：`<数据目录>/vocab/subjects.json` 与改形后的 `<数据目录>/vocab/topic-outline.seed.json` 的形状、存量回填命令 `python3 -m server.subject_assign`，以及它们怎么进 `/api/index`（§3） |
 | §10.5 `/api/brief/<科目>` | **本版（前端重构 / #17）新增**（形状先钉住）：读最近一份简报、按需生成一份（走 `brief` 角色，过数字闸门） |
+| §10.6 `/api/settings` | **本版（模型设置）新增**：读／整体替换**模型设置**（`<数据目录>/settings.json`），两个端点都不发起模型调用；**「测试连接」不在本版** |
 
 ### 10.1 `POST /api/attempt/<pid>` —— #5、#6（**两种形态已实现**）
 
@@ -1619,6 +1666,172 @@ key     := 不含 "."、"["、"]" 的字符串，**逐字**匹配（中文键如
   **`brief` 是它自己的模型角色**，`BRIEF_PROVIDER` / `BRIEF_MODEL`（§1）——**不复用抽取角色**，
   复用会让换模型时两个用途互相绑死（#17 §7）。
 
+### 10.6 `/api/settings` —— 模型设置（**本版（模型设置）新增**）
+
+`CONTEXT.md`「模型角色」：抽取／判定／简报三个角色各配一个模型。**设置文件**是除环境变量、
+预设默认之外的**第三层来源**（§1），这一节钉住它的落盘形状、三层的**逐字段**优先级，
+以及**只做两个**的端点。**「测试连接」不在本版**：`GET` 与 `PUT` 都不发起任何模型调用，
+所以「这把钥匙能不能用」在这两个端点上得不到回答——那是调用那一刻的事
+（缺密钥／连不上是 502 `model_unavailable`，§1）。
+
+| 动作 | 路由 | 请求 | 响应 `data` | 状态 |
+|---|---|---|---|---|
+| 读 | `GET /api/settings` | 无 body | `{file, file_ok, exists, roles, providers, applies}`（见下；`exists` 区分「没写过」与「写的是一份空的」） | **本版新增（形状先钉住）** |
+| 整体替换 | `PUT /api/settings` | body 形状与**文件形状相同**（见下） | **与 `GET` 同一份** `data`（同一个构造函数） | **本版新增（整体替换、幂等）** |
+
+**落盘**：`<数据目录>/settings.json`（数据目录见 [ADR 0008](../adr/0008-runtime-files-live-in-the-user-data-dir.md)
+——**用户数据目录，不是仓库**，所以它天然不进这个仓库，`.gitignore` 里不需要为它加一行；
+密钥的另一处住处是 `.env.local`，那个文件已经被忽略）。写盘沿用既有口径：
+**权限 0600、先写临时文件再原子替换**（与页文件、简报同一套；读到的是完整文件，失败不留半个文件）。
+
+```jsonc
+{
+  "roles": {"extract": {"provider": "openai", "model": "gpt-4o"},
+            "judge":   {"provider": "dashscope", "model": "qwen-vl-max"},
+            "brief":   {}},
+  "providers": {"openai": {"base_url": "https://api.openai.com/v1",
+                           "api_key": "sk-...", "model": "gpt-4o"}}
+}
+```
+
+| 键 | 含义 |
+|---|---|
+| `roles` | 角色名 → 这个角色**用户设过的**项。`roles` 的键是**写死的三个**：`extract`／`judge`／`brief` |
+| `providers` | provider 名 → 这**家**用户设过的定义：`base_url`／`api_key`／`model`（`model` 是这家的**默认模型**，不是某个角色的生效模型） |
+
+**文件里只写用户真正设过的字段**（缺字段＝**回落到下一层**）：`"brief": {}` 与「没有 `brief`
+这一项」同义，都表示这个角色的每一项都往下层找。**不许**把结算出来的生效值整份写回文件——
+那会把环境变量那一层抄进文件，于是下一次改环境变量**不再生效**（本节要防的两件事之一）。
+
+三层，**逐字段**算（不是整份覆盖）：
+
+| 项 | 设置文件（这一层） | 环境变量（下一层） | 预设默认 |
+|---|---|---|---|
+| 角色的 provider | `roles.<角色>.provider` | `<角色>_PROVIDER` | 该角色的默认 provider（§1 那张表） |
+| 角色的 model | `roles.<角色>.model` | `<角色>_MODEL` | 该 provider 的默认模型（换过 provider 就落到那一家） |
+| provider 的地址 | `providers.<名字>.base_url` | `AI_NOTE_PROVIDER_<名字>_BASE_URL` | 预设自带（`dashscope`／`deepseek`） |
+| provider 的默认模型 | `providers.<名字>.model` | `AI_NOTE_PROVIDER_<名字>_MODEL` | 预设自带 |
+| provider 的密钥 | `providers.<名字>.api_key` | 预设的 `<NAME>_API_KEY`／自定义的 `AI_NOTE_PROVIDER_<名字>_API_KEY` | 没有 |
+
+**为什么逐字段、为什么是这个顺序**：整份覆盖会让「界面上没设过的那一项」凭空盖掉环境变量
+（无头部署里 `.env.local` 配好的东西被一个空表单抹掉）；反过来「环境变量永远赢」又会造成
+**界面里改了却不生效**。两条都不许：环境变量被静默忽略，与设置页显示的值不是真在用的值，
+是同一种失败（ADR 0007 第 6 条）。
+
+**立刻生效**（写死）：服务**每次模型调用前重读** `<数据目录>/settings.json`，
+所以 `PUT` 之后**不用重启**。理由：桌面／Tauri 形态里没有 shell 去改环境变量，
+「重启 sidecar」是额外的一整套生命周期（谁重启、什么时候、失败了怎么办）；而设置页上写的
+「立刻生效」如果不是真的，界面就得替服务再撒一次谎。**读的粒度是一次调用**：读一个 JSON
+的成本可以忽略，而原子替换保证一次调用读到的是**一份完整**的文件。
+
+`data` 的形状（`GET` 与 `PUT` 的 200 **都是这一份**，**同一个构造函数**，不是两处各拼一遍）：
+
+```jsonc
+{"file": "<绝对路径>", "file_ok": true,
+ "roles": {"extract": {"provider": {"value": "openai", "source": "settings"},
+                       "model":    {"value": "gpt-4o", "source": "settings"},
+                       "base_url": {"value": "https://api.openai.com/v1", "source": "settings"},
+                       "key":      {"set": true, "hint": "…abcd", "source": "settings"}},
+           "judge": {…}, "brief": {…}},
+ "providers": {"dashscope": {"preset": true,  "base_url": "…", "model": "…",
+                             "key": {"set": false, "hint": null, "source": "default"}},
+               "deepseek":  {"preset": true,  "base_url": "…", "model": "…",
+                             "key": {"set": true, "hint": "…ef01", "source": "env"}},
+               "openai":    {"preset": false, "base_url": "…", "model": "…",
+                             "key": {"set": true, "hint": "…abcd", "source": "settings"}}},
+ "applies": "立刻生效"}
+```
+
+| 键 | 含义 |
+|---|---|
+| `file` | 设置文件的**绝对路径**（`<数据目录>/settings.json`）。文件不在也给——界面要先能说出「它会写在哪」 |
+| `file_ok` | 盘上那份文件能不能读、形状对不对。**文件不在是 `true`**（「还没设过」是正常起点，不是错误，也不产生警告）；只有**在却读不出来／形状不对**才是 `false`，并且一定有下面那两条警告之一 |
+| `roles` | 三个角色**当前生效**的每一项 ＋ 它**来自哪一层**——是读数，不是文件原文（见下） |
+| `providers` | **预设两家**（`dashscope`／`deepseek`）∪ **设置文件 `providers` 里定义过的名字**。只在**环境变量**里定义过的 provider 不在这张表里——角色的 `source: "env"` 会指名它；界面要显示「这一项来自环境变量」读的是 `source`，不是这张表 |
+| `applies` | 恒为字符串 `"立刻生效"`。本版只有一个取值，它不是留给以后的枚举，而是**界面照原话显示**的那句话（界面不重拼服务的话，§6.1 第 5 条同一规矩） |
+
+角色那一行的四个键：
+
+| 键 | 含义 |
+|---|---|
+| `provider` / `model` | `{value, source}`：这个角色**实际**会用的 provider 与模型 |
+| `base_url` | `{value, source}`：**这个角色的 provider** 的地址（地址属于 provider、不随角色走；这里给的是这个角色会用到的那个） |
+| `key` | `{set, hint, source}`：密钥**只给「有没有」与末四位**。`hint` 形如 `…abcd`；`set: false` 时 `hint` 为 `null` |
+
+provider 那一行的四个键：`preset`（这个名字是不是预设那两家）、`base_url`／`model`
+（这**家**的地址与默认模型，不是某个角色的生效值）、`key`（形状同上）。
+
+`source` **只有**三档：
+
+| 取值 | 意思 |
+|---|---|
+| `settings` | 这一项是**设置文件**给的（界面里改的就是它） |
+| `env` | 这一项是**环境变量**给的（含 `.env.local`） |
+| `default` | 前两层都没给，落到**预设默认**那一层。密钥这一档等于「**没有这把钥匙**」（`set: false`、`hint: null`） |
+
+**读数是「生效值 ＋ 来源」，不是文件原文**：设置页要回答的是「现在**实际**会用谁、为什么是它、
+密钥有没有」；把文件原文给出去，界面就得自己再叠一遍三层——那正是「同一套规则两份实现」
+（ADR 0007 第 1 条）。
+
+**密钥永不回显**（硬规矩）：任何响应、任何日志里都不许出现完整密钥。`key` 只有 `set` 与末四位
+`hint`，`PUT` 的回执同样；界面要显示「配没配」与「是哪一把」，靠的就是这两个读数。
+
+`PUT` 的规矩（**整体替换、幂等**）：
+
+- body 形状与文件形状**相同**（`{"roles": {…}, "providers": {…}}`，只写要设的字段）。
+  **整体替换**：请求体里没提到的项一律从文件里消失（＝回落到下一层）。同一份 body `PUT` 两次
+  得到**同一份** `data`（幂等：第二次不因为「已经是这样了」而报错，也不留下第二种结果）。
+- **`api_key` 省略或空串 ＝ 不改动这一项**（这条要能被测试钉住）。判据：**把 `GET` 回来的形状
+  原样 `PUT` 回去**（`key` 本身不是文件字段，所以等于「省略」），`data.roles.*.key` 与
+  `data.providers.*.key` 的 `set`／`hint`／`source` 与 `PUT` 前**逐字相同**，那一家**仍然能用**。
+  理由：这是这类设置页最常见的**静默数据丢失**——页面加载一次再保存一次就把密钥抹掉，
+  人下一次调用才发现 401，而中间没有任何提示。要**清掉**得**显式给 `null`**：
+  `"api_key": null` ＝ 从**设置这一层**清掉它（文件里不留这一项），有效值按优先级回落到
+  环境变量那一层；两层都没有才是 `set: false`。**`""` 与 `null` 是两个意思，不许合并。**
+- **写盘前先校验**：拿候选设置跑一遍**三个角色**的配置解析（`server/config.py: load_role_config`）。
+  任何一个坏——缺 `base_url`、缺密钥、没给模型而该 provider 也没有默认模型、名字既不是预设也没定义
+  ——→ **400**（`code: "bad_request"`，`reason: "settings_invalid"`，§9 那张四行表），
+  `message` 是**服务原话**（`load_role_config` 抛出的那句，界面照原话显示、不改写），
+  **一个字节都不写**。理由：「坏配置起不来」这条纪律在**写入口**
+  也要成立——写入口是唯一能产生**持久**坏配置的地方，等到调用那一刻才发现缺哪一项，人已经离开
+  这个页面了。（**这一条比 §1 那句「缺密钥是调用那一刻的 502」更严，差别是有意的**：
+  那一档说的是**已经跑着的服务**怎么失败，这一档说的是**要不要把它存下来**。）
+- **认不出的角色名／provider 名／多余字段 → 400**（`code: "bad_request"`，
+  `reason: "settings_unknown_field"`）＋ `details`
+  （点名是哪个键、值是什么、允许什么）。`roles` 的键只有那三个；`providers` 的名字要么是预设、
+  要么就在这一份 body 里定义完整。**不许静默丢掉认不出的键**——那正是「界面里改了却不生效」。
+- 请求体**不是 JSON 对象**、或字段类型不对（`roles` 不是对象、`provider` 不是字符串、
+  `api_key` 既不是字符串也不是 `null`…）→ **同一个 400**（`reason: "settings_unknown_field"`，
+  `details` 点名参数、值、允许什么）。这**不是** `settings_malformed`——那个名字留给
+  **盘上那份文件**的读数（见下）：一次**输入错**与一份**坏文件**是两件事，后者不是 400。
+- body 上限走**写端点那一档**（64 KiB，§9）：超限 → 400 `bad_request`，`reason` 为
+  `body_too_large`，**判在读 body 之前**，**一个字节都不写**。
+
+**文件在却读不出来／形状不对**（**两条警告，不是错误码**，触发与理由的码表在 §8）：
+
+- `settings_unreadable`：文件在、读不了（权限、编码、IO），`message` 带异常原话。
+- `settings_malformed`：文件读得出来，但不是一个 JSON 对象或形状不对。
+
+两条都走 §2 那个 `Warning` 形状（`{code, message, id, level}`，`level: "warning"`，
+`id` 为 `null`——它不属于任何一张卡、也不属于任何一页，设置文件的绝对路径写进 `message`），
+**只**出现在 `GET /api/settings` 的 `warnings[]` 里，**不进 §9 的错误码表那一半**，
+并配 `file_ok: false` 与 `file`（绝对路径）。
+
+- `GET` **仍然 200**：它是一份**读数**——把「设置这一层现在是坏的」如实报出来，而不是 500
+  （D1：输入错用 4xx、服务自己坏才是 500）。
+- **不许拿环境变量悄悄兜底**：`roles`／`providers` 里因此**算不出来**的项，`value` 给 `null`、
+  `source` 给 `"default"`（＝「没有一层给出可用的值」，与 `key.set: false` 同一档编码）。
+  判据：`file_ok: false` 时**任何一项的 `source` 都不许是 `"settings"`**——那是「我读到了你的
+  设置」的意思，而现在读不到。
+- **模型调用明确失败**：设置这一层坏掉时**不回落**到环境变量／预设，那一次调用 → **502
+  `model_unavailable`**（§9 同一档），`message` 点名设置文件与原因，`hint` 说「修好它或删掉它」，
+  **不写「可以直接重试」**——重试不会变好（与 `brief_unverifiable` 同一种理由：处置不同就不许
+  合成一句「可以重试」）。理由：拿环境变量顶上会让人**以为在用自己配的那家，其实不是**；
+  这比一次明确的失败坏得多（ADR 0007 第 6 条：不许静默）。
+
+**本版不做**：不做「测试连接」；不写 `.env.local`、不改任何环境变量——写入**只**发生在
+`<数据目录>/settings.json` 一处。
+
 ## 11. 契约决定与偏离记录
 
 | 决定 | 为什么 |
@@ -1676,6 +1889,7 @@ key     := 不含 "."、"["、"]" 的字符串，**逐字**匹配（中文键如
 | 本版（真 socket 上的 `PATCH`） | §10.2.1b 的 `PATCH /api/page/<id>` **在真实 socket 上才算真的可用**：`server/app.py` 之前只挂了 `do_GET`／`do_OPTIONS`／`do_POST`，这条路由只在 `Api.handle` 这个纯函数接缝上存在；`OPTIONS` 的 `Allow` 与 `Access-Control-Allow-Methods` 补上 `PATCH`（这两处以前只有 `GET, POST, OPTIONS`）。**响应形状一个字段都没变** | 契约 §10.2.1b 早就写了这条路由，缺的是**接线**——这是「实现没跟上契约」，不是契约改了。它活了很久，因为唯一吃它的测试直接调 `api.handle("PATCH", …)`，**绕过了 socket**：判据断言的层级与坏掉的那一层错开一格。真实后果有两层：真浏览器拿到的是框架自带的 **501 + `text/html`**（不是 §2 的信封），而跨源预检因为方法清单里没有 `PATCH`，**更早一步就把请求拦下了**——切分修正页唯一的写路径等于不存在。现在有一条走真 socket 的测试盯着它（摘掉 `do_PATCH` 它会红） |
 | 本版（前端重构 / #17） | **A 科目成一等字段**：§3.1 题卡记录加 `subject`（`null` = **未归类**）；§8 逐卡加 `subject_missing`（`hint`，与 `page_binding_missing` 同级）与 `subject_unknown`（`warning`，值不在词表**不许静默改写成 `null`**），并按实现订正「逐卡码 `level` 全是 `warning`」那句（#17 §3.9）；§3 的 `stats` 加 `by_subject` 与 `unclassified`，并把不变式 `sum(by_subject[*].problems) + unclassified == stats.problems` 写进正文。**B 词表随索引一起给**：`/api/index` 加 `subjects`／`outline`／`briefs`（`stale` = 「这份简报生成之后又有题录进来了」、`new_problems` 是那几道的道数）；`outline` 里只许出现 `subjects` 里的科目，否则 `outline_subject_unknown`（`warning`）；写明「一次请求画出整棵树、不许露『有科目但没有大纲』的中间态」。**C 数据文件**：新 §10.4 钉住 `<数据目录>/vocab/subjects.json`（`{"科目": […]}`，与 `error-causes.json` 同形）与 `topic-outline.seed.json` 的**破坏性改形**（`{"大纲": {科目: {章: {节: [点]}}}}`，旧 `name` 里那句「不是真实大纲」的自我否定一并删掉）以及理由（**科目是导航的根，大纲必须挂在科目下**），并写明存量回填命令 `python3 -m server.subject_assign --map <表.json> [--apply]`、映射表形状（`{"题卡 id": "科目"}`）、**坏值一票否决**（表里有一条不在词表里 → `--apply` 一个字节都不写、退出码 1）与**不许按考点推科目**（猜错的科目比没有科目更坏），并写明预演**必须逐条列出被跳过的和为什么**（形状是细节，说的是内容）；§8 补 6 条词表级警告（读不出来**不是 500**）；§1 把路径字符集规则的**适用面**写准（只管 **id 类**参数；科目是另一类：URL 编码 + 词表逐字校验）。**D 页文件**：§10.2.1 加**页级 `subject`**（与题卡同名同义，`null` = 未归类）、`segmentation`（`model`／`manual`／`unavailable`）与 `removed_blocks[]`（**只增不减、同 id 允许多条**）；`mode == "unavailable"` 时 `blocks` **必须**是 `null`；留痕里**永远不许**出现带 `card_id` 的块；写明**切分不可用时也建页**（照片落盘、页文件照建——推翻「切分不可用就不建页」那条旧裁决，ADR 0005 / #15）。§10.2.1b「建」的请求形状加**可选** multipart 文本字段 `subject` 与三条规矩（没给 → 未归类；词表在而取值不在 → **400** `subject_unknown`；**词表本身不在 → 收下并带回词表级警告**——录入摩擦是这类工具的头号死因，ADR 0006 决定第 5 条），响应 `pages[]` **回显 `subject`**（没给就是 `null`，不是缺字段——回执不回声，界面就没法确认科目真被收下了）。**E PATCH 的动作闭集加两条**：`add`（新块 id 与模型块**共用一套分配**；`bbox_norm` 非法 → 与 `move` 同一个拒绝形状）与 `delete`（**已绑 `card_id` 的块永远不许删** → 400 `block_delete_bound_to_card` 带 `card_id`；未入库的块删了必须留痕）；回执加 `blocks_removed` 与 `blocks_added`（**每一次增删都报数**，0 也报，增删对称），并写明**新增走 PATCH 而不新开端点**的理由（加动作 = 一行；新端点要把 `dry_run`／拒绝形状／`EDITABLE_ACTIONS`／回执再实现一遍，最怕两处漂移）。**F `resegment` 语义改成「重置为预设」**：要 `{"confirm_discard_manual": true}`，否则 **409** `resegment_needs_confirmation` + `details.discarded`（`{manual_blocks, removed_blocks, mode_before}`——**计数只有前两个**，因为只有它们能数准；不逐块记来源，所以不报一个算不准的计数；`mode_before` 是「重置前那份块列表是谁给的」这份**事实**，不是计数）；成功时 `segmentation.mode` 回 `"model"`、回执报**真的**丢了几块、删掉的块进 `removed_blocks[]`；`checks`／`reconciliation` 照旧跑。**G 简报端点**：新 §10.5 的两个端点、落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json` 的形状（`window_facts`／`history_facts` 的 `path` 是指向本次索引的 JSON 指针）与**上岗闸门**（任何一条 `path` 解不出来或对不上 → **不落盘** + 502 `brief_unverifiable` + `details.facts`，其中 `reason` 六档把「解不出来」与「索引里正好是 null」分开；它与「模型问不成」的 `model_unavailable` 是两个码，**处置不同：一个重试无用、一个可以重试**）；§10.5 还写死 `facts[].path` 的语法（`brief.resolve_path` 是唯一实现；类型不对/越界都算解不出来；含 `.`/`[`/`]` 的键寻址不了）、窗口起止（`window_until` = `covers_until` 归一化到 UTC 的那一天，`window_from` = `window_until - (window_days - 1)` **含两端**，**文件名取 `window_until`**），以及两条边界（**窗口/历史只是叙事框**，闸门只核数字真不真、不核它在哪个数组；**没有过滤与聚合**，所以「错因分布」这类话核不出来，正文只能引现成读数或可解路径）；回执另加三个现算的键 `is_latest`／`stale`／`new_problems`（**历史那一份也要给**，`stale` 的判据写死成 `created_at > covers_until`）；未归类**不计入**任何科目简报，但正文必须写「另有 N 道未归类未计入」且 N 进 `history_facts` 受同一道闸门管。**H 切分与简报的接线**：§1 补 `SEGMENTER_PROVIDER`／`SEGMENTER_MODEL` 与 `BRIEF_PROVIDER`／`BRIEF_MODEL`（默认沿用抽取角色的默认值）与四个角色的上岗闸门；§12 加 `server/subjects.py`、`server/brief.py`、`server/brief_client.py`／`server/segmenter_client.py` 与 `server/subject_assign.py`；§12.1 加模型上岗验收 `python3 -m pytest server/tests/test_acceptance_models.py -v`（**换模型就要重跑，不过考不许上岗**；需要密钥，**没密钥 skip 而不是 pass**）与 `segmenter` 的三条闸门（视觉探针 + 固定照片集上的人工判定 + `segmentation.py` 的三条对账判据，**三条都要过**，固定照片集落进仓库当夹具）。**I** §0 范围、§9 错误码、§10 状态表、§11 偏离表同步；§10.2.1b 那句「「建」与「入库」是带归属的兜底 404」按实现改准（#15 之后它们早已落地，留着会让 #17 的读者以为还没实现）；§8 的 `subject_unknown` 警告与 §9 的 `subject_unknown` 400 **同名同事实**（R2/R9：同一个事实不许两个码；码表分开、两处互相指认）。**本版只改契约，实现另跟** | 工单 #17（前端重构）的 §3 与 §10 落成契约（契约先行）。要点：①**未归类是一等状态**，不是缺字段——它要有自己的兜底栏与道数，要一条 `hint` 而不是被当成脏数据；②**科目只有一个真源**（受控词表），卡上的值不在表里**不许被静默改写成 `null`**（读数是记录的原值，谁改的谁喊）；③侧栏要**一次请求画出整棵树**，所以词表随索引走、不新开端点；④**「我不知道」与「这一页没有题」必须分得开**（`blocks: null` vs `[]`，再加一层 `segmentation.mode`），而切分不可用时**页文件还是要建**——不建，人就无从手画；⑤**删块要留痕、已绑卡的不许删**——删掉它才是静默丢题；⑥**重置为预设是破坏性动作**，必须先报清将丢弃几处人工改动，不许不声不响覆盖人的劳动；⑦**简报最怕的是一段读起来很顺、数字却是编的总结**——能自动判的「数字对不对」必须是闸门；⑧**换模型就要重跑验收，不过考不许上岗**，固定照片集落进仓库让这句话成为一条可执行的命令；⑨**词表缺席不许挡住录入**——录入摩擦是这类工具的头号死因（ADR 0006 决定第 5 条），所以「词表在而取值不在」是 400、「词表本身不在」是先收下再喊；⑩**同一个事实不许两个码**（R2/R9）：卡级自检与输入拒绝共用 `subject_unknown` 这个名字，层次不同、码表分开 |
 | 本版（补 `GET /api/page/<id>`；接上 `DELETE`／`PUT`） | §10.2.1b 的动作表加一条**读**：`GET /api/page/<id>` → `{page_id, page_path, image, page}`（`page` 是页文件原样）。§10 状态表从「四个动作」改准成「**六个**」。`server/app.py` 补 `do_DELETE`／`do_PUT`：这两个方法自己不做路由，只是把请求送进 `Api._route`，好让「用错方法」真能得到 **405 带 `allowed`**（§5.1）**并且是 JSON 信封**（§2）。**响应形状只多不减** | 界面要打开一页来改，第一步就是**读**；而 `page_api` 一直只有 `PATCH`——于是「读一页」只能拿一次**空修正的预演**（`PATCH {dry_run: true, edits: []}`）去凑，让**读**依赖一条**写形状**的路由。这与 `do_PATCH` 那次是**同一个病根**：**路由只活在纯函数接缝里**（`SplitEditor` 的 `fetchPage` 从 #14 起就踩在这条死缝上，真实 socket 上是 405——它的测试全靠注入 `pageData`，所以从没红过）。**判据的层级与坏掉的那一层错开一格，是这一类缺口能活下来的唯一原因**；现在两条路由各有一条**真 socket** 的测试盯着，用错方法的 `allowed` 也在断言里 |
+| 本版（模型设置） | **新增 §10.6 `/api/settings`（模型设置）**：`<数据目录>/settings.json`（**用户数据目录，不是仓库**；权限 0600、先写临时文件再原子替换）**只写用户真正设过的字段**，缺字段＝回落下一层；三层**逐字段**优先级＝**设置文件 ＞ 环境变量（`<角色>_PROVIDER`／`<角色>_MODEL`／`AI_NOTE_PROVIDER_<名字>_*`）＞ 预设默认**；服务**每次模型调用前重读**那个文件，`PUT` 之后不用重启。两个端点（**本版只做这两个**）：`GET /api/settings` → 200，给 `{file, file_ok, roles, providers, applies}`——每一项带 `source`（`settings`／`env`／`default`），密钥**只给 `set` 与末四位 `hint`**（任何响应、任何日志里都不许出现完整密钥）；`PUT /api/settings` **整体替换、幂等**，回执与 `GET` 同一份 `data`，请求体形状与文件形状相同。**写盘前先校验**：拿候选设置跑一遍**四个角色**（`extract`／`segmenter`／`judge`／`brief`）的 `load_role_config`，任何一条坏（缺 `base_url`／缺密钥／没给模型且该 provider 无默认模型／名字既不是预设也没定义）→ **400**（`reason: "settings_invalid"`，服务原话进 `message`，**一个字节都不写**）；认不出的角色名／provider 名／多余字段 → **400**（`reason: "settings_unknown_field"`）＋ `details`；请求体不是对象／类型不对 → 同一个 `settings_unknown_field`（**不是** `settings_malformed`——那个名字留给盘上那份坏文件）；`api_key` **省略或空串＝不改动这一项**（要清掉得显式给 `null`，`""` 与 `null` 两个意思不许合并）——这条写成能被测试钉住的判据，防的是「页面加载一次再保存一次就把密钥抹掉」这处最常见的静默数据丢失；文件在却读不出来／形状不对 → `GET` 仍 200 但 `file_ok: false` ＋ `warnings[]`（`settings_unreadable`／`settings_malformed`，`level: "warning"`，走 §2 的 `Warning` 形状、`id` 为 `null`），**不拿环境变量悄悄兜底**（模型调用明确失败、不回落）。**本版不做「测试连接」**。同步：§0 加这两个端点并写明「测试连接」不在本版；§1 写明设置文件是**第三层来源**与逐字段优先级，并把「写入口缺密钥＝400」这条更严的口径挂在那句「缺密钥是调用那一刻的 502」旁边（差别是有意的，不抹平）；§8 加两条设置级警告；§9 把四个码登记进一张四行小表（两个 400 是 `bad_request` 下的 `reason`，两条警告**只**出现在 `warnings[]`，不在错误码表那一半）；§10 状态表加 §10.6；§12 加 `server/settings.py`（唯一实现）；§12.1 加一条可执行命令 | 工单（模型设置）。要点：①设置页要能回答「现在**实际**会用谁、为什么是它、密钥有没有」，所以读数是**生效值 ＋ 来源**，不是文件原文（否则界面得自己再叠一遍三层）；②三层优先级**逐字段**算——既不能静默忽略环境变量（无头部署里配好的东西被一个空表单抹掉），也不能出现「界面里改了却不生效」；③「立刻生效」必须是真的：每次调用前重读，桌面／Tauri 里没有 shell 去改环境变量，「重启 sidecar」是额外的一整套生命周期；④「坏配置起不来」这条纪律在**写入口**也要成立——写入口是唯一能产生持久坏配置的地方；⑤密钥**永不回显**、省略＝不改动，是本版两条最容易写错、也最该用测试钉住的判据 |
 
 
 ## 12. 模块角色（下游一眼要看到的两件事）
@@ -1704,6 +1918,7 @@ key     := 不含 "."、"["、"]" 的字符串，**逐字**匹配（中文键如
 | `server/brief.py` （**本版（前端重构 / #17）新增**） | **简报的生成与数字闸门的唯一实现**（§10.5）：按窗口汇总读数 → 问 `brief` 角色 → 把 `text` 里用到的每个数字落成 `window_facts`／`history_facts`（`path` 指向本次索引）→ **逐条解出来核对**，一条对不上就**不落盘、502 `brief_unverifiable`**。落盘 `<数据目录>/briefs/<科目>-<YYYY-MM-DD>.json`，先写临时文件再原子替换 |
 | `server/brief_client.py` 与 `server/segmenter_client.py` （**本版（前端重构 / #17）新增**） | 两个角色各自的**调用接缝**，照 `server/intake_client.py` / `server/judge_client.py` 的形状（提示词与消息形状按角色分家、共用 `model_client` 那条与角色无关的管道、`runs/` 留档 tag 分别是 `brief` 与 `segment`）。`brief_client` 是**纯文本**角色，`segmenter_client` **要看图**（整页照片 + 候选块）——前置一份**视觉探针**：纯文本模型收到图片不会报错，它会忽略图片、照着提示词**凭空编块**（`CONTEXT.md`「视觉探针」） |
 | `server/subject_assign.py` （**本版（前端重构 / #17）新增**） | 受控词表的**显式迁移**入口（§10.4）：`python3 -m server.subject_assign --map <表.json> [--apply]`，把存量卡按人给的映射写进 `subject`。**只认人给的映射表、不按考点推**（猜错的科目看起来是对的，而没有人会去核对一个看起来对的答案）；**坏值一票否决**（表里有一条不在词表里 → `--apply` 一个字节都不写、退出码 1）；预演与 `--apply` 分开（同 `server/backfill.py` 的先例），消费 `subjects.load` 判词表，不另写一份科目判据 |
+| `server/settings.py` （**本版（模型设置）新增**） | **模型设置的读写与逐字段解析的唯一实现**（§10.6）：读 `<数据目录>/settings.json`（0600、先写临时文件再原子替换；**只在用户设过的字段落盘**），三层优先级**逐字段**叠加之后再走 `server/config.py: load_role_config` 那一份解析（**不另写一份**），产出 `GET` 的 `roles`／`providers`／`file_ok` 读数，并在 `PUT` 时先校验候选设置。密钥的末四位 `hint` 只在这里算，**完整密钥不进任何响应、不进日志**。别的模块要「这个角色现在用谁」只有这一个地方可消费——三层叠加不许在第二个地方再来一遍 |
 
 ## 12.1 测试接缝
 
@@ -1747,3 +1962,10 @@ key     := 不含 "."、"["、"]" 的字符串，**逐字**匹配（中文键如
   只报 `question_number_missing`（hint），**不许当成通过**。
 - 测试数据**自造在临时目录里**，测完即删。真实题卡只有两张、重做次数是 0，
   测试绝不碰它们（工单 #1 的第 35 条 user story）。
+- **模型设置也在这个 HTTP 接缝上测**（**本版（模型设置）新增**）：
+  `python3 -m pytest server/tests/test_settings.py -v`。写盘用**临时数据目录**，
+  绝不指向真实数据目录（§1 的同一句纪律）。有两条判据必须会红：①**把 `GET` 回来的形状原样
+  `PUT` 回去**（`key` 不是文件字段，等于省略 `api_key`），密钥的 `set`／`hint`／`source`
+  **逐字不变**——这条断了就是「页面加载一次再保存一次就把密钥抹掉」；②候选设置里有一条坏的
+  （缺 `base_url`／缺密钥／名字没定义）→ 400（`reason: "settings_invalid"`），且设置文件**逐字节没变**
+  （「一个字节都不写」要拿字节比对钉，不是拿「没报错」钉）。

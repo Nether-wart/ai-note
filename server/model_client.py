@@ -168,11 +168,14 @@ def chat(config, messages, *, tag: str, runs_dir: Path | str,
     `intake_client.parse_semantics`），这里绝不替它们猜。
     """
     env = env if env is not None else os.environ
-    key = (env.get(config.key_env) or "").strip()
+    # 设置文件给的密钥是**值**（§10.6），环境变量那条路只给变量名——两个来源都在，
+    # 值优先。报错要把两条路都说出来，否则人不知道该往哪填。
+    key = (getattr(config, "api_key", None) or env.get(config.key_env) or "").strip()
     if not key:
         # 缺密钥是「我们没能问成」，不是「看不清」：不留记录，可以重试。
         raise ModelUnavailable(
-            f"没有找到 {config.key_env}——把密钥写进 .env.local（已在 .gitignore 里）"
+            f"没有找到密钥：设置文件里的 {config.provider}.api_key 或环境变量 "
+            f"{config.key_env} 都是空的——前者在界面的「设置」里填，后者写进 .env.local"
             "或导出成环境变量；这一次没有留下任何记录"
         )
 

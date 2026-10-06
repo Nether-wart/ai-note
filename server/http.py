@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import assets, brief, inbox as inbox_mod, subjects
+from . import settings as settings_module
 from .attempt import MAX_BODY_BYTES, AttemptEndpoint
 from .brief_client import HttpBrief
 from .catalog import Catalog
@@ -132,9 +133,13 @@ class Api:
         # 切分（#10）还没实现。这是一个**接缝**：注入一个 `(path) -> blocks` 就能接上，
         # 不注入就必须显式报「切分不可用」——绝不返回假的块列表。
         self.segmenter = segmenter
-        # 坏配置**在这里就起不来**（阈值 NaN／无穷／越界，或 provider 不在白名单里），
+        # 坏配置**在这里就起不来**（阈值 NaN／无穷／越界，或 provider 没定义），
         # 而不是每个请求里再验一遍（#5 派发简报第 7 条）。
-        self.judge_config = config or load_judge_config()
+        # 设置文件坏掉时**不用它兜底**（§10.6 规矩 4）：这里保持启动时的那份，
+        # 而 `/api/settings` 会把 `file_ok: false` 与原因明说。
+        self._runs_dir = runs_dir or default_runs_dir()
+        self._settings_doc = self._load_settings_doc()
+        self.judge_config = config or load_judge_config(settings=self._settings_doc)
         judge_call = judge or HttpJudge(self.judge_config, runs_dir or default_runs_dir())
         self.attempts = AttemptEndpoint(
             self.catalog, judge_call=judge_call, threshold=self.judge_config.threshold,
@@ -148,7 +153,86 @@ class Api:
         # 而 `segmenter=None` 那种「不注入 = 不可用」的语义是切分独有的）。
         # 坏配置在这里就起不来（provider 不在白名单 → ValueError → 退出码 2）。
         self.brief = brief_client or HttpBrief(
-            load_role_config(BRIEF_ROLE), runs_dir or default_runs_dir())
+            load_role_config(BRIEF_ROLE, settings=self._settings_doc), self._runs_dir)
+
+    def _load_settings_doc(self) -> dict:
+        """读一次设置文件；**坏文件不让整个 API 起不来**（读题卡不该被一份坏设置拖死）。
+
+        代价是模型调用会退回环境变量／预设——所以这件事**必须每一次都被看见**：
+        文件坏着的时候，**每一个响应**的 `warnings[]` 里都带上原因
+        （`_with_settings_notice`）。静默回落会让人以为在用自己配的那一家，其实不是。
+        """
+        try:
+            self._settings_error = None
+            return settings_module.load_settings(self.catalog)
+        except settings_module.SettingsError as exc:
+            self._settings_error = {
+                "code": exc.code, "level": "warning", "id": None,
+                "message": f"{exc.message}（{settings_module.settings_path(self.catalog)}）",
+            }
+            return {}
+
+    def _with_settings_notice(self, response: Response) -> Response:
+        """设置文件坏着的时候，把原因挂到**每一个** JSON 响应的 `warnings[]` 上。
+
+        熔断与"静默"之间还有第三条路：**照常服务，但每一次都说明现在的模型配置
+        不是从设置文件来的**。读题卡不该被一份坏设置拖死，模型调用也不该假装没事。
+        """
+        notice = getattr(self, "_settings_error", None)
+        if not notice:
+            return response
+        try:
+            envelope = json.loads(response.body)
+        except (ValueError, TypeError):
+            return response
+        if not isinstance(envelope, dict) or "warnings" not in envelope:
+            return response
+        if any(w.get("code") == notice["code"] for w in envelope["warnings"]):
+            return response
+        envelope["warnings"] = list(envelope["warnings"]) + [notice]
+        body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        return Response(status=response.status, body=body, content_type=response.content_type,
+                        headers={"Content-Length": str(len(body))})
+
+    def _settings_route(self, method: str, body, declared_length) -> Response:
+        """`GET`／`PUT /api/settings`（契约 §10.6）。
+
+        `PUT` 是整体替换（幂等、好写测试）：先校验形状、再拿候选跑一遍三个角色的解析，
+        **一个字节都还没写**就已经知道它装不起来；写盘走临时文件 + `os.replace`。
+        成功之后**重载**模型配置——这就是"改完立刻生效"。
+        """
+        if method == "GET":
+            data, warnings = settings_module.public_view(self.catalog)
+            return json_response(200, data=data, warnings=warnings)
+        self._require(method, "PUT")
+        self._reject_oversized_write(body, declared_length)
+        payload = _optional_json_object(body)
+        try:
+            settings_module.save_settings(self.catalog, payload)
+        except settings_module.SettingsError as exc:
+            # 按 §9 的约定：这一类错误的 `code` 恒为 `bad_request`，**细因走 `reason`**
+            # （`settings_invalid`／`settings_unknown_field` 就是两个 `reason` 取值）。
+            raise bad_request(exc.message, reason=exc.code, hint=exc.hint,
+                              param="body", **(exc.details or {})) from exc
+        self.reload_model_configs()
+        data, warnings = settings_module.public_view(self.catalog)
+        return json_response(200, data=data, warnings=warnings)
+
+    def reload_model_configs(self) -> None:
+        """重读设置并重建模型配置（§10.6「改完立刻生效」）。
+
+        `Api` 是**启动时建一次**的（`app.py` 里那句 `httpd.api = Api(...)`），
+        所以不重载就得重启服务——而桌面程序（Tauri）里"重启 sidecar"是额外的一整套生命周期。
+        重载只换模型配置，不动任何数据。
+        """
+        self._settings_doc = self._load_settings_doc()
+        self.judge_config = load_judge_config(settings=self._settings_doc)
+        self.attempts.judge_call = HttpJudge(self.judge_config, self._runs_dir)
+        self.attempts.threshold = self.judge_config.threshold
+        self.attempts.provider = self.judge_config.provider
+        self.attempts.model = self.judge_config.model
+        self.brief = HttpBrief(
+            load_role_config(BRIEF_ROLE, settings=self._settings_doc), self._runs_dir)
 
     def handle(self, method: str, target: str, body: bytes | str | None = b"",
                content_type: str = "", declared_length: int | None = None) -> Response:
@@ -183,7 +267,7 @@ class Api:
         # 站点在 :3000、服务在 :8765，跨源是常态。服务只监听本机（ADR 0003），
         # 所以 `*` 的暴露面就是本机。
         response.headers.setdefault("Access-Control-Allow-Origin", "*")
-        return response
+        return self._with_settings_notice(response)
 
     @staticmethod
     def _require(method: str, *allowed: str) -> None:
@@ -258,6 +342,11 @@ class Api:
         # 405（带 `allowed`）而不是一个含糊的 404——路由**在**，只是不收这个方法。
         if path.startswith("/api/brief/"):
             return self._brief_route(method, path, query, body, declared_length)
+
+        # 设置（§10.6）：读生效值、整体替换。它是**唯一**会改到"服务怎么调模型"的端点，
+        # 所以保存成功后要**重载**那几份模型配置——口径是"改完立刻生效"。
+        if path == "/api/settings":
+            return self._settings_route(method, body, declared_length)
 
         # 其余 POST 交给写端点那一份判断：只读端点上是 405、预留命名空间是带说明的 404。
         if method == "POST":

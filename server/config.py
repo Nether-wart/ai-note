@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from collections.abc import Mapping
@@ -73,6 +74,9 @@ class RoleConfig:
     base_url: str
     model: str
     key_env: str
+    # 设置文件（§10.6）里的密钥是**值**本身，而环境变量那条路只给变量名（`key_env`）。
+    # 两个来源都在，取值时 `api_key` 优先（`server/model_client.py` 里那一行）。
+    api_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,7 +85,8 @@ class JudgeConfig(RoleConfig):
     threshold: float = judge.CONFIDENCE_THRESHOLD
 
 
-def resolve_provider(name: str, env: Mapping, prefix: str | None = None) -> dict:
+def resolve_provider(name: str, env: Mapping, prefix: str | None = None,
+                     providers: Mapping | None = None) -> dict:
     """provider 名 → `{base_url, key_env, default_model}`。
 
     预设之外的名字**由你自己在环境里定义**（ADR 0010：不再限境内白名单）：
@@ -97,6 +102,14 @@ def resolve_provider(name: str, env: Mapping, prefix: str | None = None) -> dict
     """
     if name in PROVIDERS:
         return PROVIDERS[name]
+    # 设置文件里定义过的 provider 也算「有定义」（§10.6）——它是三层里的第一层。
+    definition = (providers or {}).get(name) or {}
+    if definition.get("base_url"):
+        return {
+            "base_url": definition["base_url"],
+            "key_env": "AI_NOTE_PROVIDER_" + re.sub(r"[^A-Za-z0-9]+", "_", name).upper() + "_API_KEY",
+            "default_model": (definition.get("model") or "").strip(),
+        }
     # 报错要同时点出**用户设的那个变量**（`EXTRACT_PROVIDER`）与该定义的两个变量——
     # 只说其中一半，人还得自己找另一半。
     where = f"{prefix}_PROVIDER={name!r} 指向的 " if prefix else ""
@@ -115,7 +128,8 @@ def resolve_provider(name: str, env: Mapping, prefix: str | None = None) -> dict
     }
 
 
-def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
+def load_role_config(role: str, env: Mapping | None = None,
+                     settings: Mapping | None = None) -> RoleConfig:
     """把**任意**角色名解析成一份配置，坏配置当场喊（`ValueError`）。
 
     环境变量按角色加前缀：`JUDGE_PROVIDER` / `JUDGE_MODEL`、`EXTRACT_PROVIDER` /
@@ -128,11 +142,17 @@ def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
         )
     default = ROLE_DEFAULTS[role]
     prefix = role.upper()
-    provider = (env.get(f"{prefix}_PROVIDER") or default["provider"]).strip()
-    preset = resolve_provider(provider, env, prefix=prefix)
+    # **逐字段**回落：设置文件里设过的那一项 ＞ 环境变量 ＞ 预设默认（ADR 0010 / 契约 §10.6）。
+    # 整份覆盖会让「界面上没设过的那一项」凭空盖掉 `.env.local`。
+    settings = settings or {}
+    mine = (settings.get("roles") or {}).get(role) or {}
+    providers = settings.get("providers") or {}
+    provider = (mine.get("provider") or env.get(f"{prefix}_PROVIDER")
+                or default["provider"]).strip()
+    preset = resolve_provider(provider, env, prefix=prefix, providers=providers)
     # 只换了 provider 而没指定模型时，落到那家 provider 的预设默认，而不是角色原来的模型
     fallback = default["model"] if provider == default["provider"] else preset["default_model"]
-    model = (env.get(f"{prefix}_MODEL") or "").strip() or fallback
+    model = (mine.get("model") or env.get(f"{prefix}_MODEL") or "").strip() or fallback
     if not model:
         # 这句话故意长：它要点名两个可改的地方（角色的 MODEL 与 provider 的默认模型）。
         raise ValueError(
@@ -145,21 +165,20 @@ def load_role_config(role: str, env: Mapping | None = None) -> RoleConfig:
         base_url=preset["base_url"],
         model=model,
         key_env=preset["key_env"],
+        api_key=((providers.get(provider) or {}).get("api_key") or "").strip() or None,
     )
 
 
-def load_judge_config(env: Mapping | None = None) -> JudgeConfig:
+def load_judge_config(env: Mapping | None = None,
+                       settings: Mapping | None = None) -> JudgeConfig:
     """把 judge 角色解析成一份配置（身份走上面那一份解析，外加一次阈值校验）。"""
     env = env if env is not None else os.environ
-    base = load_role_config(JUDGE_ROLE, env)
-    return JudgeConfig(
-        role=base.role,
-        provider=base.provider,
-        base_url=base.base_url,
-        model=base.model,
-        key_env=base.key_env,
-        threshold=_load_threshold(env),
-    )
+    base = load_role_config(JUDGE_ROLE, env, settings=settings)
+    # 从**字段表**推导，而不是手抄一份字段清单：那份清单**漏过一次**——§10.6 加了
+    # `api_key` 之后这里还在逐个抄字段，于是把它丢了，症状是「设置里填了密钥、
+    # 模型调用却说没找到密钥」。以后再加身份字段，这里自动跟上。
+    identity = {field.name: getattr(base, field.name) for field in dataclasses.fields(base)}
+    return JudgeConfig(threshold=_load_threshold(env), **identity)
 
 
 def _load_threshold(env: Mapping) -> float:
