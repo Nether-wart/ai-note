@@ -347,8 +347,10 @@ function DetailView({data, name, month, week, onUpload}) {
           `<div className="col col--3">` 就是右侧栏的位置。时间索引站的就是那个位置，
           只是它要 `col--6` 才摆得下月份与周。DOM 顺序仍是**正文在前**：窄屏堆叠时
           先看到题表，右栏落到下面。 */}
-      <div className="row">
-        <div className="col col--6">
+      {/* 时间索引**排在题表前面**：它是一条按月／周的走廊，先看它再看题。 */}
+      {buckets.months.length > 0 && <TimeIndex name={name} months={buckets.months} />}
+
+      <div className="ai-note-detail__list">
         {broken ? (
           <FailurePanel title="地址里指的那一段，时间索引里没有" error={filtered.error} />
         ) : (
@@ -429,17 +431,6 @@ function DetailView({data, name, month, week, onUpload}) {
             )}
           </>
         )}
-        </div>
-
-        <div className="col col--6">
-          {buckets.months.length > 0 ? (
-            <TimeIndex name={name} months={buckets.months} />
-          ) : (
-            <p className="ai-note-meta" data-time-index-empty="true">
-              还没有带录入时间的错题，所以时间索引空着。
-            </p>
-          )}
-        </div>
       </div>
     </section>
   );
