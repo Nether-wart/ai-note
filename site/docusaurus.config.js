@@ -50,6 +50,8 @@ const config = {
         {to: '/help', label: '怎么用', position: 'right'},
         // 录入单独一页（它自己带一个真的「上传」按钮；工作台仍是运行时组件）
         {to: '/intake', label: '录入', position: 'right'},
+        // 模型设置：MDX 外壳 ＋ 运行时表单（它要读写 /api/settings）
+        {to: '/settings', label: '设置', position: 'right'},
       ],
     },
   },

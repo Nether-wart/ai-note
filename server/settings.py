@@ -348,7 +348,8 @@ def public_view(catalog, env=None) -> tuple[dict, list]:
         "exists": path.exists(),
         "roles": roles,
         "providers": providers,
-        "applies": "立刻生效：服务每次模型调用前重读这个文件",
+        # API 只给**事实**，长句子归界面（§10.6 把取值钉成这一个）。
+        "applies": "立刻生效",
     }, warnings
 
 
