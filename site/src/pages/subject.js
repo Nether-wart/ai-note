@@ -459,10 +459,12 @@ function DetailView({data, name, month, week, onUpload}) {
  * 最近一个月的周索引由 `timeIndex` 挂在 `months[0].weeks` 上，所以只问它有没有，不另外算。
  */
 function TimeIndex({name, months}) {
+  // 月卡**占满这一栏**（`col--12`），不是 `col--3`：这一栏本身已经是全页的 1/4
+  //（右栏 `col--3`），再在里面按 1/4 分就是 80px 宽——字会被逐字换行（真踩过）。
   return (
     <div className="row" data-time-index="true">
       {months.map((bucket) => (
-        <div className="col col--3" key={bucket.key}>
+        <div className="col col--12" key={bucket.key}>
           <div className="card">
             <div className="card__body">
               <Link to={subjectUrl(name, 'detail', {month: bucket.key})} data-month-card={bucket.key}>
