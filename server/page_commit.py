@@ -43,10 +43,10 @@ spec #2 原文：「**入库**：按当前块列表生成题卡（每块一个�
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
+from . import cardstore
 from . import intake, page_edit, pages
 from .warnings import _warn
 
@@ -166,13 +166,8 @@ def _new_card(page: dict, block: dict, pid: str, at: str) -> dict:
 
 
 def _write_card(catalog, pid: str, card: dict) -> Path:
-    """原子地写一张新卡（先临时文件再替换，与 `pages.save_page` 同一条纪律）。"""
-    catalog.problems_dir.mkdir(parents=True, exist_ok=True)
-    path = catalog.problems_dir / f"{pid}.json"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    """写一张新卡——走 `cardstore`（"临时文件 + os.replace"与"路径只由 pid 算"只有一份实现）。"""
+    return cardstore.write_card(catalog, pid, card)
 
 
 def _readable_card(catalog, pid: str) -> tuple[dict | None, str | None]:

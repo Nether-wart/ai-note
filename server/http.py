@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import assets, brief, inbox as inbox_mod, subjects
+from . import problem_edit as problem_edit_module
 from . import settings as settings_module
 from .attempt import MAX_BODY_BYTES, AttemptEndpoint
 from .brief_client import HttpBrief
@@ -194,6 +195,25 @@ class Api:
         return Response(status=response.status, body=body, content_type=response.content_type,
                         headers={"Content-Length": str(len(body))})
 
+    def _problem_edit(self, pid: str, body, declared_length) -> Response:
+        """`PATCH /api/problem/<id>`（契约 §10.7）：改一张**已有**卡的属性。
+
+        可改的是一个闭集（`subject`／`topics`／`error_causes`／`review`）——题面与答案是
+        审核那条路的活，掌握与重做历史只能由重做/判定改。这次编辑**不许**成为绕过它们的后门。
+        """
+        self._reject_oversized_write(body, declared_length)
+        payload = _optional_json_object(body)
+        try:
+            result, warnings = problem_edit_module.apply_edit(
+                self.catalog, pid, payload, clock=self.catalog.clock)
+        except problem_edit_module.ProblemEditError as exc:
+            raise bad_request(exc.message, reason=exc.code, hint=exc.hint,
+                              **(exc.details or {})) from exc
+        if result is None:
+            raise not_found(f"没有这张题卡：{pid}",
+                            hint="属性编辑只对**已经有**的卡有效；id 取自索引")
+        return json_response(200, data=result, warnings=warnings)
+
     def _settings_route(self, method: str, body, declared_length) -> Response:
         """`GET`／`PUT /api/settings`（契约 §10.6）。
 
@@ -364,7 +384,11 @@ class Api:
         # 而不是掉进一个含糊的路由 404（契约 §5.1）。
         match = re.fullmatch(r"/api/problem/(?P<pid>.*)", path)
         if match:
-            self._require(method, "GET")
+            # `PATCH /api/problem/<id>`（§10.7）：改一张**已有**卡的属性。与 `GET` 同一条路径、
+            # 不同方法——所以 `allowed` 要把两个都报出来（用错方法要说清能用什么）。
+            if method == "PATCH":
+                return self._problem_edit(match.group("pid"), body, declared_length)
+            self._require(method, "GET", "PATCH")
             return json_response(200, data=self.catalog.problem_detail(match.group("pid")))
 
         for prefix, note in RESERVED.items():

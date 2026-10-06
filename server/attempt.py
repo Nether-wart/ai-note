@@ -25,10 +25,10 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 from pathlib import Path
 
+from . import cardstore
 from . import autojudge, judge, warnings as warnings_mod
 from .amend import AmendEndpoint
 from .autojudge import REASONS
@@ -153,12 +153,12 @@ class AttemptEndpoint:
     # ---------------------------------------------------------------- 回写
 
     def _write_card(self, pid: str, card: dict) -> Path:
-        """原子地写回**读进来的那个文件**（按 pid，不按卡里的 id——两者可能不一致）。"""
-        path = self.catalog.problems_dir / f"{pid}.json"
-        tmp = self.catalog.problems_dir / f"{pid}.json.tmp"
-        tmp.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-        return path
+        """写回**读进来的那个文件**——走 `cardstore`。
+
+        「路径只由 pid 算、内容不参与」那条规矩以前在这里与 `page_commit` 里**各有一份**，
+        再加属性编辑就是第三份。多份实现的代价是漂移，不是多敲几行字。
+        """
+        return cardstore.write_card(self.catalog, pid, card)
 
 
 # -------------------------------------------------------------------- 输入校验
