@@ -448,3 +448,24 @@
     max-width: none;
   }
 }
+
+/* 题卡属性编辑：`<details>` 收起时不占地方，展开后是一张紧凑的表单 */
+.ai-note-edit {
+  margin-top: var(--ifm-spacing-vertical);
+  padding: var(--ifm-spacing-vertical) var(--ifm-spacing-horizontal);
+  border: 1px solid var(--ai-note-border);
+  border-radius: var(--ifm-global-radius);
+}
+
+.ai-note-edit summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.ai-note-edit__drop {
+  border: 0;
+  background: none;
+  padding: 0 0 0 0.25rem;
+  cursor: pointer;
+  color: var(--ifm-color-emphasis-600);
+}

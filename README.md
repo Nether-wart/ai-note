@@ -66,6 +66,12 @@ node --test site/tests/ && node site/tests/selftest.mjs
 
 **人工验收清单**（起服务、从侧栏点到阅读页、哪些行为算红线）在 [`docs/walkthrough.md`](docs/walkthrough.md)。
 
+录入之后还能改**属性**（科目／考点／错因／审核状态）——阅读页的「编辑属性」（契约 §10.7；
+题面、答案、掌握与重做历史**不在那里改**，它们各有各的路）。整页照片另有一个**确定性预处理**
+工具 `python3 -m server.preprocess <in.png> <out.png>`（灰度 → 高斯 → 中值 → Otsu，**纯标准库**）：
+它**只能喂转录、绝不能喂切分**（二值化会把红笔的颜色信号抹掉），而且纯 Python 很慢，
+所以默认不接进任何主流程。详见 walkthrough §9。
+
 这一层的边界，一并说清：
 
 - **切分角色默认接上**（`main()` 注入 `HttpSegmenter`）：**没配密钥时 `POST /api/page` 是 502**，

@@ -9,7 +9,9 @@ import {parseProblemQuery} from '../lib/routes';
 import {formatMoment} from '../lib/time';
 import {useMounted} from '../lib/use-mounted';
 import FailurePanel from '../components/FailurePanel';
+import ProblemEdit from '../components/ProblemEdit';
 import RichText from '../components/RichText';
+import {useIndex} from '../components/Shell';
 
 /**
  * 阅读页：`/problem?pid=<题卡 id>`。**答案只在这一页出现**（spec #17 §5）。
@@ -33,6 +35,10 @@ export default function Problem() {
   );
   const {siteConfig} = useDocusaurusContext();
   const apiBase = siteConfig.customFields.apiBase;
+  // 科目词表从索引来（`/api/index` 已经带着它，不另开端点）；拿不到就退成"只有未归类"，
+  // 但**不编一份假的词表**——那会让人以为自己看到的选项就是全部。
+  const index = useIndex();
+  const subjects = index?.data?.subjects || null;
   const [state, setState] = useState({phase: 'loading', envelope: null, error: null});
   const [showOriginal, setShowOriginal] = useState(false);
 
@@ -79,6 +85,8 @@ export default function Problem() {
             apiBase={apiBase}
             showOriginal={showOriginal}
             onToggleOriginal={setShowOriginal}
+            subjects={subjects}
+            onReload={() => load(parsed.pid)}
           />
         ) : (
           <FailurePanel
@@ -95,7 +103,8 @@ export default function Problem() {
   );
 }
 
-function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal}) {
+function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal,
+                     subjects = null, onReload = null}) {
   const clean = problem.images?.clean || null;
   const original = problem.images?.original || null;
   const cleanUrl = assetUrl(apiBase, clean);
@@ -303,6 +312,11 @@ function ProblemBody({problem, envelope, apiBase, showOriginal, onToggleOriginal
           </ul>
         </details>
       )}
+      {/* 录入完还能改属性（§10.7）。默认**收起**：阅读页的主角是题，不是表单。 */}
+      <details className="ai-note-edit" data-problem-edit-toggle="true">
+        <summary>编辑属性（科目／考点／错因／审核状态）</summary>
+        <ProblemEdit problem={problem} apiBase={apiBase} subjects={subjects} onSaved={onReload} />
+      </details>
     </article>
   );
 }

@@ -10,15 +10,16 @@
 ## 0. 自动化的那几件（先跑，60 秒）
 
 ```bash
-python3 -m pytest -q                    # 全绿（727 passed, 2 skipped）
+python3 -m pytest -q                    # 全绿（787 passed, 2 skipped）
+python3 -m pytest server/tests/test_preprocess.py -q   # 预处理那 10 条：判据是手算得出来的
 ruff check server/                      # All checks passed!
 
 cd site
 npm_config_cache="$PWD/../.npm-cache" npm ci    # 有 lock 文件，用 ci 更可复现
-node --test tests/                      # 全绿（#7/#8/#14 的判据，加侧栏树与地址形状那 14 条）
+node --test tests/                      # 全绿（147 条：侧栏树／地址形状／时间索引／设置表单／属性编辑…）
 node tests/selftest.mjs                 # 退出码 0：四条不变量成立，且判据对坏夹具会响
 npm run build                           # 退出码 0
-ls build/index.html build/redo/index.html build/split/index.html
+ls build/index.html build/redo/index.html build/split/index.html build/settings/index.html build/intake/index.html
 grep -rl "p-2026" build/                # 必须为空
 ```
 
@@ -90,6 +91,12 @@ AI_NOTE_API=http://127.0.0.1:8765 npm run start -- --port 3000 --host 127.0.0.1
 - [ ] 正解与标准答案、原解与订正、考点与错因、掌握读数与重做历史都在。
       **答案是这一页该出现的东西**——而首页总览、细则、今日重做都不许印它。
 - [ ] 地址里没有 `pid`（或给了空的）→ **明确失败**（`pid_missing`），**绝不**落到某一道题。
+- [ ] 展开「编辑属性」（§10.7）：科目下拉是**词表那几科 ＋ 未归类**；考点／错因能加能删；
+      审核状态能来回切。**没改动时「保存属性」是禁用的**——不让人按下去再收到一句"什么都没改"。
+- [ ] 改一次科目 → 保存 → 页面上科目变了，**并且回首页总览看那一科的读数也变了**
+      （索引是按需重算的，不用重建）。
+- [ ] 在错因里填一个词表外的值 → 保存 → **400 且把服务那句话原样显示出来（连可选值一起）**；
+      再看那张卡：**一个字节都没变**（拒绝时不留半截）。
 
 ## 5. 录入：全屏工作台（首页或细则上的「上传」按钮；`/split?page=<页 id>` 是改已有的一页）
 
@@ -138,6 +145,25 @@ python3 -m server.app --data data --host 0.0.0.0 --port 8765 \
 - [ ] **一条连带的后果要主动验**：切分角色默认是接上的（`main()` 注入），所以**没有密钥时
       `POST /api/page` 是 502，不会退回手动画框**。想走手动画框那条路，要么配密钥，
       要么显式用 `build_server(..., segmenter=None)` 起服务——那时页照建、`blocks` 是 `null`。
+
+## 9. 图片预处理（可选工具，`server/preprocess.py`）
+
+灰度 → 高斯 5×5 → 中值 3×3 → Otsu 二值化。**纯标准库**（`server/` 零第三方依赖），
+像素进出复用 `server/ink.py`。来历：`origin/master` 上那份 `图像预处理.py` 用 OpenCV 做同一套事
+（它另外半段是云端 OCR 客户端，**没有合进来**——那是一个新角色，该走模型客户端那条缝）。
+
+```bash
+python3 -m server.preprocess <in.png> <out.png> [--roi-center] [--scale N]
+```
+
+- [ ] 拿一张真实整页照片跑一次，输出**只含黑白**、尺寸不变（`--roi-center` 时是中央一半）。
+- [ ] **两条硬约束都要当真**：
+      ① **绝不能拿它的输出去喂切分**——二值化把颜色抹成黑白，而"这题有没有红笔"靠的正是颜色
+      （`ink.py` 的饱和度掩膜）；它只能喂**转录**。
+      ② **纯 Python 很慢**：实测 4800 像素 0.04s，千万像素量级约几十秒。
+      所以它**默认不接进任何主流程**，`--scale` 是留给你的取舍（快，但细节少）。
+- [ ] **它现在还没接线**：没有任何路径会自动调用它。要接，得先决定"二值图送到哪一步"
+      （答案只能是转录，见上）。
       两种行为都要亲眼见到一次，因为它们看起来像同一件事的两个说法。
 - [ ] 配了 key 之后才谈**模型验收**：
 
