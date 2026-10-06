@@ -67,18 +67,18 @@ def _vocab_error_causes(catalog) -> tuple[list | None, list]:
 def _check_string_list(field: str, value) -> list:
     if not isinstance(value, list):
         raise ProblemEditError(
-            "problem_field_not_editable",
+            "bad_request",
             f"{field} 得是一个字符串列表，拿到的是 {type(value).__name__}",
             hint=f"给 `{field}: [\"…\"]`；要清空就给空列表",
-            details={"field": field, "allowed": list(EDITABLE)},
+            details={"param": field, "value": repr(value)[:80], "allowed": ["字符串列表"]},
         )
     cleaned = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ProblemEditError(
-                "problem_field_not_editable",
+                "bad_request",
                 f"{field} 里有一项不是非空字符串：{item!r}",
-                details={"field": field},
+                details={"param": field, "value": repr(item)[:80], "allowed": ["非空字符串"]},
             )
         cleaned.append(item.strip())
     # 去重但**保序**：顺序是用户给的语义（先想到的排前面），不是随便排的集合
@@ -92,10 +92,10 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
     """
     if not isinstance(payload, dict) or not payload:
         raise ProblemEditError(
-            "problem_field_not_editable",
+            "bad_request",
             "这一次请求没有要改的字段",
             hint=f"至少要给一项：{', '.join(EDITABLE)}",
-            details={"allowed": list(EDITABLE)},
+            details={"param": "body", "allowed": list(EDITABLE)},
         )
 
     for field in payload:
@@ -105,7 +105,7 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
                 f"{field} 不是可以改的属性",
                 hint=("题面与答案是审核那条路的活，掌握与重做历史只能由重做/判定改；"
                       f"属性编辑只认：{', '.join(EDITABLE)}"),
-                details={"field": field, "allowed": list(EDITABLE)},
+                details={"param": field, "allowed": list(EDITABLE)},
             )
 
     card = read_card(catalog, pid)
@@ -118,9 +118,11 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
     if "subject" in payload:
         subject = payload["subject"]
         if subject is not None and not isinstance(subject, str):
-            raise ProblemEditError("subject_unknown",
+            raise ProblemEditError("bad_request",
                                    f"subject 得是字符串或 null，拿到的是 {type(subject).__name__}",
-                                   details={"allowed": []})
+                                   details={"param": "subject",
+                                            "value": repr(subject)[:80],
+                                            "allowed": ["字符串", "null（未归类）"]})
         if isinstance(subject, str):
             subject = subject.strip()
             from . import subjects as subjects_module
@@ -130,7 +132,7 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
                 raise ProblemEditError(
                     "subject_unknown", f"科目 {subject!r} 不在受控词表里",
                     hint="先把它加进 <数据目录>/vocab/subjects.json；或给 null 表示未归类",
-                    details={"value": subject, "allowed": known},
+                    details={"param": "subject", "value": subject, "allowed": known},
                 )
             if not vocabulary.get("loaded"):
                 warnings.extend(vocab_warnings)
@@ -150,7 +152,7 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
                     "error_cause_unknown",
                     f"错因不在受控词表里：{', '.join(unknown)}",
                     hint=f"可选：{'、'.join(allowed)}",
-                    details={"unknown": unknown, "allowed": allowed},
+                    details={"param": "error_causes", "unknown": unknown, "allowed": allowed},
                 )
         wanted["error_causes"] = causes
 
@@ -158,10 +160,11 @@ def apply_edit(catalog, pid: str, payload: dict, *, clock):
         review = payload["review"]
         if review not in REVIEW_STATES:
             raise ProblemEditError(
-                "problem_field_not_editable",
+                "bad_request",
                 f"review 只认 {', '.join(REVIEW_STATES)}，拿到的是 {review!r}",
                 hint="卡上的 review 是一个对象；界面只给字符串，落地由服务负责",
-                details={"field": "review", "allowed": list(REVIEW_STATES)},
+                details={"param": "review", "value": repr(review)[:80],
+                         "allowed": list(REVIEW_STATES)},
             )
         wanted["review"] = review
 

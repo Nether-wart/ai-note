@@ -426,3 +426,40 @@ def test_a_real_socket_can_read_a_page_not_only_patch_it(tmp_path):
             assert exc.code == 405
             allowed = json.loads(exc.read())["error"]["details"]["allowed"]
             assert "GET" in allowed and "PATCH" in allowed, allowed
+
+
+def test_real_server_accepts_patch_and_refuses_a_traversal_pid(tmp_path):
+    """`PATCH /api/problem/<id>` 必须**真的**接在 socket 上，而且非法 id 要在碰文件系统之前被拦住。
+
+    两件事都记过账：① §11 记过两次「路由只活在纯函数接缝里」——`do_PATCH` 缺席时框架会拿
+    501 + text/html 回答，而纯函数接缝上一切正常；② 这条路由**实测**被穿越过一次
+    （`..%2Fproblems%2F<p-另一个 id>` 返回 200、真改了那张卡）。
+    """
+    from server.app import serve
+
+    root = make_data_dir(tmp_path, [make_card(PID, subject="数学")])
+    victim = root / "problems" / f"{PID}.json"
+
+    def patch(url: str, payload: dict):
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="PATCH")
+        return urllib.request.urlopen(request)
+
+    with serve(root, port=0) as base_url:
+        # ① 真 socket 上改一次：改了、也落盘了
+        with patch(f"{base_url}/api/problem/{PID}", {"subject": "物理"}) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["data"]["changed"] == ["subject"]
+        assert json.loads(victim.read_text(encoding="utf-8"))["subject"] == "物理"
+
+        # ② 穿越的 id：400，而且那个文件**一个字节都不许动**
+        try:
+            patch(f"{base_url}/api/problem/..%2Fproblems%2F{PID}", {"subject": "化学"})
+            raise AssertionError("穿越的 id 居然被接受了")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            envelope = json.loads(exc.read())
+            assert envelope["error"]["code"] == "bad_request"
+            assert envelope["error"]["details"]["param"] == "pid"
+        assert json.loads(victim.read_text(encoding="utf-8"))["subject"] == "物理", "被改了"

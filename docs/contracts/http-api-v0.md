@@ -22,13 +22,15 @@
 | 有 | `GET /upload`（后端托管的**单文件**手机上传页）、`POST /api/inbox`（往收件目录放文件）、`POST /api/inbox/scan`（目录监视失效时的手动等价入口）——#13，见 §10.3 |
 | 有 | `GET /api/brief/<科目>` 与 `POST /api/brief/<科目>`（**本版（前端重构 / #17）新增**）：读该科目最近一份简报、按需生成一份。生成走 `brief` 角色，且必须先过**数字闸门**（每个数字都要能在索引里逐字找回），见 §10.5 |
 | 有 | `GET /api/settings` 与 `PUT /api/settings`（**本版（模型设置）新增**）：读／整体替换**模型设置**（`<数据目录>/settings.json`）。读的是**生效值 ＋ 来源**（`settings`／`env`／`default`）；写盘前先拿候选设置跑一遍**四个角色**（`extract`／`segmenter`／`judge`／`brief`）的配置解析（坏了 → 400、一个字节都不写）；密钥**永不回显**（只给 `set` 与末四位）；`api_key` 省略或空串＝不改动这一项。见 §10.6 |
+| 有 | `PATCH /api/problem/<id>`（**本版（题卡属性编辑）新增**）：改一张**已有**题卡的**属性**——可改的是一个**闭集**（`subject`／`topics`／`error_causes`／`review`），其余字段一律 400；回执给**改完之后的整张卡** ＋ `changed`；`/api/index` 每次请求现算，所以改完**不用重建索引**。见 §10.7 |
 | 有 | 每个响应带 `warnings[]`，以及「我跳过了什么」的 `skipped[]`（ADR 0007 第 6 条：不许静默） |
 | 有 | 屏幕重做的硬闸门读数（有擦除图 **且** 可自动判定）与「另有 N/M 道进不来」的两个显式数字（§6.1） |
 | 有 | 「这道题能不能走自动判定」的**唯一一份**实现（三拒绝理由，见 §6）——#5 直接复用，不许另写 |
-| 无 | 改已有题卡的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态：**屏幕重做**（#5）与**定点修正**（#6），形状见 §10.1；纸上重做（`channel:"paper"`）仍未实现。`POST /api/inbox*` 只往收件目录放**新**文件（#13），它不改任何题卡／资产／索引 |
+| 无 | 改已有题卡**内容与重做历史**的写端点只有 `POST /api/attempt/<pid>` 一个入口，现有两种形态：**屏幕重做**（#5）与**定点修正**（#6），形状见 §10.1；纸上重做（`channel:"paper"`）仍未实现。**本版（题卡属性编辑）新增的 `PATCH /api/problem/<id>` 改的是属性**（科目／考点／错因／审核状态，§10.7），不是这两样。`POST /api/inbox*` 只往收件目录放**新**文件（#13），它不改任何题卡／资产／索引 |
 | 无 | **渲染页面**。ADR 0007 第 2 条把两件事分开说：后端**不负责渲染**（不做模板、不管界面状态），但它**托管静态资源**（手机上传页、图片、前端产物）——**托管文件不是渲染**。所以 v0 出 JSON 与静态图片字节，并托管那个单文件的手机上传页（§10.3）：页面里没有任何服务端注入的值，请求一律走同源相对路径 |
 | 无 | 索引落盘。v0 每次请求**现算**（索引是派生数据，ADR 0001）；写盘归写端点 |
 | 无 | 设置页的**「测试连接」**（拿候选设置真去打一次模型）：**不在本版**。本版只有 `GET`／`PUT /api/settings` 两个端点，两个都**不发起任何模型调用**（§10.6）——「这把钥匙能不能用」在本版得不到回答，那是调用那一刻的事 |
+| 无 | **改题面／答案**与**删卡**（**本版（题卡属性编辑）不做的部分**）：题面、原答、订正、正解、标准答案是**审核**那条路的活；重做历史与掌握只能由重做／判定那条路改。`PATCH /api/problem/<id>` 只改属性，**不是绕过它们的后门**，也不删卡（§10.7） |
 
 术语一律照 `CONTEXT.md`（**题卡**、**掌握**、**冷却**、**判定**、**看不清**、**默认打印清单**、
 **自动判定**、**未审核**、**原答**、**订正**）。本文件不发明新词。
@@ -322,7 +324,7 @@
 |---|---|---|---|
 | `id` | str | `id` | |
 | `created_at` | str | `created_at` | 录入时刻 |
-| `subject` （**本版（前端重构 / #17）新增**） | str \| null | `subject`（**题卡顶层字段**） | 这道题的**科目**，取自受控词表 `<数据目录>/vocab/subjects.json`（§10.4）；`null` 表示**未归类**——那是一等状态，不是缺字段。缺字段／空串／纯空白一律算未归类。值是记录的原值：不在词表里也**不许静默改写成 `null`**，只报 `subject_unknown`（§8） |
+| `subject` （**本版（前端重构 / #17）新增**） | str \| null | `subject`（**题卡顶层字段**） | 这道题的**科目**，取自受控词表 `<数据目录>/vocab/subjects.json`（§10.4）；`null` 表示**未归类**——那是一等状态，不是缺字段。缺字段／空串／纯空白一律算未归类。值是记录的原值：不在词表里也**不许静默改写成 `null`**，只报 `subject_unknown`（§8）。**可改**（§10.7：`string` 或 `null`） |
 | `type` | `"choice"` \| `"fillin"` \| `"solution"` | `problem.type` | **题型枚举就是这三个英文词**。写中文键会静默退回默认值——这个坑真踩过 |
 | `type_cn` | str | 派生 | 选择 / 填空 / 解答 |
 | `transcript` | str | `problem.transcript` | 题面转录 |
@@ -333,10 +335,10 @@
 | `present` | bool \| null | `original_solution.present` | 有没有手写原解 |
 | `standard_answer` | str \| null | `standard_answer.value` | **标准答案**，自动判定的唯一基准 |
 | `correct_solution` | str \| null | `correct_solution.text` | **正解** |
-| `topics` | str[] | `topics` | 考点（大纲叶子路径） |
-| `error_causes` | str[] | `error_causes` | 错因 |
+| `topics` | str[] | `topics` | 考点（大纲叶子路径）。**可改**（§10.7：只在形状上验，不复核大纲里有没有那一节） |
+| `error_causes` | str[] | `error_causes` | 错因。**可改**（§10.7：取值必须在错因词表里） |
 | `new_tag_proposals` | str[] | `new_tag_proposals` | 待批的新标签提案 |
-| `review` | `"reviewed"` \| `"unreviewed"` | `review.status` | |
+| `review` | `"reviewed"` \| `"unreviewed"` | `review.status` | **可改**（§10.7：界面只给字符串，服务把它落成对象） |
 | `reviewed_at` | str \| null | `review.reviewed_at` | |
 | `review_reopened_because` | str \| null | `review.reopened_because` | 被自动修复打回重新确认的原因。不许静默：**打回过就必须看得见** |
 | `mastery` | `{state,streak,last_attempt_at}` | `mastery` | 状态机原始读数 |
@@ -359,6 +361,11 @@
 | `auto_judge` | `{eligible,reason,reason_text}` | 派生 | 能不能走自动判定（§6） |
 | `screen_redo` | `{ready,blockers,blocker_text}` | 派生 | 能不能进**屏幕重做**（§6.1）。两条硬闸门：有擦除图 **且** 通过自动判定。`blockers` 是**全部**原因，不是第一个 |
 | `warnings` | Warning[] | 派生 | 这张卡自己的自检结果（码表见 §8，形状见 §2） |
+
+**哪些字段能改，见 §10.7**（**本版（题卡属性编辑）新增**）：可改的只有 `subject`／`topics`／
+`error_causes`／`review` 四项（上表里已逐条标出）；**其余每一个字段出现就是 400**
+（`problem_field_not_editable` ＋ `details.allowed` ＝那四项）。这张表是**读数**的形状，
+**不是**可写字段的清单——读得到的字段远多于改得到的字段，这是有意的。
 
 ### 3.2 Attempt（重做记录，摘要形态）
 
@@ -706,6 +713,18 @@ ADR 0006「服务只出 **JSON 与静态图片**」，ADR 0007 第 2 条把「�
 （`server/subjects.py: load` 的 `loaded` 就是这道闸）；按 mtime 记住上一次的结果，文件一动就重读
 ——既不为一千张卡读两千次盘，也不会悄悄一直用旧词表。
 
+**错因词表（本版（题卡属性编辑）新增）**——`<数据目录>/vocab/error-causes.json`
+（`{"错因": […]}`，与 `subjects.json` **同形**，§10.4）。它只有**一个**读者：
+`PATCH /api/problem/<id>` 的 `error_causes` 校验（§10.7）。口径与科目词表**逐字一致**——
+**词表不在不是拒绝的理由**：先收下、再喊。一声不响地按自由文本放行，等于把一个受控词表
+降级成自由文本而没人知道（`CONTEXT.md`「受控词表」：AI 不得自造标签）。形状走 §2 的 `Warning`，
+`level: "warning"`，`id` 为 `null`：
+
+| `code` | `level` | 触发 | 为什么值得单独响 |
+|---|---|---|---|
+| `error_causes_vocab_missing` | `warning` | 没有这个文件 | 词表缺席期间收下的错因**一次都没校验过**；错因是本子最常用的检索维度之一，这件事必须看得见 |
+| `error_causes_vocab_unreadable` | `warning` | 文件在却读不了（JSON 解析失败、「错因」不是列表），`message` 带异常原话 | 「词表坏了」与「还没建词表」必须分得开（与 `subjects_vocab_unreadable` 同一条理由）。**两条都不新造第三个名字**，也都不重复到每张卡上 |
+
 收件目录（#13；出现在 §10.3 那两个端点的 `warnings` 里）：
 
 | `code` | `level` | 触发 | `message` |
@@ -926,10 +945,26 @@ M 必须**每页都报**（M＝0 也报），绝不许静默丢题——这是 s
 要删的块已经绑了题卡（`block_delete_bound_to_card`，**本版（前端重构 / #17）新增**，
 `details` 带 `card_id`——那张卡已经存在，删块会造出孤儿绑定，要「不要它」只能用 `drop`）；
 科目不在受控词表里（`subject_unknown`，本版（前端重构 / #17）新增，`details` 给
-`{param:"subject", value, allowed}`）。**它与 §8 逐卡表那条警告同名**，因为**是同一个事实**
+`{param:"subject", value, allowed}`；**本版（题卡属性编辑）的 `PATCH /api/problem/<id>`
+走的是同一个名字**——§10.7 指认这里，不造第二个名字）。
+**它与 §8 逐卡表那条警告同名**，因为**是同一个事实**
 （这个值不在受控词表里），只是层次不同：这里是**拒绝一次输入**（400），那里是**自检一份已有数据**
 （`warning`）。R2/R9 裁过「同一个事实两个码会让界面出现两种说法、让按码统计永远对不上」，
 所以名字必须一样；**码表分开是应该的**（错误进 §9、警告进 §8），两处各指认对方。
+错因不在受控词表里（`error_cause_unknown`，**本版（题卡属性编辑）新增**，`details` 给
+`{param:"error_causes", unknown:[…], allowed:[…]}`——一次可以有好几个不在表里，所以给的是
+`unknown` **列表**而不是单个 `value`；§10.7）；
+字段不在**可改闭集**里（`problem_field_not_editable`，**本版（题卡属性编辑）新增**，`details` 给
+`{param, value, allowed:["subject","topics","error_causes","review"]}`——「掌握与重做历史只能由
+重做／判定那条路改、题面与答案是审核那条路的活」这条纪律的**门口**，理由见 §10.7）。
+**值的形状不对**（`topics`／`error_causes` 不是字符串列表、`review` 不在那两个取值里、
+非 `subject` 的字段给了 `null`、请求体不是 JSON 对象、一个可改字段都没给）**不借上面那三个
+名字**：它是那颗**没有更细原因**的 `bad_request`（`reason == "bad_request"`，§2 那条
+「没有更细的原因时 `reason == code`」），`details` 照样点名参数、值、允许什么——
+与 §10.1 的 `channel`／`verdict` 取值非法同一档。理由：`problem_field_not_editable` 说的是
+「**这个字段不归这条路管**」，不是「你给的值形状不对」；两个意思合成一个码，
+界面就分不出「改不了」与「改错了」（R2/R9 那条「同一个事实一个码」的反面：
+**不同的事实不许借同一个码**）。
 
 **写端点 body 的显式上限（64 KiB）**：`POST /api/attempt/*` 的 body 合法形状只有
 `{channel, answer}`（或定点修正那三个键），所以上限远小于上传那一档——

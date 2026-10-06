@@ -14,12 +14,35 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+
+from .catalog import ID_PATTERN
+
+
+class IllegalCardId(Exception):
+    """不是合法的题卡 id。**在任何碰文件系统的动作之前**就该被拦住。"""
+
+
+def check_pid(pid: str) -> str:
+    """id 只认 `catalog.ID_PATTERN`（与 §1 的 id 类参数同一条规则）。
+
+    这一道门必须在这里：它是"路径由谁算"的唯一实现，而**写盘穿越**正是绕过它来的。
+    §8 那两条（`page_id_mismatch`／`page_image_unsafe`）与「内容不许决定写到哪」
+    说的是同一件事：**id 决定了写到哪，所以它必须先过关**。
+    """
+    if not isinstance(pid, str) or not re.fullmatch(ID_PATTERN, pid or ""):
+        raise IllegalCardId(pid)
+    return pid
 
 
 def card_path(catalog, pid: str) -> Path:
-    """`<数据目录>/problems/<pid>.json`。**只用 pid**。"""
-    return Path(catalog.problems_dir) / f"{pid}.json"
+    """`<数据目录>/problems/<pid>.json`。**只用 pid**，且 pid 先过 `check_pid`。
+
+    以前这里直接拼字符串，于是 `..%2Fproblems%2F<p-另一个 id>` 这种 pid 能改到**别的文件**
+    （实测过：`PATCH` 返回 200、卡真被改了）。`..` 落进路径就是"内容决定写到哪"。
+    """
+    return Path(catalog.problems_dir) / f"{check_pid(pid)}.json"
 
 
 def read_card(catalog, pid: str) -> dict | None:

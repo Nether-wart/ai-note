@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import assets, brief, inbox as inbox_mod, subjects
+from . import cardstore
 from . import problem_edit as problem_edit_module
 from . import settings as settings_module
 from .attempt import MAX_BODY_BYTES, AttemptEndpoint
@@ -202,6 +203,18 @@ class Api:
         审核那条路的活，掌握与重做历史只能由重做/判定改。这次编辑**不许**成为绕过它们的后门。
         """
         self._reject_oversized_write(body, declared_length)
+        # **先判 id 再碰文件系统**（§1：id 类参数只认那个字符集）。不判的话
+        # `..%2Fproblems%2F<p-另一个 id>` 会改到别的文件——实测过，返回的还是 200。
+        # 口径：**id 非法 → 400；id 合法但卡不在 → 404**（"你写的不是 id"与"这张卡没有"
+        # 是两件事，处置也不同）。
+        try:
+            cardstore.check_pid(pid)
+        except cardstore.IllegalCardId as exc:
+            raise bad_request(
+                f"这不像一个题卡 id：{pid!r}",
+                hint="题卡 id 的字符集见契约 §1；它取自索引，不要自己拼",
+                param="pid", value=pid, allowed=["^[A-Za-z0-9][A-Za-z0-9._-]*$（且不含 `..`）"],
+            ) from exc
         payload = _optional_json_object(body)
         try:
             result, warnings = problem_edit_module.apply_edit(
