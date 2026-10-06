@@ -419,6 +419,7 @@ samples/         真实照片样例（已在 .gitignore 中）
 | [`docs/contracts/http-api-v0.md`](docs/contracts/http-api-v0.md) | 界面与后端之间的契约 v0：端点、错误信封、字段形状 |
 | [`docs/README.md`](docs/README.md) | 文档索引：这些文档该按什么顺序读 |
 | [`docs/walkthrough.md`](docs/walkthrough.md) | 人工验收清单：起服务、点完三个页面、哪些行为算红线 |
+| [`docs/model-endpoints.md`](docs/model-endpoints.md) | 模型端点怎么配（预设／自定义／免费转发）、够不够格的可执行清单、数学卷子哪一步能交给文字模型 |
 | [`docs/acceptance-log.md`](docs/acceptance-log.md) | 模型验收记录（十轮，含方法论与量化读数） |
 | [`docs/decision-review.md`](docs/decision-review.md) | 决定复核清单与五个漏洞 |
 | [`docs/specs/page-segmentation.md`](docs/specs/page-segmentation.md) | 整页切分规格（正文在 issue #2） |
